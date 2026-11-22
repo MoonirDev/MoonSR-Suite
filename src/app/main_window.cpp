@@ -254,6 +254,13 @@ TestOptions ParseTestOptions() {
         else if (a == L"--test-order") t.order = next();
         else if (a == L"--test-close-to-tray") t.closeToTray = _wtoi(next().c_str()) != 0 ? 1 : 0;
         else if (a == L"--test-scaler") t.scaler = next();
+        else if (a == L"--test-effects") t.effects = _wtoi(next().c_str()) != 0 ? 1 : 0;
+        else if (a == L"--test-scroll") t.scroll = std::max(0, _wtoi(next().c_str()));
+        else if (a == L"--test-themes-dir") t.themesDir = next();
+        else if (a == L"--test-wheel") {
+            const std::wstring v = next();
+            if (swscanf_s(v.c_str(), L"%d,%d,%d", &t.wheelX, &t.wheelY, &t.wheelNotches) == 3) t.wheel = true;
+        }
         else if (a == L"--test-drag") {
             const std::wstring v = next();
             if (swscanf_s(v.c_str(), L"%d,%d,%d,%d", &t.dragX1, &t.dragY1, &t.dragX2, &t.dragY2) == 4) t.drag = true;
@@ -390,8 +397,13 @@ LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCPAINT:
         break;
     case WM_SIZE:
+        // Minimised: no animation or blink timers; they resume when the window is shown again.
+        view_.SetShown(wp != SIZE_MINIMIZED && IsWindowVisible(hwnd_));
         if (wp != SIZE_MINIMIZED) view_.OnSize();
         return 0;
+    case WM_SHOWWINDOW:
+        view_.SetShown(wp != 0 && !IsIconic(hwnd_));
+        break;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         const SIZE s = OuterSizeForClientDips(static_cast<int>(ui::metric::kMinClientWidth),
@@ -450,7 +462,8 @@ LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
         OnDpiChanged(static_cast<int>(HIWORD(wp)), reinterpret_cast<const RECT*>(lp));
         return 0;
     case WM_SETTINGCHANGE:
-        if (lp && wcscmp(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet") == 0) ApplyTheme();
+        if (lp && wcscmp(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet") == 0) ApplyTheme();  // also transparency
+        else ApplyEffects(false);  // e.g. SPI_SETCLIENTAREAANIMATION (Windows "Animation effects")
         break;
     case WM_DWMCOLORIZATIONCOLORCHANGED:
     case WM_THEMECHANGED:
@@ -565,7 +578,7 @@ bool PickThemeSavePath(HWND owner, const std::wstring& suggested, std::wstring& 
 }  // namespace
 
 void MainWindow::ApplyTheme() {
-    if (!themes_) themes_ = std::make_unique<ui::ThemeCatalog>(ThemesDirectory());
+    if (!themes_) themes_ = std::make_unique<ui::ThemeCatalog>(test_.themesDir.empty() ? ThemesDirectory() : test_.themesDir);
     const std::wstring want = !test_.theme.empty() ? test_.theme : themeKey_;
     const ui::ThemeEntry* entry = themes_->Find(want);
     if (!entry) {
@@ -587,6 +600,44 @@ void MainWindow::ApplyTheme() {
     DwmSetWindowAttribute(hwnd_, 35, &cap, sizeof(cap));
     DwmSetWindowAttribute(hwnd_, 36, &txt, sizeof(txt));
     DwmSetWindowAttribute(hwnd_, 34, &border, sizeof(border));
+    ApplyEffects(true);  // the backdrop and the effects depend on the theme
+}
+
+bool MainWindow::EffectsWanted() const {
+    if (test_.effects >= 0) return test_.effects != 0;
+    return effectsSetting_;
+}
+
+// Windows "Animation effects" (SPI_GETCLIENTAREAANIMATION) and "Transparency effects" (Personalize\EnableTransparency).
+bool MainWindow::SystemEffectsAllowed() {
+    BOOL anim = TRUE;
+    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0)) anim = TRUE;
+    DWORD transparency = 1, size = sizeof(transparency);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"EnableTransparency",
+                     RRF_RT_REG_DWORD, nullptr, &transparency, &size) != ERROR_SUCCESS)
+        transparency = 1;
+    return anim != FALSE && transparency != 0;
+}
+
+void MainWindow::ApplyEffects(bool force) {
+    // --test-effects 1 forces the effects on even when Windows has them off (screenshots on machines with effects off).
+    const bool system = SystemEffectsAllowed() || test_.effects == 1;
+    const bool on = EffectsWanted() && system;
+    if (ui_.visualEffectsRow) {
+        const std::wstring desc = EffectsWanted() && !system
+                                      ? L"Off while Windows animation or transparency effects are turned off."
+                                      : L"Transparency, glow and animations. Turn off for a plain look or on slower PCs.";
+        if (ui_.visualEffectsRow->desc != desc) {
+            ui_.visualEffectsRow->desc = desc;
+            view_.Invalidate();
+        }
+    }
+    if (!force && effectsApplied_ == (on ? 1 : 0)) return;
+    effectsApplied_ = on ? 1 : 0;
+    view_.SetEffects(on);
+    if (hwnd_) SetupBackdrop();
+    MSR_LOG_INFO(L"Visual effects: {} (setting {}, Windows effects {})", on ? L"on" : L"off", EffectsWanted() ? L"on" : L"off",
+                 system ? L"on" : L"off");
 }
 
 void MainWindow::RefreshThemes() {
@@ -692,17 +743,31 @@ void MainWindow::ConfirmRemoveTheme(const std::wstring& key) {
     view_.ShowDialog(std::move(spec));
 }
 
+// System backdrop behind the client area: Mica for the Fluent themes, Acrylic (a slightly translucent console) for the
+// console themes, none for themes with their own solid background or with visual effects off. Windows 11 22H2+ only;
+// elsewhere (or if DWM refuses) the window is drawn with its solid colours.
 void MainWindow::SetupBackdrop() {
+    const ui::Palette& pal = view_.palette();
+    const bool effects = view_.effects();
+    int type = 1;  // DWMSBT_NONE
+    if (effects && pal.backdrop == ui::Backdrop::Mica && !pal.opaqueBg) type = 2;  // DWMSBT_MAINWINDOW (Mica)
+    if (effects && pal.backdrop == ui::Backdrop::Acrylic) type = 3;                  // DWMSBT_TRANSIENTWINDOW (Acrylic)
+    if (test_.noMica) type = 1;
+    const bool wasMica = mica_;
     mica_ = false;
-    if (!test_.noMica && SupportsMica()) {
-        const int backdrop = 2;  // DWMSBT_MAINWINDOW (Mica)
-        if (SUCCEEDED(DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop)))) {
+    if (SupportsMica()) {
+        if (SUCCEEDED(DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type))) && type != 1) {
             const MARGINS m{-1, -1, -1, -1};
             mica_ = SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd_, &m));
         }
+        if (!mica_) {
+            const MARGINS none{0, 0, 0, 0};
+            DwmExtendFrameIntoClientArea(hwnd_, &none);
+        }
     }
     view_.SetMica(mica_);
-    MSR_LOG_INFO(L"UI backdrop: {}", mica_ ? L"Mica" : L"solid colour");
+    if (wasMica != mica_ || type != 1)
+        MSR_LOG_INFO(L"UI backdrop: {}", !mica_ ? L"solid colour" : type == 3 ? L"Acrylic" : L"Mica");
 }
 
 void MainWindow::ApplyDpiAndSize(const RECT* suggested) {
@@ -753,8 +818,8 @@ void MainWindow::OnCreate() {
     dpi_ = CurrentDpi();
     view_.Attach(hwnd_, dpi_);
     themeKey_ = settings_.theme.empty() ? std::wstring(L"dark") : settings_.theme;
-    ApplyTheme();
-    SetupBackdrop();
+    effectsSetting_ = settings_.visualEffects;
+    ApplyTheme();  // also applies the visual effects and the backdrop
 
     PopulateWindows();
     PopulateMonitors();
@@ -819,6 +884,12 @@ void MainWindow::WireHandlers() {
     ui_.refresh->onChange = [this] { PopulateWindows(); };
     ui_.record->onChange = [this] { StartRecording(); };
     ui_.themePicker->onChange = [this] { OnThemeChosen(); };
+    ui_.visualEffects->onChange = [this] {
+        effectsSetting_ = ui_.visualEffects->checked();
+        if (test_.effects >= 0) test_.effects = -1;  // an explicit choice wins over --test-effects
+        ApplyEffects(false);
+        SaveNow();
+    };
     ui_.themePicker->onRemove = [this](const std::wstring& key) { ConfirmRemoveTheme(key); };
     ui_.importTheme->onChange = [this] { OnImportTheme(); };
     ui_.exportTheme->onChange = [this] { OnExportTheme(); };
@@ -993,6 +1064,7 @@ void MainWindow::ApplySettingsToUi() {
     ui_.vsync->SetChecked(settings_.vsync);
     ui_.cursor->SetChecked(settings_.showCursor);
     ui_.closeToTray->SetChecked(settings_.closeToTray);
+    ui_.visualEffects->SetChecked(settings_.visualEffects);
     ui_.counter->SetChecked(settings_.showFrameCounter);
     ui_.upscaling->SetChecked(settings_.upscaling);
 
@@ -1083,6 +1155,7 @@ AppSettings MainWindow::CaptureSettings() const {
     s.vsync = ui_.vsync->checked();
     s.showCursor = ui_.cursor->checked();
     s.closeToTray = ui_.closeToTray->checked();
+    s.visualEffects = ui_.visualEffects->checked();
     s.theme = themeKey_;
     s.showFrameCounter = ui_.counter->checked();
     s.upscaling = ui_.upscaling->checked();
@@ -1153,6 +1226,8 @@ void MainWindow::SaveNow() {
 void MainWindow::OnTimer(UINT_PTR id) {
     if (id == ui::View::kAnimTimerId) {
         view_.OnAnimTimer();
+    } else if (id == ui::View::kBlinkTimerId) {
+        view_.OnBlinkTimer();
     } else if (id == IDT_NEURAL_RESOLUTION) {
         SubmitNeuralSettings();
     } else if (id == IDT_POLL) {
@@ -1306,6 +1381,7 @@ void MainWindow::HideToTray() {
     }
     trayIconShown_ = true;
     ShowWindow(hwnd_, SW_HIDE);
+    view_.SetShown(false);  // no animation or blink timers while hidden
     MSR_LOG_INFO(L"Window hidden to the notification area");
 }
 
@@ -1315,6 +1391,7 @@ void MainWindow::RestoreFromTray() {
         MSR_LOG_INFO(L"Window restored from the notification area");
     }
     ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    view_.SetShown(!IsIconic(hwnd_));
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
     SetForegroundWindow(hwnd_);
 }
@@ -1878,6 +1955,8 @@ void MainWindow::ApplyTestOptionsLate() {
         view_.OnMouseDown(px(test_.dragX1), px(test_.dragY1));
         SendMessageW(hwnd_, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(px(test_.dragX2), px(test_.dragY2)));
     }
+    if (test_.scroll >= 0) view_.TestScroll(static_cast<float>(test_.scroll));
+    if (test_.wheel) view_.TestWheel(static_cast<float>(test_.wheelX), static_cast<float>(test_.wheelY), static_cast<float>(test_.wheelNotches));
     if (test_.hoverX >= 0) {
         const int px = static_cast<int>(std::lround(test_.hoverX * view_.Scale())), py = static_cast<int>(std::lround(test_.hoverY * view_.Scale()));
         SendMessageW(hwnd_, WM_MOUSEMOVE, 0, MAKELPARAM(px, py));

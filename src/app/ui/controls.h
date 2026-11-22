@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <functional>
 #include <string>
 #include <vector>
@@ -29,6 +30,9 @@ public:
     bool pressed = false;
     bool focused = false;
     bool focusVisible = false;  // keyboard focus ring is drawn only after keyboard navigation
+    // Animated hover / press amounts (0..1) behind the smooth hover and press fades. They follow `hover` / `pressed`
+    // (StepState); with visual effects off they snap.
+    float hoverT = 0.0f, pressT = 0.0f;
     View* view = nullptr;
     std::function<void()> onChange;  // fired on user-driven changes (click for buttons)
 
@@ -49,6 +53,14 @@ public:
     virtual void OnHoverMove(float x, float y) { (void)x; (void)y; }  // mouse moved over the control (no button down)
     virtual bool OnChar(wchar_t ch) { (void)ch; return false; }        // typed character (text entry); true = consumed
     virtual void OnFocusChanged(bool gained, bool byKeyboard) { (void)gained; (void)byKeyboard; }
+    // Mouse wheel over the control (delta in WHEEL_DELTA units); true = consumed (it scrolled), false = let the page scroll.
+    virtual bool OnWheel(float delta) { (void)delta; return false; }
+    // True while an animation of this control has not reached its target (the view keeps its timer running).
+    virtual bool AnimPending() const;
+
+    // Moves hoverT / pressT towards their targets. `animate` false snaps them. `afterglow`: console phosphor, lights up at
+    // once and fades out slowly (a short trail when the highlight moves). Returns true while still moving.
+    bool StepState(float dt, bool animate, bool afterglow);
 
     void SetEnabled(bool e);
     void SetVisible(bool v);
@@ -56,7 +68,15 @@ public:
 
 protected:
     void DrawFocus(Canvas& c, const Palette& p, const Rect& r, float radius, float outset = 3.0f) const;
+    // `normal` blended towards `hov` by hoverT and then towards `prs` by pressT (alpha-aware, so transparent fills fade).
+    D2D1_COLOR_F StateColor(const D2D1_COLOR_F& normal, const D2D1_COLOR_F& hov, const D2D1_COLOR_F& prs) const;
+    float Lit() const { return enabled ? std::max(hoverT, pressT) : 0.0f; }  // console inverted-highlight strength
+    bool Effects() const;     // visual effects on (animations allowed)
+    bool CursorOn() const;    // blinking cursors: currently in the visible phase (always true with effects off)
 };
+
+// Alpha-aware colour blend: rgb weighted by alpha, so a fade from transparent does not pass through black.
+D2D1_COLOR_F BlendOver(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b, float t);
 
 class ToggleSwitch : public Control {
 public:
@@ -67,6 +87,7 @@ public:
     void OnRelease(float x, float y, bool inside) override;
     void Activate() override;
     bool Tick(float dt) override;
+    bool AnimPending() const override;
 
 private:
     void Toggle();
@@ -143,8 +164,13 @@ public:
     void OnPress(float x, float y) override;
     void OnDrag(float x, float y) override;
     bool OnKey(UINT vk) override;
+    bool Tick(float dt) override;
+    bool AnimPending() const override;
 
 private:
+    float TargetT() const { return max_ > min_ ? static_cast<float>(value_ - min_) / static_cast<float>(max_ - min_) : 0.0f; }
+    float ShownT();  // eased thumb position (follows the value; jumps while dragging or with effects off)
+    float shown_ = -1.0f;
     void SetFromX(float x);
     float TrackLeft() const { return bounds.left + 10.0f; }
     float TrackRight() const { return bounds.right - (displayDivisor_ > 1 ? 72.0f : 58.0f); }
@@ -298,8 +324,8 @@ private:
     std::vector<std::pair<int, float>> anim_;  // id -> remaining vertical offset (px), decays to zero
 };
 
-// The Home page hero: navy gradient card with the logo mark and its halo, the wordmark, the tag line and the gradient rule
-// (assets/brand/moonsr_mockup.svg). It keeps the brand colours in both themes. Static (not focusable).
+// The Home page hero: navy gradient card with the logo mark and its glow, the wordmark, the tag line and the gradient rule
+// (assets/brand/moonsr_logo.svg). It keeps the brand colours in every Fluent theme. Static (not focusable).
 class HeroBanner : public Control {
 public:
     HeroBanner() { focusable = false; interactive = false; }
@@ -325,11 +351,16 @@ public:
     void Activate() override;
     bool OnKey(UINT vk) override;
     bool UsesEnter() const override { return true; }
+    bool Tick(float dt) override;
+    bool AnimPending() const override;
+    float selT = 0.0f;  // animated selection highlight (console afterglow when the selection moves)
 };
 
 // Theme picker: one card per theme (included and imported) with a live miniature drawn from that theme's own palette (nav, a
 // card with a toggle and a slider), the selected one marked. Click or Up / Down selects and fires onChange. Imported themes
-// show a Remove action (onRemove; Delete key too); included ones have none. Threading: UI thread only.
+// show a Remove action (onRemove; Delete key too); included ones have none. The cards sit in a scroll region of about two
+// and a half cards with its own themed scrollbar (wheel, thumb drag, track click; keyboard selection scrolls the selected
+// card into view). Threading: UI thread only.
 class ThemePicker : public Control {
 public:
     struct Card {
@@ -345,12 +376,31 @@ public:
     void OnPress(float x, float y) override;
     void OnRelease(float x, float y, bool inside) override;
     void OnHoverMove(float x, float y) override;
+    void OnDrag(float x, float y) override;
     bool OnKey(UINT vk) override;
+    bool OnWheel(float delta) override;
     void Activate() override;
+    bool Tick(float dt) override;
+    bool AnimPending() const override;
     float PreferredHeight() const override { return 340.0f; }
     float HeightForWidth(const Gfx& g, float width) const override;
+    float scroll() const { return scroll_; }
+    void SetScroll(float v) { ScrollTo(v, false); }  // tests
 
 private:
+    float ContentHeight() const;
+    float MaxScroll() const;
+    bool Scrollable() const { return MaxScroll() > 0.5f; }
+    Rect TrackRect() const;
+    Rect ThumbRect() const;
+    void ScrollTo(float v, bool animate);
+    void EnsureVisible(int i, bool animate);
+    void DrawScrollbar(Canvas& c, const Palette& p);
+    float scroll_ = 0.0f, scrollTarget_ = 0.0f;
+    bool dragThumb_ = false, hoverBar_ = false;
+    bool ensurePending_ = false;  // scroll the selected card into view once the control has been laid out
+    float dragOff_ = 0.0f;
+    std::vector<float> cardHover_;
     Rect CardRect(int i) const;
     Rect RemoveRect(int i) const;
     int CardAt(float x, float y) const;

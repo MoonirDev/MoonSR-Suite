@@ -14,6 +14,7 @@ constexpr wchar_t kIconPlay = 0xE768;
 constexpr wchar_t kIconScaler = 0xE71E;
 constexpr wchar_t kIconFit = 0xE9A6;
 constexpr wchar_t kIconSharp = 0xE9E9;
+constexpr wchar_t kIconEffects = 0xE790;  // Color (palette)
 constexpr wchar_t kIconSync = 0xE895;
 constexpr wchar_t kIconCursor = 0xE7C9;
 constexpr wchar_t kIconCounter = 0xE9D2;
@@ -27,7 +28,7 @@ constexpr wchar_t kIconFolder = 0xE8B7;
 constexpr wchar_t kIconKeyboard = 0xE765;
 constexpr wchar_t kIconLog = 0xE8A5;
 constexpr wchar_t kIconInfo = 0xE946;
-constexpr wchar_t kIconNeuralNav = 0xE9F3; // Process
+constexpr wchar_t kIconNeuralNav = ui::kGlyphNeuralNet;  // vector neural-network glyph (Canvas::NeuralNetGlyph)
 constexpr wchar_t kIconNeural = 0xE9A1;
 constexpr wchar_t kIconOrderNav = 0xE8CB;
 constexpr wchar_t kIconModel = 0xE7B8;
@@ -398,11 +399,15 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::TextLabel* ver = p->Make<ui::TextLabel>();
         ver->text = L"0.1.0";
         u.closeToTray = p->Make<ToggleSwitch>();
+        u.visualEffects = p->Make<ToggleSwitch>();
 
         p->AddSection(L"Application");
         ui::Card& app = p->AddCard();
         p->AddRow(app, kIconWindow, L"Close to system tray",
                   L"Closing the window keeps MoonSR running in the notification area.", {{u.closeToTray, kToggleW}});
+        u.visualEffectsRow = &p->AddRow(app, kIconEffects, L"Visual effects",
+                                        L"Transparency, glow and animations. Turn off for a plain look or on slower PCs.",
+                                        {{u.visualEffects, kToggleW}});
 
         p->AddSection(L"Themes");
         u.themePicker = p->Make<ui::ThemePicker>();

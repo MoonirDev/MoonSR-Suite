@@ -287,10 +287,19 @@ Control* Page::HitTest(float x, float y) const {
     return nullptr;
 }
 
-bool Page::Tick(float dt) {
+bool Page::Tick(float dt, bool animate, bool afterglow) {
     bool again = false;
-    for (auto& c : controls_) again |= c->Tick(dt);
+    for (auto& c : controls_) {
+        again |= c->StepState(dt, animate, afterglow);
+        again |= c->Tick(dt);
+    }
     return again;
+}
+
+bool Page::AnimPending() const {
+    for (const auto& c : controls_)
+        if (c->visible && c->AnimPending()) return true;
+    return false;
 }
 
 }  // namespace moonsr::app::ui

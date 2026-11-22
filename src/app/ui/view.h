@@ -1,7 +1,9 @@
 // View: the whole client area of the main window. Owns the navigation pane, the pages, focus, hover, scrolling,
 // the dropdown popup and animation timing, and renders everything to one Direct2D target. MainWindow forwards
-// window messages to it. Repaints happen only on request (Invalidate); animations use a short timer that stops
-// when nothing moves. Threading: UI thread only.
+// window messages to it. Repaints happen only on request (Invalidate). Timers: one animation timer (16 ms) that runs only
+// while something moves (hover / press fades, toggles, slider thumbs, page transitions, afterglow, scrolling) and a
+// 530 ms cursor-blink timer that runs only while a blinking cursor is on screen (console themes) - both only with visual
+// effects on and both stopped while the window is minimised or hidden. Threading: UI thread only.
 #pragma once
 
 #include "controls.h"
@@ -22,6 +24,8 @@ namespace moonsr::app::ui {
 class View {
 public:
     static constexpr UINT_PTR kAnimTimerId = 90;
+    static constexpr UINT_PTR kBlinkTimerId = 91;
+    static constexpr UINT kBlinkMs = 530;
 
     explicit View(Gfx& gfx);
     ~View();
@@ -31,7 +35,20 @@ public:
 
     void SetTheme(const Palette& palette);
     void SetDpi(UINT dpi);
-    void SetMica(bool on);
+    void SetMica(bool on);  // a translucent system backdrop (Mica or Acrylic) is behind the client area
+    // Visual effects (setting AND Windows animation / transparency effects): transitions, fades, glow, scanlines,
+    // blinking. Off: everything is drawn in its final state, cursors are steady.
+    void SetEffects(bool on);
+    bool effects() const { return effects_; }
+    bool Afterglow() const { return effects_ && pal_.retro && pal_.glow; }  // console phosphor afterglow
+    bool CursorOn() const { return !effects_ || blinkOn_; }                // blinking cursors: visible phase
+    void ResetBlink();                       // typing: show the cursor and restart the blink period
+    // The window is shown (false while minimised or hidden in the tray): stops / restarts the timers.
+    void SetShown(bool shown);
+    void OnBlinkTimer();
+    // Tests: scrolls the page / the first scrollable control under (x, y) (client DIPs).
+    void TestScroll(float y) { SetScroll(y); }
+    void TestWheel(float x, float y, float notches);
     const Palette& palette() const { return pal_; }
     Gfx& gfx() { return gfx_; }
     UINT dpi() const { return dpi_; }
@@ -92,6 +109,11 @@ private:
     Rect ScrollThumb() const;
     float ClientW() const;
     float ClientH() const;
+    bool NeedsBlink() const;
+    void UpdateBlinkTimer();
+    void StartAnimTimer();
+    bool AnyAnimPending() const;
+    void SnapStates();
 
     Gfx& gfx_;
     Canvas canvas_;
@@ -121,6 +143,8 @@ private:
     bool scrollHover_ = false, scrollDrag_ = false;
     float dragOffset_ = 0;
     bool animating_ = false;
+    bool effects_ = true, shown_ = true, blinkOn_ = true, blinking_ = false;
+    float pageT_ = 1.0f;  // page-switch transition progress (Fluent themes)
     ULONGLONG lastTick_ = 0;
     std::wstring navStatus_;
     bool navActive_ = false;

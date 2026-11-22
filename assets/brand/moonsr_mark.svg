@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="256" height="256" viewBox="0 0 256 256" fill="none">
+ <!-- MoonSR logo mark (Windows 11 Dark colours): crescent moon with motion trails, orbit ring and a four-point star.
+      256-unit box; the same geometry is drawn by Canvas::LogoMark (src/app/ui/gfx.cpp) and tools/make_icon.ps1:
+      moon disc (140,124) r80 minus cut disc (168,112) r71; ring = lower half of an ellipse band centred (130,150),
+      a 116, b 40 (outer) / 25 (inner), rotated -18 degrees; star at (160,98), 27 tall, 21 wide. Visible box about
+      x 16..244, y 40..216. The application icon puts this mark on a navy rounded-square plate. -->
+ <defs>
+  <path id="crescent" d="M146.67 44.28A80 80 0 1 0 202.33 174.15A71 71 0 1 1 146.67 44.28Z"/>
+  <clipPath id="crescentClip"><use xlink:href="#crescent"/></clipPath>
+  <linearGradient id="moon" x1="60" y1="44" x2="220" y2="204" gradientUnits="userSpaceOnUse">
+   <stop stop-color="#A6EDFF"/><stop offset=".5" stop-color="#5B7CFF"/><stop offset="1" stop-color="#A979FF"/>
+  </linearGradient>
+  <linearGradient id="ring" x1="14" y1="0" x2="246" y2="0" gradientUnits="userSpaceOnUse">
+   <stop stop-color="#3EE0FF"/><stop offset="1" stop-color="#A979FF"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="134" cy="128" r="124" gradientUnits="userSpaceOnUse">
+   <stop stop-color="#5B7CFF" stop-opacity=".40"/><stop offset=".35" stop-color="#5B7CFF" stop-opacity=".26"/>
+   <stop offset=".7" stop-color="#5B7CFF" stop-opacity=".09"/><stop offset="1" stop-color="#5B7CFF" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="starGlow" cx="160" cy="98" r="22" gradientUnits="userSpaceOnUse">
+   <stop stop-color="#FFFFFF" stop-opacity=".5"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+  </radialGradient>
+ </defs>
+ <circle cx="134" cy="128" r="124" fill="url(#glow)"/>
+ <use xlink:href="#crescent" fill="#5B7CFF" opacity=".07" transform="translate(-36 9)"/>
+ <use xlink:href="#crescent" fill="#5B7CFF" opacity=".16" transform="translate(-25 6)"/>
+ <use xlink:href="#crescent" fill="#5B7CFF" opacity=".30" transform="translate(-13 3)"/>
+ <use xlink:href="#crescent" fill="url(#moon)"/>
+ <circle cx="168" cy="112" r="71" stroke="#EDE6FF" stroke-opacity=".85" stroke-width="7" clip-path="url(#crescentClip)"/>
+ <path d="M19.68 185.85A116 40 -18 0 0 240.32 114.15A116 25 -18 0 1 19.68 185.85Z" fill="url(#ring)"/>
+ <circle cx="160" cy="98" r="22" fill="url(#starGlow)"/>
+ <path d="M160 71Q163.2 94.8 181 98Q163.2 101.2 160 125Q156.8 101.2 139 98Q156.8 94.8 160 71Z" fill="#FFFFFF"/>
+</svg>

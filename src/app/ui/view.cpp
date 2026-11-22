@@ -30,6 +30,7 @@ View::View(Gfx& gfx) : gfx_(gfx), canvas_(gfx), popup_(gfx) {
 View::~View() {
     popup_.onClosed = nullptr;
     if (hwnd_ && animating_) KillTimer(hwnd_, kAnimTimerId);
+    if (hwnd_ && blinking_) KillTimer(hwnd_, kBlinkTimerId);
 }
 
 void View::Attach(HWND hwnd, UINT dpi) {
@@ -57,6 +58,7 @@ void View::SetTheme(const Palette& palette) {
     CloseDropdown();
     popup_.SetPalette(pal_);
     layoutDirty_ = true;
+    UpdateBlinkTimer();
     Invalidate();
 }
 
@@ -71,6 +73,83 @@ void View::SetDpi(UINT dpi) {
 void View::SetMica(bool on) {
     mica_ = on;
     Invalidate();
+}
+
+void View::SetEffects(bool on) {
+    if (effects_ == on) return;
+    effects_ = on;
+    if (!on) {
+        pageT_ = 1.0f;
+        SnapStates();
+    }
+    blinkOn_ = true;
+    UpdateBlinkTimer();
+    Invalidate();
+}
+
+void View::SetShown(bool shown) {
+    if (shown_ == shown) return;
+    shown_ = shown;
+    if (!shown) {
+        if (animating_ && hwnd_) KillTimer(hwnd_, kAnimTimerId);
+        animating_ = false;
+        pageT_ = 1.0f;
+        SnapStates();
+    }
+    blinkOn_ = true;
+    UpdateBlinkTimer();
+    if (shown) Invalidate();
+}
+
+bool View::NeedsBlink() const { return effects_ && shown_ && hwnd_ && (pal_.promptHeaders || pal_.retro); }
+
+void View::UpdateBlinkTimer() {
+    if (!hwnd_) return;
+    const bool want = NeedsBlink();
+    if (want && !blinking_) {
+        blinking_ = SetTimer(hwnd_, kBlinkTimerId, kBlinkMs, nullptr) != 0;
+    } else if (!want && blinking_) {
+        KillTimer(hwnd_, kBlinkTimerId);
+        blinking_ = false;
+        blinkOn_ = true;
+    }
+}
+
+void View::OnBlinkTimer() {
+    if (!NeedsBlink()) {
+        UpdateBlinkTimer();
+        return;
+    }
+    blinkOn_ = !blinkOn_;
+    Invalidate();
+}
+
+void View::ResetBlink() {
+    if (!blinking_) return;
+    blinkOn_ = true;
+    SetTimer(hwnd_, kBlinkTimerId, kBlinkMs, nullptr);  // restarts the period
+    Invalidate();
+}
+
+void View::SnapStates() {
+    for (auto& p : pages_) p->Tick(0.0f, false, false);
+    for (auto& n : nav_) {
+        n->StepState(0.0f, false, false);
+        n->Tick(0.0f);
+    }
+}
+
+bool View::AnyAnimPending() const {
+    if (pageT_ < 1.0f) return true;
+    for (const auto& n : nav_)
+        if (n->AnimPending()) return true;
+    return cur_ < static_cast<int>(pages_.size()) && pages_[static_cast<size_t>(cur_)]->AnimPending();
+}
+
+void View::StartAnimTimer() {
+    if (!hwnd_ || animating_ || !shown_) return;
+    lastTick_ = GetTickCount64();
+    animating_ = SetTimer(hwnd_, kAnimTimerId, 16, nullptr) != 0;
 }
 
 void View::SetNavStatus(const std::wstring& text, bool active) {
@@ -91,11 +170,12 @@ void View::RequestLayout() {
 
 void View::RequestAnimation() {
     if (!hwnd_) return;
-    lastTick_ = GetTickCount64();
-    if (!animating_) {
-        animating_ = true;
-        SetTimer(hwnd_, kAnimTimerId, 16, nullptr);
+    if (!effects_ || !shown_) {
+        SnapStates();
+        Invalidate();
+        return;
     }
+    StartAnimTimer();
     Invalidate();
 }
 
@@ -104,13 +184,28 @@ void View::OnAnimTimer() {
     const float dt = std::min(0.1f, static_cast<float>(now - lastTick_) / 1000.0f);
     lastTick_ = now;
     bool again = false;
-    for (auto& p : pages_) again |= p->Tick(dt);
-    for (auto& n : nav_) again |= n->Tick(dt);
+    const bool anim = effects_ && shown_;
+    const bool glow = Afterglow();
+    for (auto& p : pages_) again |= p->Tick(dt, anim, glow);
+    for (auto& n : nav_) {
+        again |= n->StepState(dt, anim, glow);
+        again |= n->Tick(dt);
+    }
+    if (pageT_ < 1.0f) {
+        pageT_ = anim ? std::min(1.0f, pageT_ + dt / 0.20f) : 1.0f;
+        again |= pageT_ < 1.0f;
+    }
     if (!again) {
         animating_ = false;
         KillTimer(hwnd_, kAnimTimerId);
     }
     Invalidate();
+}
+
+void View::TestWheel(float x, float y, float notches) {
+    mouseX_ = x;
+    mouseY_ = y;
+    OnMouseWheel(static_cast<int>(notches * WHEEL_DELTA), 0, 0);
 }
 
 float View::ClientW() const {
@@ -171,45 +266,59 @@ void View::OnPaint() {
         return;
     }
     if (layoutDirty_) Layout();
+    if (!effects_) SnapStates();
     if (canvas_.Begin(hwnd_, dpi_, mica_)) {
         const float w = ClientW(), h = ClientH();
-        if (pal_.opaqueBg) {
-            canvas_.Clear(pal_.bg);  // themes with their own solid background never show the Mica backdrop
-        } else if (mica_) {
+        if (mica_) {
+            // Translucent system backdrop: a tint over Mica, or the console background at backdropAlpha over Acrylic.
             canvas_.Clear(D2D1_COLOR_F{0, 0, 0, 0});
-            canvas_.FillRect(Rect{0, 0, w, h}, pal_.micaTint);  // brand tint over the Mica backdrop
+            canvas_.FillRect(Rect{0, 0, w, h}, pal_.opaqueBg ? D2D1_COLOR_F{pal_.bg.r, pal_.bg.g, pal_.bg.b, pal_.backdropAlpha} : pal_.micaTint);
+        } else if (pal_.opaqueBg) {
+            canvas_.Clear(pal_.bg);
         } else {
             canvas_.Clear(pal_.bg);
             canvas_.FillGradient(Rect{0, 0, w, h}, 0.0f, {{0.0f, pal_.bgA}, {0.5f, pal_.bgB}, {1.0f, pal_.bgC}}, 0.0f, 0.0f, w, h);
         }
+        // Phosphor glow on accent text and blocks (console themes with glow, effects on).
+        canvas_.SetPhosphor(effects_ && pal_.retro && pal_.glow, pal_.accent, pal_.accentHover);
         DrawNav(w, h);
+        // Page switch (Fluent themes): the new page fades in and slides up a little.
+        const float e = 1.0f - (1.0f - pageT_) * (1.0f - pageT_) * (1.0f - pageT_);  // ease-out cubic
+        const bool fading = pageT_ < 1.0f;
+        if (fading) canvas_.PushOpacity(Rect{navW_, 0, w, h}, e);
         DrawHeader(w);
         canvas_.PushClip(Rect{navW_, metric::kHeaderHeight, w, h});
-        canvas_.SetOffset(contentLeft_, metric::kHeaderHeight - scroll_);
+        canvas_.SetOffset(contentLeft_, metric::kHeaderHeight - scroll_ + (fading ? (1.0f - e) * 16.0f : 0.0f));
         pages_[static_cast<size_t>(cur_)]->Draw(canvas_, pal_, gfx_);
         canvas_.SetOffset(0, 0);
         canvas_.PopClip();
+        if (fading) canvas_.PopOpacity();
         DrawScrollbar(w, h);
         if (dialog_) dialog_->Draw(canvas_, pal_, w, h);
+        if (effects_ && pal_.scanlines) canvas_.Scanlines(Rect{0, 0, w, h}, 0.13f);
+        canvas_.SetPhosphor(false, pal_.accent, pal_.accent);
         if (!canvas_.End()) Invalidate();
     }
     EndPaint(hwnd_, &ps);
+    // Something is still on its way to its target (a hover fade after a mouse move, for example): keep animating.
+    if (effects_ && !animating_ && AnyAnimPending()) StartAnimTimer();
 }
 
 void View::DrawNav(float, float h) {
-    // Brand: the logo mark and the wordmark (vector, so it is sharp at every DPI).
-    const float lx = compact_ ? (navW_ - 30.0f) * 0.5f : 16.0f;
-    if (pal_.retro) {
-        // Console look: a text wordmark with a block cursor instead of the logo mark.
-        canvas_.Text(compact_ ? L"M" : L"MoonSR", Rect{compact_ ? 0.0f : 14.0f, 14.0f, navW_, 46.0f}, Font::Title, pal_.accent,
-                     compact_ ? HAlign::Center : HAlign::Left, false);
-        if (!compact_) {
-            const float tw = gfx_.MeasureWidth(L"MoonSR", Font::Title);
-            canvas_.FillRect(Rect{14.0f + tw + 2.0f, 34.0f, 14.0f + tw + 14.0f, 38.0f}, pal_.accent);
-        }
-    } else {
-        canvas_.LogoMark(Rect{lx, 17.0f, lx + 30.0f, 47.0f}, false, !pal_.dark);
-        if (!compact_) canvas_.Wordmark(lx + 30.0f + 10.0f, 14.0f, 24.0f, pal_.text, pal_.dark ? Rgb(0xCFE9FF) : pal_.text, pal_.brandSR);
+    // Brand header: the logo mark and the "MoonSR" wordmark ("Moon" in the text colour, "SR" in the logo gradient), both
+    // vector, so they are sharp at every DPI. Console themes use the phosphor colours, a monospace wordmark and a cursor.
+    const LogoColors lc = LogoColorsFor(pal_);
+    const float markH = 34.0f, markW = markH * 228.0f / 176.0f, markTop = 18.0f, cy = markTop + markH * 0.5f;
+    const float lx = compact_ ? (navW_ - markW) * 0.5f : 12.0f;
+    canvas_.LogoMark(Rect{lx, markTop, lx + markW, markTop + markH}, lc, effects_ && pal_.glow);
+    if (!compact_) {
+        const float size = pal_.retro ? 21.0f : 23.0f;
+        const float wx = lx + markW + 8.0f;
+        const float wy = cy - size * (pal_.retro ? 0.68f : 0.67f);
+        float lh = 0.0f;
+        const float ww = canvas_.Wordmark(wx, wy, size, pal_.text, lc.srA, lc.srB, &lh);
+        if (pal_.retro && CursorOn())  // block cursor after the wordmark (underscore style), blinking with effects on
+            canvas_.FillRect(Rect{wx + ww + 3.0f, wy + lh * 0.74f, wx + ww + 3.0f + size * 0.55f, wy + lh * 0.74f + 3.5f}, pal_.accent);
     }
     if (pal_.promptHeaders) canvas_.Line(navW_ - 0.5f, 0.0f, navW_ - 0.5f, ClientH(), pal_.divider, 1.0f);
     for (auto& n : nav_) n->Draw(canvas_, pal_);
@@ -221,8 +330,11 @@ void View::DrawNav(float, float h) {
             const float pw = gfx_.MeasureWidth(prompt, Font::Caption);
             canvas_.Text(prompt, Rect{compact_ ? 0.0f : 12.0f, y, navW_, y + 40.0f}, Font::Caption, pal_.textSecondary,
                          compact_ ? HAlign::Center : HAlign::Left);
-            if (!compact_)
+            if (!compact_) {
                 canvas_.Text(navStatus_, Rect{12.0f + pw, y, navW_ - 8.0f, y + 40.0f}, Font::Caption, navActive_ ? pal_.accent : pal_.text);
+                const float cx = 12.0f + pw + gfx_.MeasureWidth(navStatus_, Font::Caption) + 3.0f;
+                if (CursorOn() && cx + 8.0f < navW_ - 6.0f) canvas_.FillRect(Rect{cx, y + 13.0f, cx + 7.0f, y + 27.0f}, pal_.accent);
+            }
         } else if (compact_) {
             canvas_.FillCircle(navW_ * 0.5f, y + 20.0f, 4.0f, dot);
         } else {
@@ -239,7 +351,7 @@ void View::DrawHeader(float w) {
         const std::wstring t = L"> " + title;
         canvas_.Text(t, Rect{contentLeft_, 14.0f, w - 16.0f, 62.0f}, Font::Title, pal_.accent);
         const float tw = gfx_.MeasureWidth(t, Font::Title);
-        if (contentLeft_ + tw + 24.0f < w) canvas_.FillRect(Rect{contentLeft_ + tw + 6.0f, 22.0f, contentLeft_ + tw + 18.0f, 46.0f}, pal_.accent);
+        if (CursorOn() && contentLeft_ + tw + 24.0f < w) canvas_.FillRect(Rect{contentLeft_ + tw + 6.0f, 22.0f, contentLeft_ + tw + 18.0f, 46.0f}, pal_.accent);
         return;
     }
     canvas_.Text(title, Rect{contentLeft_, 14.0f, w - 16.0f, 62.0f}, Font::Title, pal_.text);
@@ -259,7 +371,8 @@ Rect View::ScrollThumb() const {
 void View::DrawScrollbar(float, float) {
     const Rect t = ScrollThumb();
     if (RW(t) <= 0.0f) return;
-    canvas_.FillRound(t, pal_.retro ? 0.0f : RW(t) * 0.5f, D2D1_COLOR_F{pal_.strong.r, pal_.strong.g, pal_.strong.b, pal_.strong.a * 0.8f});
+    if (pal_.retro) canvas_.FillRect(t, scrollDrag_ ? pal_.accentHover : scrollHover_ ? pal_.accent : pal_.strong);
+    else canvas_.FillRound(t, RW(t) * 0.5f, D2D1_COLOR_F{pal_.strong.r, pal_.strong.g, pal_.strong.b, pal_.strong.a * 0.8f});
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -430,6 +543,13 @@ void View::OnMouseWheel(int delta, int px, int py) {
     }
     (void)px;
     (void)py;
+    // A scrollable control under the pointer (the theme cards) scrolls first; at its end the page scrolls.
+    if (mouseX_ >= 0) {
+        if (Control* c = HitTest(mouseX_, mouseY_, nullptr); c && c->OnWheel(static_cast<float>(delta) / WHEEL_DELTA)) {
+            OnMouseMove(static_cast<int>(mouseX_ * Scale()), static_cast<int>(mouseY_ * Scale()));
+            return;
+        }
+    }
     SetScroll(scroll_ - static_cast<float>(delta) / 120.0f * 56.0f);
     if (mouseX_ >= 0) OnMouseMove(static_cast<int>(mouseX_ * Scale()), static_cast<int>(mouseY_ * Scale()));
 }
@@ -625,6 +745,10 @@ void View::Navigate(int index) {
         scroll_ = 0.0f;
         for (auto& n : nav_) n->selected = (n->index == cur_);
         layoutDirty_ = true;
+        if (effects_ && shown_ && !pal_.retro) {  // Fluent page switch: fade and slide in
+            pageT_ = 0.0f;
+            StartAnimTimer();
+        }
         if (onPageChanged) onPageChanged(cur_);
     }
     Invalidate();

@@ -108,6 +108,7 @@ void NumberBox::OnFocusChanged(bool gained, bool byKeyboard) {
 }
 
 bool NumberBox::OnChar(wchar_t ch) {
+    if (view) view->ResetBlink();  // the caret stays visible while typing
     if (!enabled) return false;
     if (ch >= L'0' && ch <= L'9') {
         Replace(std::wstring(1, ch));
@@ -117,6 +118,7 @@ bool NumberBox::OnChar(wchar_t ch) {
 }
 
 bool NumberBox::OnKey(UINT vk) {
+    if (view) view->ResetBlink();  // the caret stays visible while typing
     if (!enabled) return false;
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

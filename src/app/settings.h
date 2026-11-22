@@ -33,6 +33,7 @@ struct AppSettings {
     bool showCursor = true;
     std::wstring theme = L"dark";   // [App] Theme: light | dark | retro or the file stem of an imported theme
     bool closeToTray = false;       // window close hides to the notification area instead of exiting
+    bool visualEffects = true;      // [App] VisualEffects: transparency, glow and animations of the window
     bool showFrameCounter = false; // "<game fps>/<displayed fps>" in the top-left corner of the output
     // Frame generation
     bool frameGenEnabled = false;

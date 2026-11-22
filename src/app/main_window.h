@@ -53,6 +53,11 @@ struct TestOptions {
     bool drag = false;               // --test-drag x1,y1,x2,y2 (client DIPs): press at 1, move to 2 and keep holding
     int dragX1 = 0, dragY1 = 0, dragX2 = 0, dragY2 = 0;
     int closeToTray = -1;            // --test-close-to-tray 0|1: overrides the setting for this run
+    int effects = -1;                // --test-effects 0|1: overrides the Visual effects setting for this run
+    int scroll = -1;                 // --test-scroll N: page scroll position in DIPs after start-up
+    bool wheel = false;              // --test-wheel x,y,notches (client DIPs; negative notches scroll down)
+    int wheelX = 0, wheelY = 0, wheelNotches = 0;
+    std::wstring themesDir;          // --test-themes-dir <dir>: imported-theme folder for this run (default %LOCALAPPDATA%)
 };
 
 TestOptions ParseTestOptions();
@@ -86,6 +91,10 @@ private:
     void ConfirmRemoveTheme(const std::wstring& key);
     void SetThemeMessage(const std::wstring& text, ui::InfoBar::Severity severity);
     void SetupBackdrop();
+    // Visual effects: the setting, forced off when Windows animation effects or transparency effects are off.
+    bool EffectsWanted() const;
+    static bool SystemEffectsAllowed();
+    void ApplyEffects(bool force);
     void ApplyDpiAndSize(const RECT* suggested);
     UINT CurrentDpi() const;
     SIZE OuterSizeForClientDips(int w, int h) const;
@@ -188,6 +197,8 @@ private:
     HINSTANCE instance_ = nullptr;
     UINT dpi_ = 96;
     bool mica_ = false;
+    bool effectsSetting_ = true;  // the Visual effects switch (persisted)
+    int effectsApplied_ = -1;     // last effective state given to the view (-1 = none yet)
     bool trayIconShown_ = false;  // window hidden to the tray and the icon registered
     bool exiting_ = false;        // a real exit was requested: WM_CLOSE must not hide to the tray
     HICON trayIcon_ = nullptr;

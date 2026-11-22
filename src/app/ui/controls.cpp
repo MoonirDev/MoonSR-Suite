@@ -38,6 +38,50 @@ void Control::SetVisible(bool v) {
     Invalidate();
 }
 
+D2D1_COLOR_F BlendOver(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b, float t) {
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    const float wa = a.a * (1.0f - t), wb = b.a * t, al = wa + wb;
+    if (al <= 1e-6f) return D2D1_COLOR_F{b.r, b.g, b.b, 0.0f};
+    return D2D1_COLOR_F{(a.r * wa + b.r * wb) / al, (a.g * wa + b.g * wb) / al, (a.b * wa + b.b * wb) / al, al};
+}
+
+D2D1_COLOR_F Control::StateColor(const D2D1_COLOR_F& normal, const D2D1_COLOR_F& hov, const D2D1_COLOR_F& prs) const {
+    return BlendOver(BlendOver(normal, hov, hoverT), prs, pressT);
+}
+
+bool Control::Effects() const { return view && view->effects(); }
+bool Control::CursorOn() const { return !view || view->CursorOn(); }
+
+bool Control::AnimPending() const {
+    const float th = (hover && enabled) ? 1.0f : 0.0f, tp = (pressed && enabled) ? 1.0f : 0.0f;
+    return hoverT != th || pressT != tp;
+}
+
+bool Control::StepState(float dt, bool animate, bool afterglow) {
+    const float th = (hover && enabled) ? 1.0f : 0.0f, tp = (pressed && enabled) ? 1.0f : 0.0f;
+    if (!animate) {
+        hoverT = th;
+        pressT = tp;
+        return false;
+    }
+    // Seconds for a full 0 -> 1 (up) and 1 -> 0 (down) transition. Fluent: quick fade in, slower fade out. Console
+    // phosphor: instant on, a slow afterglow off.
+    auto step = [dt](float& v, float target, float up, float down) {
+        if (v == target) return;
+        const float rate = target > v ? up : down;
+        if (rate <= 0.0f) {
+            v = target;
+            return;
+        }
+        const float d = dt / rate;
+        v = target > v ? std::min(target, v + d) : std::max(target, v - d);
+    };
+    step(hoverT, th, afterglow ? 0.0f : 0.083f, afterglow ? 0.30f : 0.167f);
+    step(pressT, tp, afterglow ? 0.0f : 0.05f, afterglow ? 0.22f : 0.12f);
+    return hoverT != th || pressT != tp;
+}
+
 void Control::DrawFocus(Canvas& c, const Palette& p, const Rect& r, float radius, float outset) const {
     if (!focused || !focusVisible) return;
     if (p.retro) {
@@ -57,7 +101,7 @@ void ToggleSwitch::SetChecked(bool v, bool animate) {
         return;
     }
     checked_ = v;
-    if (animate && view) view->RequestAnimation();
+    if (animate && Effects()) view->RequestAnimation();
     else t_ = v ? 1.0f : 0.0f;
     Invalidate();
 }
@@ -74,10 +118,16 @@ void ToggleSwitch::OnRelease(float, float, bool inside) {
 
 void ToggleSwitch::Activate() { Toggle(); }
 
+bool ToggleSwitch::AnimPending() const { return Control::AnimPending() || t_ != (checked_ ? 1.0f : 0.0f); }
+
 bool ToggleSwitch::Tick(float dt) {
     const float target = checked_ ? 1.0f : 0.0f;
     if (t_ == target) return false;
-    const float step = dt / 0.14f;
+    if (!Effects()) {
+        t_ = target;
+        return false;
+    }
+    const float step = dt / 0.16f;
     t_ = t_ < target ? std::min(target, t_ + step) : std::max(target, t_ - step);
     return t_ != target;
 }
@@ -93,16 +143,18 @@ void ToggleSwitch::Draw(Canvas& c, const Palette& p) {
     c.Text(label, Rect{bounds.left, bounds.top, sw.left - 12.0f, bounds.bottom}, Font::Body,
            enabled ? p.text : p.textDisabled, HAlign::Right);
 
-    const D2D1_COLOR_F onFill = !enabled ? p.accentDisabled : pressed ? p.accentPressed : hover ? p.accentHover : p.accent;
-    const D2D1_COLOR_F offFill = !enabled ? p.ctrlDisabled : pressed ? p.ctrlPressed : hover ? p.ctrlHover : p.ctrlFill;
-    c.FillRound(sw, 10.0f, t_ >= 1.0f ? onFill : t_ <= 0.0f ? offFill : Mix(offFill, onFill, t_));
+    const D2D1_COLOR_F onFill = !enabled ? p.accentDisabled : StateColor(p.accent, p.accentHover, p.accentPressed);
+    const D2D1_COLOR_F offFill = !enabled ? p.ctrlDisabled : StateColor(p.ctrlFill, p.ctrlHover, p.ctrlPressed);
+    c.FillRound(sw, 10.0f, t_ >= 1.0f ? onFill : t_ <= 0.0f ? offFill : BlendOver(offFill, onFill, t_));
     if (t_ < 1.0f) c.StrokeRound(sw, 10.0f, Fade(enabled ? p.strong : p.textDisabled, 1.0f - t_), 1.0f);
 
-    const float r = pressed ? 7.5f : hover ? 7.0f : 6.0f;
-    const float kx = sw.left + 10.0f + (sw.right - sw.left - 20.0f) * t_;
+    // Knob: eased travel (smoothstep); it grows a little on hover and press.
+    const float e = t_ * t_ * (3.0f - 2.0f * t_);
+    const float r = 6.0f + 1.0f * hoverT + 0.5f * pressT;
+    const float kx = sw.left + 10.0f + (sw.right - sw.left - 20.0f) * e;
     const D2D1_COLOR_F offKnob = enabled ? p.strong : p.textDisabled;
     const D2D1_COLOR_F onKnob = enabled ? p.textOnAccent : p.textDisabled;
-    c.FillCircle(kx, cy, r, Mix(offKnob, onKnob, t_));
+    c.FillCircle(kx, cy, r, Mix(offKnob, onKnob, e));
     DrawFocus(c, p, sw, 10.0f);
 }
 
@@ -128,11 +180,11 @@ void Button::Draw(Canvas& c, const Palette& p) {
     }
     D2D1_COLOR_F fill, textColor;
     if (accent) {
-        fill = !enabled ? p.accentDisabled : pressed ? p.accentPressed : hover ? p.accentHover : p.accent;
+        fill = !enabled ? p.accentDisabled : StateColor(p.accent, p.accentHover, p.accentPressed);
         textColor = enabled ? p.textOnAccent : p.textDisabled;
     } else {
-        fill = !enabled ? p.ctrlDisabled : pressed ? p.ctrlPressed : hover ? p.ctrlHover : p.ctrlFill;
-        textColor = !enabled ? p.textDisabled : pressed ? p.textSecondary : p.text;
+        fill = !enabled ? p.ctrlDisabled : StateColor(p.ctrlFill, p.ctrlHover, p.ctrlPressed);
+        textColor = !enabled ? p.textDisabled : Mix(p.text, p.textSecondary, pressT);
     }
     c.FillRound(bounds, metric::kControlRadius, fill);
     if (!accent) c.StrokeRound(bounds, metric::kControlRadius, p.ctrlStroke);
@@ -237,7 +289,7 @@ void ComboBox::Draw(Canvas& c, const Palette& p) {
         DrawRetro(c, p);
         return;
     }
-    const D2D1_COLOR_F fill = !enabled ? p.ctrlDisabled : (pressed || open_) ? p.ctrlPressed : hover ? p.ctrlHover : p.ctrlFill;
+    const D2D1_COLOR_F fill = !enabled ? p.ctrlDisabled : open_ ? p.ctrlPressed : StateColor(p.ctrlFill, p.ctrlHover, p.ctrlPressed);
     c.FillRound(bounds, metric::kControlRadius, fill);
     c.StrokeRound(bounds, metric::kControlRadius, p.ctrlStroke);
     const D2D1_COLOR_F tc = enabled ? p.text : p.textDisabled;
@@ -276,6 +328,26 @@ void Slider::SetFromX(float x) {
 void Slider::OnPress(float x, float) { SetFromX(x); }
 void Slider::OnDrag(float x, float) { SetFromX(x); }
 
+float Slider::ShownT() {
+    const float t = TargetT();
+    if (shown_ < 0.0f || pressed || !Effects()) shown_ = t;
+    return shown_;
+}
+
+bool Slider::AnimPending() const { return Control::AnimPending() || (shown_ >= 0.0f && shown_ != TargetT()); }
+
+bool Slider::Tick(float dt) {
+    const float t = TargetT();
+    if (shown_ < 0.0f || shown_ == t) return false;
+    if (!Effects()) {
+        shown_ = t;
+        return false;
+    }
+    shown_ += (t - shown_) * std::min(1.0f, dt / 0.06f);
+    if (std::fabs(shown_ - t) < 0.002f) shown_ = t;
+    return shown_ != t;
+}
+
 bool Slider::OnKey(UINT vk) {
     if (!enabled) return false;
     switch (vk) {
@@ -311,13 +383,13 @@ void Slider::Draw(Canvas& c, const Palette& p) {
     }
     const float cy = (bounds.top + bounds.bottom) * 0.5f;
     const float l = TrackLeft(), r = TrackRight();
-    const float t = max_ > min_ ? static_cast<float>(value_ - min_) / static_cast<float>(max_ - min_) : 0.0f;
+    const float t = ShownT();
     const float tx = l + (r - l) * t;
     c.FillRound(Rect{l, cy - 2.0f, r, cy + 2.0f}, 2.0f, enabled ? Fade(p.strong, 0.6f) : p.textDisabled);
     if (tx > l) c.FillRound(Rect{l, cy - 2.0f, tx, cy + 2.0f}, 2.0f, enabled ? p.accent : p.accentDisabled);
     c.FillCircle(tx, cy, 10.0f, enabled ? p.thumb : p.ctrlDisabled);
     c.StrokeCircle(tx, cy, 10.0f, p.ctrlStroke);
-    const float dot = !enabled ? 5.0f : pressed ? 5.0f : hover ? 7.0f : 6.0f;
+    const float dot = !enabled ? 5.0f : 6.0f + 1.0f * hoverT - 2.0f * pressT;
     c.FillCircle(tx, cy, dot, enabled ? p.accent : p.accentDisabled);
     const std::wstring label = displayDivisor_ > 1 ? std::format(L"{:.2f}{}", static_cast<double>(value_) / displayDivisor_, suffix_)
                                                   : std::format(L"{}{}", value_, suffix_);
@@ -440,17 +512,19 @@ void HeroBanner::Draw(Canvas& c, const Palette& p) {
     }
     const float w = RW(bounds), h = RH(bounds), s = ScaleFor(w);
     const float radius = 16.0f;
-    // Brand navy gradient (the same in both themes), diagonal like the mockup.
+    // Brand navy gradient (the same in both themes), diagonal like the logo artwork.
     c.FillGradient(bounds, radius, {{0.0f, Rgb(0x202B48)}, {0.5f, Rgb(0x111A31)}, {1.0f, Rgb(0x17142F)}}, bounds.left, bounds.top,
                    bounds.right, bounds.bottom);
     c.PushClip(bounds);
-    const float markSize = 100.0f * s;
-    const float mx = bounds.left + 40.0f * s, my = bounds.top + (h - markSize) * 0.5f - 2.0f * s;
-    c.LogoMark(Rect{mx, my, mx + markSize, my + markSize}, true);
-    const float tx = mx + markSize + 44.0f * s;
+    // The banner keeps the brand look in every Fluent theme: the Windows 11 Dark logo colours on the navy gradient.
+    static const LogoColors kBrand = LogoColorsFor(MakePalette(ThemeId::Dark));
+    const float markH = 104.0f * s, markW = markH * 228.0f / 176.0f;
+    const float mx = bounds.left + 30.0f * s, my = bounds.top + (h - markH) * 0.5f;
+    c.LogoMark(Rect{mx, my, mx + markW, my + markH}, kBrand, Effects());
+    const float tx = mx + markW + 30.0f * s;
     const float wordSize = 54.0f * s;
     const float wordY = bounds.top + 30.0f * s;
-    c.Wordmark(tx - 2.0f * s, wordY, wordSize, Rgb(0xFFFFFF), Rgb(0xCFE9FF), Rgb(0x73D8FF));
+    c.Wordmark(tx - 2.0f * s, wordY, wordSize, Rgb(0xFFFFFF), kBrand.srA, kBrand.srB);
     const float tagSize = std::max(11.5f, 13.0f * s);
     const float tagY = wordY + wordSize * 1.36f + 2.0f * s;
     c.SpacedText(L"GAME UPSCALING AND MORE", tx + 2.0f * s, tagY, tagSize, DWRITE_FONT_WEIGHT_MEDIUM, Rgb(0xB4C6E5), 0.27f * tagSize);
@@ -485,15 +559,28 @@ bool NavItem::OnKey(UINT vk) {
     return false;
 }
 
+bool NavItem::AnimPending() const { return Control::AnimPending() || selT != (selected ? 1.0f : 0.0f); }
+
+bool NavItem::Tick(float dt) {
+    const float target = selected ? 1.0f : 0.0f;
+    if (selT == target) return false;
+    // Console afterglow: the old selection block fades out; otherwise the selection moves at once.
+    const bool afterglow = view && view->Afterglow();
+    if (!afterglow || target > selT) {
+        selT = target;
+        return false;
+    }
+    selT = std::max(target, selT - dt / 0.32f);
+    return selT != target;
+}
+
 void NavItem::Draw(Canvas& c, const Palette& p) {
     if (p.retro) {
         DrawRetro(c, p);
         return;
     }
-    const D2D1_COLOR_F fill = selected ? (pressed ? p.subtlePressed : p.subtleSelected)
-                              : pressed ? p.subtlePressed
-                              : hover   ? p.subtleHover
-                                        : D2D1_COLOR_F{0, 0, 0, 0};
+    const D2D1_COLOR_F none{0, 0, 0, 0};
+    const D2D1_COLOR_F fill = selected ? BlendOver(p.subtleSelected, p.subtlePressed, pressT) : StateColor(none, p.subtleHover, p.subtlePressed);
     if (fill.a > 0.0f) c.FillRound(bounds, metric::kControlRadius, fill);
     const float cy = (bounds.top + bounds.bottom) * 0.5f;
     if (selected)  // brand gradient indicator (the one place the cyan-violet gradient is used in the chrome)

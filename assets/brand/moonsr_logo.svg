@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1200" height="400" viewBox="0 0 1200 400" fill="none">
+ <!-- MoonSR horizontal logo: the mark (moonsr_mark.svg) and the wordmark, "Moon" in white and "SR" in the cyan-to-violet
+      gradient, on the near-black navy of the owner's design. The wordmark is set in the app's display font; in-app it is
+      drawn by Canvas::Wordmark with the theme's text colour for "Moon". -->
+ <defs>
+  <linearGradient id="sr" x1="760" y1="0" x2="960" y2="0" gradientUnits="userSpaceOnUse">
+   <stop stop-color="#3EE0FF"/><stop offset="1" stop-color="#A979FF"/>
+  </linearGradient>
+ </defs>
+ <rect width="1200" height="400" fill="#070A1C"/>
+ <image x="60" y="72" width="256" height="256" xlink:href="moonsr_mark.svg"/>
+ <text x="340" y="250" font-family="Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="150" font-weight="600"
+       letter-spacing="-3" fill="#FFFFFF">Moon<tspan fill="url(#sr)">SR</tspan></text>
+</svg>

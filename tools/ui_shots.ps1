@@ -1,4 +1,4 @@
-# Screenshots of the MoonSR UI through its --test-* hooks: starts MoonSR.exe on a page in a theme, grabs the window from the
+﻿# Screenshots of the MoonSR UI through its --test-* hooks: starts MoonSR.exe on a page in a theme, grabs the window from the
 # screen (DWM frame bounds, including the title bar) and closes it. The test options never change the persisted settings.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\ui_shots.ps1 [-BuildDir build\main] [-OutDir <dir>]
@@ -9,6 +9,9 @@ param([string]$BuildDir = "build\main", [string]$OutDir = "", [string[]]$Pages =
       [string[]]$Themes = @("dark", "light"), [int]$Dpi = 0, [string]$Size = "1120,740", [switch]$NoMica,
       [string]$Keys = "", [string]$Extra = "", [string]$Tag = "")
 $ErrorActionPreference = "Stop"
+# Lists may also arrive as one comma-separated string (powershell -File passes arrays that way).
+$Pages = @($Pages | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$Themes = @($Themes | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "$BuildDir\bin\MoonSR.exe"
 if (-not $OutDir) { $OutDir = Join-Path $root "$BuildDir\ui_shots" }

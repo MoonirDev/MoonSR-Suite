@@ -218,6 +218,12 @@ bool ParseThemeText(const std::string& utf8, ThemeDef& out, std::wstring& error)
             if (!ParseBool(val, out.bracketedControls)) return bad(L"needs true or false");
         } else if (key == L"prompt_headers") {
             if (!ParseBool(val, out.promptHeaders)) return bad(L"needs true or false");
+        } else if (key == L"logo_gradient_start") { if (!colour(out.logoStart)) return false;
+        } else if (key == L"logo_gradient_end") { if (!colour(out.logoEnd)) return false;
+        } else if (key == L"glow" || key == L"scanlines") {
+            bool b = false;
+            if (!ParseBool(val, b)) return bad(L"needs true or false");
+            (key == L"glow" ? out.glow : out.scanlines) = b;
         } else {
             error = std::format(L"Line {}: unknown key '{}'.", lineNo, key.substr(0, 30));
             return false;
@@ -276,6 +282,10 @@ std::string SerializeTheme(const ThemeDef& d) {
     t += std::format(L"border_width = {}\n", d.borderWidth);
     t += std::wstring(L"bracketed_controls = ") + (d.bracketedControls ? L"true" : L"false") + L"\n";
     t += std::wstring(L"prompt_headers = ") + (d.promptHeaders ? L"true" : L"false") + L"\n";
+    col(L"logo_gradient_start", d.logoStart);
+    col(L"logo_gradient_end", d.logoEnd);
+    if (d.glow) t += std::wstring(L"glow = ") + (*d.glow ? L"true" : L"false") + L"\n";
+    if (d.scanlines) t += std::wstring(L"scanlines = ") + (*d.scanlines ? L"true" : L"false") + L"\n";
     return WideToUtf8(t);
 }
 
@@ -291,6 +301,7 @@ Palette PaletteFromDef(const ThemeDef& d) {
         p.bg = p.bgA = p.bgB = p.bgC = Rgb(*d.background);
         p.micaTint = p.bg;
         p.opaqueBg = true;
+        p.backdrop = Backdrop::None;  // a theme with its own background colour is drawn solid
         p.dark = Luma(p.bg) < 0.5f;
     }
     if (d.surface) {
@@ -368,6 +379,17 @@ Palette PaletteFromDef(const ThemeDef& d) {
     p.radius = static_cast<float>(d.radius);
     p.borderWidth = static_cast<float>(d.borderWidth);
     p.font = d.font;
+    // Logo: from the explicit keys, else derived from the accent (start = accent, end = the accent turned ~50 degrees
+    // towards violet), else the base theme's brand gradient.
+    if (d.logoStart || d.logoEnd || d.accent) {
+        const D2D1_COLOR_F a = d.logoStart ? Rgb(*d.logoStart) : p.accent;
+        const D2D1_COLOR_F b = d.logoEnd ? Rgb(*d.logoEnd) : HueShift(a, 50.0f);
+        p.logoA = a;
+        p.logoB = b;
+        p.logoMid = Mix(a, b, 0.5f);
+    }
+    if (d.glow) p.glow = *d.glow;
+    if (d.scanlines) p.scanlines = *d.scanlines;
     return p;
 }
 
@@ -392,6 +414,10 @@ ThemeDef DefFromPalette(const Palette& p, const std::wstring& name) {
     d.borderWidth = std::clamp(static_cast<int>(p.borderWidth + 0.5f), 1, 3);
     d.bracketedControls = p.retro;
     d.promptHeaders = p.promptHeaders;
+    d.logoStart = ToRgb(p.logoA);
+    d.logoEnd = ToRgb(p.logoB);
+    d.glow = p.glow;
+    d.scanlines = p.scanlines;
     return d;
 }
 
@@ -411,7 +437,7 @@ std::wstring KeyFromName(const std::wstring& name) {
     while (!k.empty() && k.back() == L'-') k.pop_back();
     if (k.empty()) k = L"theme";
     if (k.size() > 40) k.resize(40);
-    if (k == L"light" || k == L"dark" || k == L"retro" || k == L"con" || k == L"nul" || k == L"prn" || k == L"aux") k = L"custom-" + k;
+    if (k == L"light" || k == L"dark" || k == L"retro" || k == L"retro-amber" || k == L"con" || k == L"nul" || k == L"prn" || k == L"aux") k = L"custom-" + k;
     return k;
 }
 
@@ -449,6 +475,7 @@ void ThemeCatalog::Reload() {
     builtin(L"light", L"Windows 11 Light", L"Bright surfaces, rounded controls", ThemeId::Light);
     builtin(L"dark", L"Windows 11 Dark", L"Navy surfaces, cyan accent", ThemeId::Dark);
     builtin(L"retro", L"Retro", L"Green on black console, monospace", ThemeId::Retro);
+    builtin(L"retro-amber", L"Retro Amber", L"Amber phosphor console, monospace", ThemeId::RetroAmber);
     if (dir_.empty()) return;
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW((dir_ + L"\\*.moontheme").c_str(), &fd);
@@ -643,6 +670,26 @@ int RunThemeSelfTest(const std::wstring& scratch, std::wstring& report) {
         check(p.opaqueBg && p.radius == 0.0f && std::abs(p.accent.r - 1.0f) < 0.01f && std::abs(p.bg.b - 0x20 / 255.0f) < 0.01f,
               L"palette applies the given tokens and inherits the rest");
     }
+    {  // logo and effect keys
+        ThemeDef ld;
+        r = parse("name = L\naccent = #FF8000\nlogo_gradient_start = #00FF00\nlogo_gradient_end = #0000FF\nglow = off\nscanlines = yes\n", &ld);
+        const Palette lp = PaletteFromDef(ld);
+        check(r.first && ld.logoStart == 0x00FF00u && ld.logoEnd == 0x0000FFu && ld.glow == false && ld.scanlines == true &&
+                  lp.logoA.g > 0.99f && lp.logoB.b > 0.99f && !lp.glow && lp.scanlines,
+              L"logo_gradient_start / _end, glow and scanlines parse and apply");
+        ThemeDef dd;
+        parse("name = D\naccent = #FF8000\n", &dd);
+        const Palette dp = PaletteFromDef(dd);
+        check(std::abs(dp.logoA.r - 1.0f) < 0.01f && std::abs(dp.logoB.r - dp.logoA.r) + std::abs(dp.logoB.g - dp.logoA.g) +
+                  std::abs(dp.logoB.b - dp.logoA.b) > 0.2f && dp.glow && !dp.scanlines,
+              L"logo gradient is derived from the accent; effects inherit the base theme");
+        r = parse("name = X\nglow = maybe\n");
+        check(!r.first, L"non-boolean glow is rejected: " + r.second);
+        ThemeDef rt;
+        const bool rok = parse(SerializeTheme(ld), &rt).first;
+        check(rok && rt.logoStart == ld.logoStart && rt.logoEnd == ld.logoEnd && rt.glow == ld.glow && rt.scanlines == ld.scanlines,
+              L"logo and effect keys survive a round trip");
+    }
     {  // round trip
         ThemeDef a;
         parse("name = Round trip\nbase = light\naccent = #123456\nradius = 3\nprompt_headers = true\n", &a);
@@ -657,8 +704,18 @@ int RunThemeSelfTest(const std::wstring& scratch, std::wstring& report) {
     CreateDirectoryW(src.c_str(), nullptr);
     {
         ThemeCatalog cat(dir);
-        check(cat.entries().size() == 3 && cat.Find(L"light") && cat.Find(L"dark") && cat.Find(L"retro"),
-              L"catalog starts with the three included themes");
+        check(cat.entries().size() == 4 && cat.Find(L"light") && cat.Find(L"dark") && cat.Find(L"retro") && cat.Find(L"retro-amber") &&
+                  cat.Find(L"retro-amber")->builtin && cat.Find(L"retro-amber")->palette.retro,
+              L"catalog starts with the four included themes (Retro Amber included)");
+        {
+            const Palette& am = cat.Find(L"retro-amber")->palette;
+            const Palette& gr = cat.Find(L"retro")->palette;
+            check(am.promptHeaders && am.scanlines && am.glow && am.backdrop == Backdrop::Acrylic && am.accent.r > 0.9f && am.accent.g < 0.7f &&
+                      am.accent.b < 0.2f && gr.accent.g > gr.accent.r,
+                  L"Retro Amber copies Retro (console, glow, scanlines, acrylic) with an orange accent");
+            const float dw = std::abs(am.warning.icon.b - am.accent.b) + std::abs(am.warning.icon.g - am.accent.g);
+            check(dw > 0.4f && am.error.icon.r > 0.9f && am.error.icon.g < 0.4f, L"Retro Amber warning and error colours differ from the accent");
+        }
         const std::wstring f1 = src + L"\\a.moontheme";
         WriteFileUtf8(f1, "name = Sunset\nbase = dark\naccent = #FF8040\n");
         std::wstring err, key;
@@ -674,7 +731,7 @@ int RunThemeSelfTest(const std::wstring& scratch, std::wstring& report) {
         WriteFileUtf8(f1, "name = Sunset\naccent = #00FF00\n");
         st = cat.Import(f1, ThemeCatalog::ImportMode::Replace, err, key);
         check(st == ThemeCatalog::ImportStatus::Imported && cat.Find(L"sunset") && cat.Find(L"sunset")->def.accent == 0x00FF00u &&
-                  cat.entries().size() == 5,
+                  cat.entries().size() == 6,
               L"same name can replace the existing theme");
         const std::wstring f2 = src + L"\\bad.moontheme";
         WriteFileUtf8(f2, "name = Bad\naccent = red\n");

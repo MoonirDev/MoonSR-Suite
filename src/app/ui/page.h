@@ -76,7 +76,10 @@ public:
     void Draw(Canvas& c, const Palette& p, const Gfx& g);
     const std::vector<Control*>& focusOrder() const { return focusOrder_; }
     Control* HitTest(float x, float y) const;
-    bool Tick(float dt);
+    // Animation step for every control: hover / press fades (StepState; `animate` false snaps them) and the controls' own
+    // animations. True while something still moves.
+    bool Tick(float dt, bool animate, bool afterglow);
+    bool AnimPending() const;
 
 private:
     struct Item {

@@ -32,6 +32,10 @@ struct ThemeDef {
     int borderWidth = 1; // 1..3
     bool bracketedControls = false;  // console-style controls: [ON ], [ Start ], block sliders, inverted selection, no icons
     bool promptHeaders = false;      // "[ TITLE ]" section headers, "> Title_" page title, "C:\MoonSR>" status line
+    // Logo mark and "SR" gradient (default: derived from `accent`), and the optional effect switches (default: the base
+    // theme's: glow on for dark, off for light; scanlines off).
+    std::optional<uint32_t> logoStart, logoEnd;
+    std::optional<bool> glow, scanlines;
 };
 
 // Parses theme text (UTF-8). On failure `error` says what is wrong (with the line number where there is one).

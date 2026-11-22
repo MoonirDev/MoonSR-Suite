@@ -22,9 +22,13 @@ struct InfoColors {
     D2D1_COLOR_F iconText;  // glyph drawn on the disc
 };
 
-enum class ThemeId { Light = 0, Dark = 1, Retro = 2 };  // "Windows 11 Light", "Windows 11 Dark", console look
-const wchar_t* ThemeKey(ThemeId t);          // settings.ini value: "dark" / "retro"
+// "Windows 11 Light", "Windows 11 Dark", the green console look and its amber copy.
+enum class ThemeId { Light = 0, Dark = 1, Retro = 2, RetroAmber = 3 };
+const wchar_t* ThemeKey(ThemeId t);          // settings.ini value: "light" / "dark" / "retro" / "retro-amber"
 ThemeId ThemeFromKey(const std::wstring& key);  // unknown -> Dark
+
+// Window backdrop requested by a theme (used only while visual effects are on and DWM supports it).
+enum class Backdrop { None = 0, Mica = 1, Acrylic = 2 };
 
 struct Palette {
     bool dark = true;
@@ -49,7 +53,29 @@ struct Palette {
     D2D1_COLOR_F bgA, bgB, bgC;  // window background gradient (top-left, middle, bottom-right) when Mica is not used
     D2D1_COLOR_F micaTint;       // translucent tint painted over Mica so the backdrop picks up the brand hue
     InfoColors info, success, warning, error;
+    // Logo mark and the "SR" of the wordmark: gradient start (cyan side), middle (the moon body) and end (violet side).
+    D2D1_COLOR_F logoA, logoMid, logoB;
+    // Effects (all of them only while visual effects are on). `glow`: soft glow behind the logo mark; in console-style
+    // themes (`retro`) also a phosphor glow around accent text and blocks and an afterglow when highlights move.
+    bool glow = false;
+    bool scanlines = false;            // faint CRT scanline overlay
+    Backdrop backdrop = Backdrop::Mica;
+    float backdropAlpha = 1.0f;        // opacity of the solid background over an Acrylic backdrop (opaqueBg themes)
 };
+
+// Colours of the logo mark for a palette (see Canvas::LogoMark).
+struct LogoColors {
+    D2D1_COLOR_F ringA, ringB;           // orbit ring gradient
+    D2D1_COLOR_F moonA, moonB, moonC;    // crescent gradient (top-left, middle, bottom-right)
+    D2D1_COLOR_F rim;                    // bright inner rim of the crescent
+    D2D1_COLOR_F trail;                  // motion trails (drawn with decreasing alpha)
+    D2D1_COLOR_F star;
+    D2D1_COLOR_F glow;                   // halo behind the mark (alpha 0 = none)
+    D2D1_COLOR_F srA, srB;               // "SR" gradient of the wordmark
+};
+LogoColors LogoColorsFor(const Palette& p);
+// Hue rotation in degrees (HSV), keeping saturation and value.
+D2D1_COLOR_F HueShift(const D2D1_COLOR_F& c, float degrees);
 
 Palette MakePalette(ThemeId theme);
 bool SystemUsesDarkApps();

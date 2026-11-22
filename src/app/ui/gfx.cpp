@@ -31,6 +31,8 @@ bool Gfx::BuildFormats() {
     if (fluentIcons_) icon = L"Segoe Fluent Icons";
     else if (HasFamily(sys.Get(), L"Segoe MDL2 Assets")) icon = L"Segoe MDL2 Assets";
     icons_ = icon != nullptr;
+    fluentDisplayFamily_ = display;
+    monoFamily_ = HasFamily(sys.Get(), L"Cascadia Mono") ? L"Cascadia Mono" : HasFamily(sys.Get(), L"Consolas") ? L"Consolas" : L"Courier New";
     if (retro_) {
         // Console look: Cascadia Mono (Windows Terminal's font), then Consolas, then Courier New. No icon glyphs.
         text = HasFamily(sys.Get(), L"Cascadia Mono") ? L"Cascadia Mono"
@@ -118,54 +120,101 @@ bool Gfx::Init() {
 
 namespace {
 
-// Returns `a` minus `b` as a path geometry.
-ComPtr<ID2D1Geometry> Subtract(ID2D1Factory* f, ID2D1Geometry* a, ID2D1Geometry* b) {
+ComPtr<ID2D1Geometry> Combine(ID2D1Factory* f, ID2D1Geometry* a, ID2D1Geometry* b, D2D1_COMBINE_MODE mode) {
     ComPtr<ID2D1PathGeometry> pg;
     ComPtr<ID2D1GeometrySink> sink;
     if (FAILED(f->CreatePathGeometry(pg.GetAddressOf())) || FAILED(pg->Open(sink.GetAddressOf()))) return nullptr;
-    const HRESULT hr = a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, sink.Get());
+    const HRESULT hr = a->CombineWithGeometry(b, mode, nullptr, sink.Get());
     const HRESULT hc = sink->Close();
     if (FAILED(hr) || FAILED(hc)) return nullptr;
     return pg;
 }
 
-ComPtr<ID2D1Geometry> Bezier(ID2D1Factory* f, D2D1_POINT_2F p0, D2D1_POINT_2F c1, D2D1_POINT_2F c2, D2D1_POINT_2F p1) {
+// Mark geometry in the 256-unit box; the same numbers are in tools/make_icon.ps1 and assets/brand/moonsr_mark.svg.
+constexpr float kMX = 140, kMY = 124, kMR = 80;                // moon disc
+constexpr float kCX = 168, kCY = 112, kCR = 71;                // cut disc
+constexpr float kRX = 130, kRY = 150, kRA = 116, kRRot = -18;  // orbit ring: lower half of a rotated ellipse band
+constexpr float kSX = 160, kSY = 98;                           // star centre
+constexpr float kTrails[3][3] = {{-13, 3, 0.30f}, {-25, 6, 0.16f}, {-36, 9, 0.07f}};
+// Visible box of the mark (with trails and ring), used to fit it into a rectangle.
+constexpr float kBoxL = 16, kBoxT = 40, kBoxR = 244, kBoxB = 216;
+
+D2D1_POINT_2F RingPoint(float x, float y) {  // ellipse-local point -> mark space
+    const float a = kRRot * 3.14159265f / 180.0f, c = std::cos(a), s = std::sin(a);
+    return D2D1::Point2F(kRX + x * c - y * s, kRY + x * s + y * c);
+}
+
+ComPtr<ID2D1Geometry> RingGeometry(ID2D1Factory* f, float outB, float inB) {
     ComPtr<ID2D1PathGeometry> pg;
     ComPtr<ID2D1GeometrySink> sink;
     if (FAILED(f->CreatePathGeometry(pg.GetAddressOf())) || FAILED(pg->Open(sink.GetAddressOf()))) return nullptr;
-    sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_HOLLOW);
-    sink->AddBezier(D2D1::BezierSegment(c1, c2, p1));
-    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    // Left end -> bottom of the outer ellipse -> right end, then back along the inner ellipse (quarter arcs, so the arc size
+    // is never ambiguous).
+    sink->BeginFigure(RingPoint(-kRA, 0), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddArc(D2D1::ArcSegment(RingPoint(0, outB), D2D1::SizeF(kRA, outB), kRRot, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    sink->AddArc(D2D1::ArcSegment(RingPoint(kRA, 0), D2D1::SizeF(kRA, outB), kRRot, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    sink->AddArc(D2D1::ArcSegment(RingPoint(0, inB), D2D1::SizeF(kRA, inB), kRRot, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    sink->AddArc(D2D1::ArcSegment(RingPoint(-kRA, 0), D2D1::SizeF(kRA, inB), kRRot, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return nullptr;
+    return pg;
+}
+
+// Four-point star: tips at (cx, cy -/+ v) and (cx -/+ h, cy), concave sides through (cx +/- k, cy +/- k).
+ComPtr<ID2D1Geometry> StarGeometry(ID2D1Factory* f, float cx, float cy, float v, float h, float k) {
+    ComPtr<ID2D1PathGeometry> pg;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(f->CreatePathGeometry(pg.GetAddressOf())) || FAILED(pg->Open(sink.GetAddressOf()))) return nullptr;
+    const D2D1_POINT_2F tips[4] = {{cx, cy - v}, {cx + h, cy}, {cx, cy + v}, {cx - h, cy}};
+    const D2D1_POINT_2F ctl[4] = {{cx + k, cy - k}, {cx + k, cy + k}, {cx - k, cy + k}, {cx - k, cy - k}};
+    sink->BeginFigure(tips[0], D2D1_FIGURE_BEGIN_FILLED);
+    for (int i = 0; i < 4; ++i) sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(ctl[i], tips[(i + 1) % 4]));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
     if (FAILED(sink->Close())) return nullptr;
     return pg;
 }
 
 }  // namespace
 
-// Logo geometry in the unit space of assets/brand/moonsr_mockup.svg. The mockup's dark "cut" circle (#20233F) is a real
-// cut here: the top-right tile and the moon circle both have it subtracted, so the mark works on any background.
+// Logo geometry: crescent = moon disc minus the cut disc; rim = the crescent along the cut edge; ring; star. The simple
+// variant has a larger moon, a thicker rim and ring and a larger star (matches the 16..32 px icon).
 void Gfx::BuildLogoGeometry() {
-    ComPtr<ID2D1EllipseGeometry> cut, moon;
-    d2d_->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(291, 76), 35, 35), cut.GetAddressOf());
-    d2d_->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(275, 89), 36, 36), moon.GetAddressOf());
-    if (!cut || !moon) return;
-    for (int i = 0; i < 2; ++i) {
-        const float in = i ? 5.0f : 0.0f;
-        ComPtr<ID2D1RoundedRectangleGeometry> tile;
-        d2d_->CreateRoundedRectangleGeometry(
-            D2D1::RoundedRect(D2D1::RectF(207 + in, 72 + in, 307 - in, 195 - in), 29 - in * 0.5f, 29 - in * 0.5f),
-            tile.GetAddressOf());
-        if (tile) tileTR_[i] = Subtract(d2d_.Get(), tile.Get(), cut.Get());
+    ID2D1Factory* f = d2d_.Get();
+    for (int v = 0; v < 2; ++v) {
+        const bool simple = v == 1;
+        const float grow = simple ? 6.0f : 0.0f;
+        ComPtr<ID2D1EllipseGeometry> moon, cutDisc;
+        f->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(kMX, kMY), kMR + grow, kMR + grow), moon.GetAddressOf());
+        f->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(kCX, kCY), kCR - grow * 0.4f, kCR - grow * 0.4f), cutDisc.GetAddressOf());
+        if (!moon || !cutDisc) continue;
+        LogoGeometry& g = logo_[v];
+        g.crescent = Combine(f, moon.Get(), cutDisc.Get(), D2D1_COMBINE_MODE_EXCLUDE);
+        ComPtr<ID2D1PathGeometry> band;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(f->CreatePathGeometry(band.GetAddressOf())) && SUCCEEDED(band->Open(sink.GetAddressOf()))) {
+            const HRESULT hw = cutDisc->Widen(simple ? 10.0f : 7.0f, nullptr, nullptr, sink.Get());
+            if (SUCCEEDED(sink->Close()) && SUCCEEDED(hw) && g.crescent)
+                g.rim = Combine(f, g.crescent.Get(), band.Get(), D2D1_COMBINE_MODE_INTERSECT);
+        }
+        g.ring = simple ? RingGeometry(f, 46.0f, 22.0f) : RingGeometry(f, 40.0f, 25.0f);
+        g.star = simple ? StarGeometry(f, kSX + 2.0f, kSY + 2.0f, 36.0f, 28.0f, 5.5f) : StarGeometry(f, kSX, kSY, 27.0f, 21.0f, 3.2f);
     }
-    crescent_ = Subtract(d2d_.Get(), moon.Get(), cut.Get());
-    highlight_[0] = Bezier(d2d_.Get(), D2D1::Point2F(104, 97), D2D1::Point2F(128, 80), D2D1::Point2F(156, 82), D2D1::Point2F(177, 93));
-    highlight_[1] = Bezier(d2d_.Get(), D2D1::Point2F(224, 97), D2D1::Point2F(241, 85), D2D1::Point2F(263, 84), D2D1::Point2F(282, 92));
 }
 
 ComPtr<IDWriteTextFormat> Gfx::MakeDisplayFormat(float size, DWRITE_FONT_WEIGHT weight) const {
     ComPtr<IDWriteTextFormat> f;
     if (FAILED(dw_->CreateTextFormat(displayFamily_.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                      size, L"en-us", f.GetAddressOf())))
+        return nullptr;
+    f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    return f;
+}
+
+ComPtr<IDWriteTextFormat> Gfx::MakeFamilyFormat(bool mono, float size, DWRITE_FONT_WEIGHT weight) const {
+    ComPtr<IDWriteTextFormat> f;
+    const std::wstring& fam = mono ? monoFamily_ : fluentDisplayFamily_;
+    if (FAILED(dw_->CreateTextFormat(fam.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us",
+                                     f.GetAddressOf())))
         return nullptr;
     f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     return f;
@@ -229,6 +278,8 @@ bool Canvas::Begin(HWND hwnd, UINT dpi, bool alpha) {
         if (sz.width != w || sz.height != h) rt_->Resize(D2D1::SizeU(w, h));
     }
     clipDepth_ = 0;
+    layerDepth_ = 0;
+    phosphor_ = false;
     SetStyle(gfx_.radiusCap(), gfx_.borderWidth());
     rt_->BeginDraw();
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -237,6 +288,7 @@ bool Canvas::Begin(HWND hwnd, UINT dpi, bool alpha) {
 
 bool Canvas::End() {
     if (!rt_) return false;
+    while (layerDepth_ > 0) PopOpacity();
     while (clipDepth_ > 0) PopClip();
     const HRESULT hr = rt_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
@@ -255,6 +307,8 @@ bool Canvas::End() {
 void Canvas::Release() {
     brush_.Reset();
     dashStroke_.Reset();
+    scanBrush_.Reset();
+    layer_.Reset();
     rt_.Reset();
     hwnd_ = nullptr;
 }
@@ -263,8 +317,21 @@ void Canvas::Clear(const D2D1_COLOR_F& c) {
     if (rt_) rt_->Clear(c);
 }
 
+bool Canvas::IsGlowColor(const D2D1_COLOR_F& c) const {
+    auto matches = [&](const D2D1_COLOR_F& g) {
+        return std::fabs(c.r - g.r) + std::fabs(c.g - g.g) + std::fabs(c.b - g.b) < 0.03f && c.a > 0.5f;
+    };
+    return matches(glowA_) || matches(glowB_);
+}
+
 void Canvas::FillRect(const Rect& r, const D2D1_COLOR_F& c) {
     if (!rt_) return;
+    if (phosphor_ && IsGlowColor(c)) {  // phosphor bloom: two faint, slightly larger copies under the block
+        brush_->SetColor(D2D1_COLOR_F{c.r, c.g, c.b, 0.07f * c.a});
+        rt_->FillRectangle(Inflate(r, 3.0f), brush_.Get());
+        brush_->SetColor(D2D1_COLOR_F{c.r, c.g, c.b, 0.14f * c.a});
+        rt_->FillRectangle(Inflate(r, 1.5f), brush_.Get());
+    }
     brush_->SetColor(c);
     rt_->FillRectangle(r, brush_.Get());
 }
@@ -344,6 +411,17 @@ void Canvas::Text(const std::wstring& s, const Rect& r, Font f, const D2D1_COLOR
                                                 : DWRITE_TEXT_ALIGNMENT_TRAILING);
     fmt->SetParagraphAlignment(wrap ? DWRITE_PARAGRAPH_ALIGNMENT_NEAR : DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     fmt->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (phosphor_ && IsGlowColor(c)) {
+        // Phosphor glow: the text eight times around its position at low alpha gives a soft halo (no effect pipeline
+        // needed; the HWND target has no blur).
+        static const float kDir[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7f, 0.7f}, {-0.7f, 0.7f}, {0.7f, -0.7f}, {-0.7f, -0.7f}};
+        brush_->SetColor(D2D1_COLOR_F{c.r, c.g, c.b, 0.085f * c.a});
+        for (const auto& d : kDir) {
+            const Rect o{r.left + d[0] * 1.6f, r.top + d[1] * 1.6f, r.right + d[0] * 1.6f, r.bottom + d[1] * 1.6f};
+            rt_->DrawText(s.c_str(), static_cast<UINT32>(s.size()), fmt, o, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE,
+                          DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
     brush_->SetColor(c);
     rt_->DrawText(s.c_str(), static_cast<UINT32>(s.size()), fmt, r, brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP,
                   DWRITE_MEASURING_MODE_NATURAL);
@@ -352,6 +430,10 @@ void Canvas::Text(const std::wstring& s, const Rect& r, Font f, const D2D1_COLOR
 
 void Canvas::Icon(wchar_t glyph, const Rect& r, Font f, const D2D1_COLOR_F& c) {
     if (!gfx_.hasIcons() || glyph == 0) return;
+    if (glyph == kGlyphNeuralNet) {
+        NeuralNetGlyph(r, gfx_.Format(f)->GetFontSize(), c);
+        return;
+    }
     if (glyph == 0xE7A1 && !gfx_.hasFluentIcons()) glyph = 0xE9E9; // Contrast uses Equalizer in MDL2.
     Text(std::wstring(1, glyph), r, f, c, HAlign::Center);
 }
@@ -381,118 +463,139 @@ void Canvas::FillGradient(const Rect& r, float radius, const std::vector<Stop>& 
     else rt_->FillRectangle(r, b.Get());
 }
 
-void Canvas::LogoMark(const Rect& r, bool detailed, bool onLight) {
+void Canvas::LogoMark(const Rect& r, const LogoColors& lc, bool glow) {
     if (!rt_) return;
-    // Unit space of the SVG: the glass grid spans (74,72)-(307,307).
-    const float s = std::min(RW(r), RH(r)) / 233.0f;
+    const float bw = kBoxR - kBoxL, bh = kBoxB - kBoxT;
+    const float s = std::min(RW(r) / bw, RH(r) / bh);
+    const bool simple = RH(r) * DpiScale() < 34.0f;  // simplified mark below about 34 device pixels
+    const Gfx::LogoGeometry& g = gfx_.logo(simple);
+    if (!g.crescent || !g.ring || !g.star) return;
     D2D1_MATRIX_3X2_F old;
     rt_->GetTransform(&old);
-    const float ox = r.left + (RW(r) - 233.0f * s) * 0.5f, oy = r.top + (RH(r) - 233.0f * s) * 0.5f;
-    rt_->SetTransform(D2D1::Matrix3x2F::Translation(-74.0f, -72.0f) * D2D1::Matrix3x2F::Scale(s, s) *
-                      D2D1::Matrix3x2F::Translation(ox, oy) * old);
+    const float ox = r.left + (RW(r) - bw * s) * 0.5f, oy = r.top + (RH(r) - bh * s) * 0.5f;
+    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Translation(-kBoxL, -kBoxT) * D2D1::Matrix3x2F::Scale(s, s) *
+                                D2D1::Matrix3x2F::Translation(ox, oy) * old;
+    rt_->SetTransform(m);
 
-    auto linear = [&](const std::vector<Stop>& st, D2D1_POINT_2F a, D2D1_POINT_2F b) {
-        const std::vector<D2D1_GRADIENT_STOP> gs = ToStops(st);
+    auto linear = [&](std::initializer_list<D2D1_GRADIENT_STOP> st, D2D1_POINT_2F a, D2D1_POINT_2F b) {
         ComPtr<ID2D1GradientStopCollection> coll;
         ComPtr<ID2D1LinearGradientBrush> br;
-        if (SUCCEEDED(rt_->CreateGradientStopCollection(gs.data(), static_cast<UINT32>(gs.size()), coll.GetAddressOf())))
+        if (SUCCEEDED(rt_->CreateGradientStopCollection(st.begin(), static_cast<UINT32>(st.size()), coll.GetAddressOf())))
             rt_->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(a, b), coll.Get(), br.GetAddressOf());
         return br;
     };
-    auto radial = [&](const std::vector<Stop>& st, D2D1_POINT_2F c, float rx, float ry) {
-        const std::vector<D2D1_GRADIENT_STOP> gs = ToStops(st);
+    auto halo = [&](float cx, float cy, float rad, const D2D1_COLOR_F& c) {
+        const D2D1_COLOR_F z{c.r, c.g, c.b, 0.0f};
+        const D2D1_GRADIENT_STOP st[4] = {{0.0f, c}, {0.35f, D2D1_COLOR_F{c.r, c.g, c.b, c.a * 0.65f}}, {0.7f, D2D1_COLOR_F{c.r, c.g, c.b, c.a * 0.22f}}, {1.0f, z}};
         ComPtr<ID2D1GradientStopCollection> coll;
         ComPtr<ID2D1RadialGradientBrush> br;
-        if (SUCCEEDED(rt_->CreateGradientStopCollection(gs.data(), static_cast<UINT32>(gs.size()), coll.GetAddressOf())))
-            rt_->CreateRadialGradientBrush(D2D1::RadialGradientBrushProperties(c, D2D1::Point2F(0, 0), rx, ry), coll.Get(),
-                                           br.GetAddressOf());
-        return br;
+        if (SUCCEEDED(rt_->CreateGradientStopCollection(st, 4, coll.GetAddressOf())) &&
+            SUCCEEDED(rt_->CreateRadialGradientBrush(D2D1::RadialGradientBrushProperties(D2D1::Point2F(cx, cy), D2D1::Point2F(0, 0), rad, rad),
+                                                     coll.Get(), br.GetAddressOf())))
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad), br.Get());
     };
 
-    if (detailed) {
-        // Halo (radial, clipped to a circle) and the blurred glow disc (erf profile = gaussian-blurred circle r109).
-        if (auto halo = radial({{0.0f, Rgb(0x45BFFF, 0.30f)}, {1.0f, Rgb(0x536AFF, 0.0f)}}, D2D1::Point2F(199, 176), 175, 139))
-            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(197, 177), 157, 157), halo.Get());
-        std::vector<Stop> gl;
-        for (int i = 0; i <= 12; ++i) {
-            const float t = static_cast<float>(i) / 12.0f, d = 166.0f * t;
-            gl.push_back({t, Rgb(0x588DFF, 0.65f * 0.5f * static_cast<float>(std::erfc((d - 109.0) / (19.0 * 1.41421356))))});
+    if (glow && lc.glow.a > 0.0f) halo(kMX - 6.0f, kMY + 4.0f, kMR * 1.55f, lc.glow);
+    if (!simple) {
+        for (int i = 2; i >= 0; --i) {
+            brush_->SetColor(D2D1_COLOR_F{lc.trail.r, lc.trail.g, lc.trail.b, kTrails[i][2]});
+            rt_->SetTransform(D2D1::Matrix3x2F::Translation(kTrails[i][0], kTrails[i][1]) * m);
+            rt_->FillGeometry(g.crescent.Get(), brush_.Get());
         }
-        if (auto glow = radial(gl, D2D1::Point2F(191, 190), 166, 166))
-            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(191, 190), 166, 166), glow.Get());
-        // Drop shadow of the tiles: a few expanding translucent layers (a cheap stand-in for the blurred alpha).
-        const float rcs[4][5] = {{74, 72, 123, 123, 31}, {207, 72, 100, 123, 29}, {74, 207, 123, 100, 29}, {207, 207, 100, 100, 28}};
-        const float ex[5] = {-3.0f, 2.0f, 7.0f, 12.0f, 17.0f}, al[5] = {0.060f, 0.045f, 0.035f, 0.030f, 0.022f};
-        for (int k = 4; k >= 0; --k)
-            for (const auto& q : rcs)
-                FillRound(Rect{q[0] - ex[k], q[1] + 11.0f - ex[k], q[0] + q[2] + ex[k], q[1] + q[3] + 11.0f + ex[k]}, q[4] + ex[k],
-                          D2D1_COLOR_F{0, 0, 0, al[k]});
+        rt_->SetTransform(m);
     }
-
-    const float in = detailed ? 0.0f : 5.0f;
-    const uint32_t c0 = detailed ? 0xB8F5FF : 0x7DDDFF;
-    const float a0 = detailed ? 0.88f : 1.0f, a1 = detailed ? 0.73f : 0.95f, a2 = detailed ? 0.82f : 0.97f;
-    // On a light surface the small mark uses deeper tile colours so it keeps its contrast.
-    const bool deep = onLight && !detailed;
-    auto glass = linear({{0.0f, Rgb(deep ? 0x2FA6EA : c0, a0)}, {0.45f, Rgb(deep ? 0x3A93E6 : 0x5BC7FF, a1)}, {1.0f, Rgb(deep ? 0x6A5CE3 : 0x8279FF, a2)}},
-                        D2D1::Point2F(67, 49), D2D1::Point2F(309, 307));
-    if (glass) {
-        const float op[4] = {1.0f, detailed ? 0.78f : 0.92f, detailed ? 0.69f : 0.88f, detailed ? 0.57f : 0.84f};
-        const float rr[4][5] = {{74, 72, 123, 123, 31}, {207, 72, 100, 123, 29}, {74, 207, 123, 100, 29}, {207, 207, 100, 100, 28}};
-        for (int i = 0; i < 4; ++i) {
-            glass->SetOpacity(op[i]);
-            if (i == 1) {
-                if (gfx_.logoTopRightTile(!detailed)) rt_->FillGeometry(gfx_.logoTopRightTile(!detailed), glass.Get());
-            } else {
-                const float* q = rr[i];
-                const float rad = q[4] - in * 0.5f;
-                rt_->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(q[0] + in, q[1] + in, q[0] + q[2] - in, q[1] + q[3] - in), rad, rad), glass.Get());
-            }
-        }
+    if (auto mb = linear({{0.0f, lc.moonA}, {0.5f, lc.moonB}, {1.0f, lc.moonC}}, D2D1::Point2F(kMX - kMR, kMY - kMR),
+                         D2D1::Point2F(kMX + kMR, kMY + kMR)))
+        rt_->FillGeometry(g.crescent.Get(), mb.Get());
+    if (g.rim) {
+        brush_->SetColor(D2D1_COLOR_F{lc.rim.r, lc.rim.g, lc.rim.b, lc.rim.a * (simple ? 0.75f : 0.85f)});
+        rt_->FillGeometry(g.rim.Get(), brush_.Get());
     }
-    if (detailed) {
-        brush_->SetColor(Rgb(0xFFFFFF, 0.55f));
-        if (gfx_.logoHighlight(0)) rt_->DrawGeometry(gfx_.logoHighlight(0), brush_.Get(), 5.0f, gfx_.roundStroke());
-        brush_->SetColor(Rgb(0xFFFFFF, 0.45f));
-        if (gfx_.logoHighlight(1)) rt_->DrawGeometry(gfx_.logoHighlight(1), brush_.Get(), 5.0f, gfx_.roundStroke());
-    }
-    brush_->SetColor(Rgb(0xFFF2C7));
-    if (gfx_.logoCrescent()) rt_->FillGeometry(gfx_.logoCrescent(), brush_.Get());
-    brush_->SetColor(Rgb(0xF4FBFF));
-    const float cw = detailed ? 8.0f : 11.0f;
-    rt_->DrawLine(D2D1::Point2F(240, 258), D2D1::Point2F(254, 272), brush_.Get(), cw, gfx_.roundStroke());
-    rt_->DrawLine(D2D1::Point2F(254, 272), D2D1::Point2F(285, 236), brush_.Get(), cw, gfx_.roundStroke());
+    if (auto rb = linear({{0.0f, lc.ringA}, {1.0f, lc.ringB}}, D2D1::Point2F(kRX - kRA, 0), D2D1::Point2F(kRX + kRA, 0)))
+        rt_->FillGeometry(g.ring.Get(), rb.Get());
+    if (glow && lc.glow.a > 0.0f && !simple) halo(kSX, kSY, 22.0f, D2D1_COLOR_F{lc.star.r, lc.star.g, lc.star.b, 0.5f});
+    brush_->SetColor(lc.star);
+    rt_->FillGeometry(g.star.Get(), brush_.Get());
     rt_->SetTransform(old);
 }
 
-float Canvas::Wordmark(float x, float y, float size, const D2D1_COLOR_F& moonA, const D2D1_COLOR_F& moonB, const D2D1_COLOR_F& sr) {
+float Canvas::Wordmark(float x, float y, float size, const D2D1_COLOR_F& moon, const D2D1_COLOR_F& srA, const D2D1_COLOR_F& srB,
+                       float* height, int monoOverride) {
     if (!rt_) return 0.0f;
-    ComPtr<IDWriteTextFormat> fmt = gfx_.MakeDisplayFormat(size, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    const bool mono = monoOverride < 0 ? gfx_.retro() : monoOverride != 0;
+    const DWRITE_FONT_WEIGHT wt = mono ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_SEMI_BOLD;
+    ComPtr<IDWriteTextFormat> fmt = monoOverride < 0 ? gfx_.MakeDisplayFormat(size, wt) : gfx_.MakeFamilyFormat(mono, size, wt);
     if (!fmt) return 0.0f;
-    const float spacing = -0.04f * size;
+    const float spacing = mono ? 0.0f : -0.02f * size;
+    float lineH = size * 1.3f;
     auto make = [&](const wchar_t* t, ComPtr<IDWriteTextLayout>& out) {
         const UINT32 n = static_cast<UINT32>(wcslen(t));
         if (FAILED(gfx_.dwrite()->CreateTextLayout(t, n, fmt.Get(), 2000.0f, size * 2.0f, out.GetAddressOf()))) return 0.0f;
         ComPtr<IDWriteTextLayout1> l1;
-        if (SUCCEEDED(out.As(&l1))) l1->SetCharacterSpacing(0.0f, spacing, 0.0f, DWRITE_TEXT_RANGE{0, n});
-        DWRITE_TEXT_METRICS m{};
-        out->GetMetrics(&m);
-        return m.widthIncludingTrailingWhitespace;
+        if (spacing != 0.0f && SUCCEEDED(out.As(&l1))) l1->SetCharacterSpacing(0.0f, spacing, 0.0f, DWRITE_TEXT_RANGE{0, n});
+        DWRITE_TEXT_METRICS tm{};
+        out->GetMetrics(&tm);
+        lineH = tm.height;
+        return tm.widthIncludingTrailingWhitespace;
     };
     ComPtr<IDWriteTextLayout> lm, ls;
     const float wm = make(L"Moon", lm), ws = make(L"SR", ls);
     if (!lm || !ls) return 0.0f;
-    const D2D1_GRADIENT_STOP gs[2] = {{0.0f, moonA}, {1.0f, moonB}};
+    if (height) *height = lineH;
+    if (phosphor_) {  // halo around the bright "SR" (console themes)
+        brush_->SetColor(D2D1_COLOR_F{srB.r, srB.g, srB.b, 0.09f});
+        static const float kDir[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7f, 0.7f}, {-0.7f, 0.7f}, {0.7f, -0.7f}, {-0.7f, -0.7f}};
+        for (const auto& d : kDir) rt_->DrawTextLayout(D2D1::Point2F(x + wm + d[0] * 1.8f, y + d[1] * 1.8f), ls.Get(), brush_.Get());
+    }
+    brush_->SetColor(moon);
+    rt_->DrawTextLayout(D2D1::Point2F(x, y), lm.Get(), brush_.Get());
+    const D2D1_GRADIENT_STOP gs[2] = {{0.0f, srA}, {1.0f, srB}};
     ComPtr<ID2D1GradientStopCollection> coll;
     ComPtr<ID2D1LinearGradientBrush> gb;
     if (SUCCEEDED(rt_->CreateGradientStopCollection(gs, 2, coll.GetAddressOf())))
-        rt_->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(x, y), D2D1::Point2F(x + wm + ws, y + size)),
+        rt_->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(x + wm, y), D2D1::Point2F(x + wm + ws, y)),
                                        coll.Get(), gb.GetAddressOf());
-    if (gb) rt_->DrawTextLayout(D2D1::Point2F(x, y), lm.Get(), gb.Get());
-    brush_->SetColor(sr);
-    rt_->DrawTextLayout(D2D1::Point2F(x + wm, y), ls.Get(), brush_.Get());
+    if (gb) rt_->DrawTextLayout(D2D1::Point2F(x + wm, y), ls.Get(), gb.Get());
     return wm + ws;
+}
+
+void Canvas::Scanlines(const Rect& r, float strength) {
+    if (!rt_ || strength <= 0.0f) return;
+    if (!scanBrush_) {
+        // 1 x 3 device pixels: two clear rows and one dark row; the bitmap's DPI matches the target so it maps 1:1 to pixels.
+        const uint32_t px[3] = {0x00000000u, 0x00000000u, 0xFF000000u};
+        ComPtr<ID2D1Bitmap> bmp;
+        const D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                                                                 static_cast<float>(dpi_), static_cast<float>(dpi_));
+        if (FAILED(rt_->CreateBitmap(D2D1::SizeU(1, 3), px, 4, bp, bmp.GetAddressOf()))) return;
+        if (FAILED(rt_->CreateBitmapBrush(bmp.Get(), D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_WRAP, D2D1_EXTEND_MODE_WRAP,
+                                                                                 D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR),
+                                          scanBrush_.GetAddressOf())))
+            return;
+    }
+    scanBrush_->SetOpacity(strength);
+    D2D1_MATRIX_3X2_F old;
+    rt_->GetTransform(&old);
+    rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+    const D2D1_ANTIALIAS_MODE am = rt_->GetAntialiasMode();
+    rt_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    rt_->FillRectangle(r, scanBrush_.Get());
+    rt_->SetAntialiasMode(am);
+    rt_->SetTransform(old);
+}
+
+void Canvas::PushOpacity(const Rect& r, float alpha) {
+    if (!rt_) return;
+    if (!layer_ && FAILED(rt_->CreateLayer(nullptr, layer_.GetAddressOf()))) return;
+    rt_->PushLayer(D2D1::LayerParameters(r, nullptr, D2D1_ANTIALIAS_MODE_ALIASED, D2D1::IdentityMatrix(), std::clamp(alpha, 0.0f, 1.0f)),
+                   layer_.Get());
+    ++layerDepth_;
+}
+
+void Canvas::PopOpacity() {
+    if (!rt_ || layerDepth_ <= 0) return;
+    rt_->PopLayer();
+    --layerDepth_;
 }
 
 float Canvas::SpacedText(const std::wstring& s, float x, float y, float size, DWRITE_FONT_WEIGHT weight, const D2D1_COLOR_F& c,
@@ -510,6 +613,27 @@ float Canvas::SpacedText(const std::wstring& s, float x, float y, float size, DW
     brush_->SetColor(c);
     rt_->DrawTextLayout(D2D1::Point2F(x, y), l.Get(), brush_.Get());
     return m.widthIncludingTrailingWhitespace;
+}
+
+// A three-layer network (2, 3 and 2 nodes, every node joined to the next layer) on the Segoe Fluent icon grid: the drawing
+// spans about 16/18 of the em, lines are as thick as the font's 1 px outline strokes and the nodes are solid dots.
+void Canvas::NeuralNetGlyph(const Rect& r, float em, const D2D1_COLOR_F& c) {
+    if (!rt_) return;
+    const float u = em / 18.0f;  // the nav icons are 18 DIP glyphs
+    const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f;
+    const float dx = 7.0f * u, outer = 3.9f * u, inner = 7.0f * u, node = 1.65f * u, line = std::max(0.8f, 0.85f * u);
+    const D2D1_POINT_2F l0[2] = {{cx - dx, cy - outer}, {cx - dx, cy + outer}};
+    const D2D1_POINT_2F l1[3] = {{cx, cy - inner}, {cx, cy}, {cx, cy + inner}};
+    const D2D1_POINT_2F l2[2] = {{cx + dx, cy - outer}, {cx + dx, cy + outer}};
+    brush_->SetColor(D2D1_COLOR_F{c.r, c.g, c.b, c.a * 0.72f});
+    for (const auto& a : l0)
+        for (const auto& b : l1) rt_->DrawLine(a, b, brush_.Get(), line, gfx_.roundStroke());
+    for (const auto& a : l1)
+        for (const auto& b : l2) rt_->DrawLine(a, b, brush_.Get(), line, gfx_.roundStroke());
+    brush_->SetColor(c);
+    for (const auto& p : l0) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
+    for (const auto& p : l1) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
+    for (const auto& p : l2) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
 }
 
 void Canvas::PushClip(const Rect& r) {

@@ -25,3 +25,9 @@ border_width = 1
 # Console-style options.
 bracketed_controls = true
 prompt_headers = true
+
+# Logo and effects (optional). Effects only show when Settings > Application > Visual effects is on.
+logo_gradient_start = #16C60C
+logo_gradient_end = #B4F5A8
+glow = true
+scanlines = true
