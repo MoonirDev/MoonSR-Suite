@@ -93,7 +93,6 @@ private:
     void SetupBackdrop();
     // Visual effects: the setting, forced off when Windows animation effects or transparency effects are off.
     bool EffectsWanted() const;
-    static bool SystemEffectsAllowed();
     void ApplyEffects(bool force);
     void ApplyDpiAndSize(const RECT* suggested);
     UINT CurrentDpi() const;

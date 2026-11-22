@@ -55,7 +55,7 @@ The vector source is `assets/brand/moonsr_mark.svg`; the application icon is gen
 ## Visual effects
 
 **Settings > Application > Visual effects** (default on, stored as `[App] VisualEffects = 1 | 0`) controls transparency, glow
-and animation. Effects are also off whenever Windows **Animation effects** or **Transparency effects** are off.
+and animation. This switch overrides the Windows **Animation effects** and **Transparency effects** settings (with Windows transparency off, the window backdrop may still be drawn solid).
 
 | Theme | With visual effects on |
 |---|---|

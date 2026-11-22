@@ -608,36 +608,15 @@ bool MainWindow::EffectsWanted() const {
     return effectsSetting_;
 }
 
-// Windows "Animation effects" (SPI_GETCLIENTAREAANIMATION) and "Transparency effects" (Personalize\EnableTransparency).
-bool MainWindow::SystemEffectsAllowed() {
-    BOOL anim = TRUE;
-    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0)) anim = TRUE;
-    DWORD transparency = 1, size = sizeof(transparency);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"EnableTransparency",
-                     RRF_RT_REG_DWORD, nullptr, &transparency, &size) != ERROR_SUCCESS)
-        transparency = 1;
-    return anim != FALSE && transparency != 0;
-}
-
 void MainWindow::ApplyEffects(bool force) {
-    // --test-effects 1 forces the effects on even when Windows has them off (screenshots on machines with effects off).
-    const bool system = SystemEffectsAllowed() || test_.effects == 1;
-    const bool on = EffectsWanted() && system;
-    if (ui_.visualEffectsRow) {
-        const std::wstring desc = EffectsWanted() && !system
-                                      ? L"Off while Windows animation or transparency effects are turned off."
-                                      : L"Transparency, glow and animations. Turn off for a plain look or on slower PCs.";
-        if (ui_.visualEffectsRow->desc != desc) {
-            ui_.visualEffectsRow->desc = desc;
-            view_.Invalidate();
-        }
-    }
+    // MoonSR's own "Visual effects" switch decides (owner's choice, 2026-11-22): it overrides Windows' animation and
+    // transparency settings. DWM may still show a solid backdrop when Windows transparency effects are off.
+    const bool on = EffectsWanted();
     if (!force && effectsApplied_ == (on ? 1 : 0)) return;
     effectsApplied_ = on ? 1 : 0;
     view_.SetEffects(on);
     if (hwnd_) SetupBackdrop();
-    MSR_LOG_INFO(L"Visual effects: {} (setting {}, Windows effects {})", on ? L"on" : L"off", EffectsWanted() ? L"on" : L"off",
-                 system ? L"on" : L"off");
+    MSR_LOG_INFO(L"Visual effects: {}", on ? L"on" : L"off");
 }
 
 void MainWindow::RefreshThemes() {
