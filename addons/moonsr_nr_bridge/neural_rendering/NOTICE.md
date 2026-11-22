@@ -11,6 +11,7 @@ This addon is a new implementation, independent of the retired DLSS5NR01 engine.
 
 - `src/model_forwarder.cpp` is a modified D3D12-only extraction of `OptiScaler/dlssnr/forwarder/dlssnr_forwarder.cpp` at the pinned OptiScaler revision. Original SHA-256: `9ea3b2639aca66df04bac0f37cc119e0b8b2f0de9d4160e54577981ed2c5f4de`. Changes remove Vulkan/D3D11, enforce device association and feature counts, check creation results and required runtime exports, report DLL loading failures, and add explicit device shutdown/unload. The original anti-tail-call boundary and parameter/create/evaluate logic are retained. It is covered by the OptiScaler GPL notice above.
 
-MoonSR copy: only the sources, shaders and vendor inputs that MoonSR's bridge compiles are kept. The addon's own
-CMake build (which checked `third_party/manifest.json`) and its other files were removed;
-`addons/moonsr_nr_bridge/CMakeLists.txt` builds these sources.
+MoonSR copy, taken from `addons/NeuralRendering` in https://github.com/FriedSnowman/ls-addon-manager and kept at
+`addons/moonsr_nr_bridge/neural_rendering`: only the sources, shaders and vendor inputs that MoonSR's bridge compiles
+are kept. The addon's own CMake build (which checked `third_party/manifest.json`) and its other files were
+removed; `addons/moonsr_nr_bridge/CMakeLists.txt` builds these sources.

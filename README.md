@@ -72,9 +72,8 @@ Binaries are written to `build\main\bin`:
 
 MoonSR is released under the [MIT licence](LICENSE).
 
-The exception is the neural rendering bridge (`addons/moonsr_nr_bridge/` and the
-`ls-addon-manager/addons/NeuralRendering/` sources it compiles). It contains OptiScaler code and is therefore
-**GPL-3.0-only**. It builds as the separate `MoonSR_NrBridge.dll`, which MoonSR loads at run time.
+The exception is the neural rendering bridge (`addons/moonsr_nr_bridge/`, including the `neural_rendering/`
+sources it compiles). It contains OptiScaler code and is therefore **GPL-3.0-only**. It builds as the separate `MoonSR_NrBridge.dll`, which MoonSR loads at run time.
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every third-party component and its licence.
 
 MoonSR includes and downloads no NVIDIA, AMD or Intel runtime, model or weights. DLSS is a trademark of NVIDIA

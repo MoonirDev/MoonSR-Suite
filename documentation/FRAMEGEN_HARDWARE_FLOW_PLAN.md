@@ -176,7 +176,7 @@ interpolation, scheduling, HUD protection, scene-cut handling, and software fall
 
 ## Existing reusable code
 
-- `ls-addon-manager/addons/NeuralRendering/src/optical_flow.{h,cpp}` provides a
+- `addons/moonsr_nr_bridge/neural_rendering/src/optical_flow.{h,cpp}` provides a
   D3D12 Optical Flow session, capability queries, registered input slots, and GPU
   fence synchronization. It loads the installed driver from System32.
 - Its `gpu.{h,cpp}` and the MoonSR NR bridge already establish D3D11/D3D12 resource

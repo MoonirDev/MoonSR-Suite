@@ -23,6 +23,6 @@ SOFTWARE.
 ---------------------------------------------------------------------------
 This licence covers every file in this repository except the directories and
 files listed in THIRD_PARTY_NOTICES.md, which keep their own licences. In
-particular, addons/moonsr_nr_bridge/ and ls-addon-manager/addons/NeuralRendering/
-are licensed under the GNU General Public License v3.0 only (see the LICENSE
-file in each).
+particular, addons/moonsr_nr_bridge/ (including its neural_rendering/ sources)
+is licensed under the GNU General Public License v3.0 only (see the LICENSE
+files in that folder).

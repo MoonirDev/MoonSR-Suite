@@ -6,7 +6,7 @@ and the OptiScaler composition pass. MoonSR sends the image at the selected posi
 an original Windows Graphics Capture image as the optical-flow guide.
 
 The C ABI is [moonsr_nr_bridge.h](../sdk/include/moonsr_nr_bridge.h), version 4. The `MoonSR_NrBridge` target builds
-the bridge and `NeuralRendering_nvngx.dll` from the supplied `ls-addon-manager` source; the MoonSR target
+the bridge and `NeuralRendering_nvngx.dll` from the sources in `addons/moonsr_nr_bridge/neural_rendering`; the MoonSR target
 builds both beside the executable. The separate `MoonSR_NrBridgeTemplate` is an ABI example only.
 
 The Neural rendering page selects the imported runtime file independently of its network hint (default,
@@ -27,7 +27,7 @@ NVIDIA-supported integration. Its first supported capture format is SDR BGRA8. W
 generation, it processes both generated and real displayed frames; the guide remains a resized original capture.
 The same guide can be used for more than one output frame, so optical flow between those repeated guides can be zero;
 motion quality in this configuration needs further validation with the user's runtime. The source and license
-notices are in `ls-addon-manager/addons/NeuralRendering/NOTICE.md` and that directory's `licenses/` folder.
+notices are in `addons/moonsr_nr_bridge/neural_rendering/NOTICE.md` and that directory's `licenses/` folder.
 
 ## Required bridge behavior
 

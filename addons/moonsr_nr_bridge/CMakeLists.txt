@@ -9,8 +9,8 @@ target_include_directories(MoonSR_NrBridgeTemplate PRIVATE ${CMAKE_CURRENT_LIST_
 set_target_properties(MoonSR_NrBridgeTemplate PROPERTIES OUTPUT_NAME "MoonSR_NrBridgeTemplate")
 
 get_filename_component(MOONSR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-set(NR_SOURCE "${MOONSR_ROOT}/ls-addon-manager/addons/NeuralRendering")
-set(NR_MANAGER_SDK "${MOONSR_ROOT}/ls-addon-manager/manager/sdk/include")
+set(NR_SOURCE "${CMAKE_CURRENT_LIST_DIR}/neural_rendering")
+set(NR_MANAGER_SDK "${CMAKE_CURRENT_LIST_DIR}/third_party")
 file(GLOB sdk_bins "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64")
 list(SORT sdk_bins COMPARE NATURAL ORDER DESCENDING)
 find_program(NR_FXC fxc HINTS ${sdk_bins} REQUIRED)

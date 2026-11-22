@@ -4,6 +4,15 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-21 - Session 4d: ls-addon-manager folder folded into the bridge
+
+- Owner: remove the `ls-addon-manager` folder. Its remaining files were the bridge's build inputs, so they moved into
+  the bridge: `addons/moonsr_nr_bridge/neural_rendering/` (the NeuralRendering subset, GPL-3.0-only, with its
+  LICENSE, NOTICE and licences) and `addons/moonsr_nr_bridge/third_party/eam/real_frame.h` (MIT, with its LICENSE).
+  Bridge CMake paths, LICENSE, README, THIRD_PARTY_NOTICES, NR_BRIDGE and the hardware-flow plan updated.
+
+---
+
 ## 2026-11-21 - Session 4c: cleanup and licence for publishing on GitHub
 
 - Owner: remove unused files and code before publishing; make the licence free to use. Decisions: MIT for MoonSR's
