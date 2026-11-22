@@ -1,8 +1,9 @@
 # MoonSR Suite
 
-MoonSR captures a game window, upscales it, can generate frames between the real ones, and shows the result in a
-borderless window at monitor resolution. It runs on Windows 10/11 and works across GPU vendors (NVIDIA, AMD, Intel).
-Lossless Scaling inspired the design. MoonSR does not inject anything into the game process.
+MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
+It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
+GPU vendors (NVIDIA, AMD, Intel). Lossless Scaling inspired the design. MoonSR does not inject anything into the 
+game process.
 
 It is an experimental personal project. Quality and speed claims come only from the measurements in
 [documentation/BENCHMARKS.md](documentation/BENCHMARKS.md), with the hardware and settings stated there.
