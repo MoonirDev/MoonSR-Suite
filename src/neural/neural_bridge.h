@@ -13,6 +13,8 @@ class GpuDevice;
 
 class NeuralBridge {
 public:
+    // The folder the bridge loads a vendor runtime from: amd-nr or intel-nr beside MoonSR.exe (empty for other vendors).
+    static std::wstring RuntimeDirectory(Vendor vendor);
     static std::wstring AmdRuntimePath();
     // intel-nr\d5c_chain.dll beside MoonSR.exe when that folder also holds gemm.spv and dlssnr-logical.safetensors.
     static std::wstring IntelRuntimePath();

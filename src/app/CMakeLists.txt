@@ -3,6 +3,8 @@ add_executable(MoonSR WIN32
     main.cpp
     main_window.cpp
     main_window.h
+    nr_import.cpp
+    nr_import.h
     pages.cpp
     pages.h
     settings.cpp

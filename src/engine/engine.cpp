@@ -2090,6 +2090,10 @@ bool Engine::IntelNeuralRuntimeAvailable() {
     return !NeuralBridge::IntelRuntimePath().empty();
 }
 
+std::wstring Engine::NeuralRuntimeDirectory(Vendor vendor) {
+    return NeuralBridge::RuntimeDirectory(vendor);
+}
+
 bool Engine::AmdNeuralRuntimeAvailable() {
     return !NeuralBridge::AmdRuntimePath().empty();
 }

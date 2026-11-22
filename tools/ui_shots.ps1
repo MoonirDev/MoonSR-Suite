@@ -1,19 +1,20 @@
-﻿# Screenshots of the MoonSR UI through its --test-* hooks: starts MoonSR.exe on a page in a theme, grabs the window from the
+# Screenshots of the MoonSR UI through its --test-* hooks: starts MoonSR.exe on a page in a theme, grabs the window from the
 # screen (DWM frame bounds, including the title bar) and closes it. The test options never change the persisted settings.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\ui_shots.ps1 [-BuildDir build\main] [-OutDir <dir>]
 #                [-Pages home,upscaling,loadorder,framegen] [-Extra "--test-fg-mode auto --test-fg-target 144"] [-Tag _auto]
-#                [-Keys ...] [-Themes dark,light] [-Dpi 0] [-Size 1120,740] [-NoMica]
+#                [-Keys ...] [-Themes dark,light] [-Dpi 0] [-Size 1120,740] [-NoMica] [-Exe <MoonSR.exe>] [-WaitMs 1800]
+# -Exe runs another copy (for example a scratch copy of bin with test runtimes); -WaitMs is the settle time before the grab.
 # The window is placed at (40,20) by the test mode, so keep other windows away from that area while it runs.
 param([string]$BuildDir = "build\main", [string]$OutDir = "", [string[]]$Pages = @("home", "upscaling", "loadorder"),
       [string[]]$Themes = @("dark", "light"), [int]$Dpi = 0, [string]$Size = "1120,740", [switch]$NoMica,
-      [string]$Keys = "", [string]$Extra = "", [string]$Tag = "")
+      [string]$Keys = "", [string]$Extra = "", [string]$Tag = "", [string]$Exe = "", [int]$WaitMs = 1800)
 $ErrorActionPreference = "Stop"
 # Lists may also arrive as one comma-separated string (powershell -File passes arrays that way).
 $Pages = @($Pages | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $Themes = @($Themes | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root "$BuildDir\bin\MoonSR.exe"
+$exe = if ($Exe) { $Exe } else { Join-Path $root "$BuildDir\bin\MoonSR.exe" }
 if (-not $OutDir) { $OutDir = Join-Path $root "$BuildDir\ui_shots" }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
@@ -42,7 +43,7 @@ foreach ($theme in $Themes) {
             for ($i = 0; $i -lt 50 -and $h -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 200; $p.Refresh(); $h = $p.MainWindowHandle }
             if ($h -eq [IntPtr]::Zero) { throw "no window for $a" }
             [void][ShotNative]::SetForegroundWindow($h)
-            Start-Sleep -Milliseconds 1800
+            Start-Sleep -Milliseconds $WaitMs
             $r = New-Object ShotNative+RECT
             [void][ShotNative]::DwmGetWindowAttribute($h, 9, [ref]$r, 16)   # DWMWA_EXTENDED_FRAME_BOUNDS
             $w = $r.R - $r.L; $hh = $r.B - $r.T

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "engine/engine.h"
+#include "nr_import.h"
 #include "pages.h"
 #include "settings.h"
 #include "ui/gfx.h"
@@ -58,6 +59,11 @@ struct TestOptions {
     bool wheel = false;              // --test-wheel x,y,notches (client DIPs; negative notches scroll down)
     int wheelX = 0, wheelY = 0, wheelNotches = 0;
     std::wstring themesDir;          // --test-themes-dir <dir>: imported-theme folder for this run (default %LOCALAPPDATA%)
+    // --test-nr-import amd-zip|amd-files|intel-zip|intel-folder|intel-weights <path[;path...]>: run that import at start-up
+    // (into the folders beside this MoonSR.exe, so use a scratch copy); the result goes to --test-nr-report <file>.
+    std::wstring nrImportKind, nrImportPaths, nrReport;
+    std::wstring nrGpu;              // --test-nr-gpu <name substring>: GPU for the Neural rendering stage (not persisted)
+    int nrSetupExpand = -1;          // --test-nr-setup expand|collapse: overrides the remembered setup panel state
 };
 
 TestOptions ParseTestOptions();
@@ -152,6 +158,27 @@ private:
     void UpdatePictureState();
     void OnPictureChange();
 
+    // Neural rendering guided setup (top of the Neural rendering page)
+    enum class SetupAction { None, ImportNvidiaModel, ReviewLocalModel, AmdZip, AmdFiles, IntelZip, IntelFolder, IntelWeights };
+    enum class SetupState { Ready, Needed, NotSupported, Checking };
+    struct GpuSetup {
+        SetupState state = SetupState::Needed;
+        ui::InfoBar::Severity severity = ui::InfoBar::Severity::Info;
+        std::wstring summary;   // row description: vendor and family
+        std::wstring status;    // status bar text
+        SetupAction primary = SetupAction::None, secondary = SetupAction::None;
+        std::wstring primaryText, secondaryText, link, linkText, link2, link2Text;
+    };
+    GpuSetup EvaluateGpu(const AdapterInfo& adapter);
+    void UpdateSetupPanel();
+    void OnSetupAction(SetupAction action);
+    void BeginRuntimeImport(nr::ImportKind kind, std::vector<std::wstring> paths);
+    void StartAmdLoadCheck();       // background load check of the installed AMDNR runtime (cached by file identity)
+    std::wstring RuntimeFileKey(const std::wstring& path) const;  // size + write time, "" if missing
+    void SetSetupMessage(const std::wstring& text, ui::InfoBar::Severity sev);
+    void OpenUrl(const std::wstring& url);  // the user's browser (ShellExecute); MoonSR itself has no network code
+    void RunTestImport();                    // --test-nr-import
+
     // MoonSR temporal upscaler
     bool AlsrSelected() const;
     AlsrSettings CurrentAlsr() const;
@@ -233,6 +260,21 @@ private:
     std::thread worker_;
     std::mutex doneMutex_;
     std::vector<std::function<void()>> done_;
+    // Guided setup state. slotAdapter_: index into adapters_ shown in each setup slot (-1 = unused).
+    int slotAdapter_[AppUi::kSetupSlots] = {-1, -1, -1, -1};
+    GpuSetup slotSetup_[AppUi::kSetupSlots];
+    bool setupCollapsed_ = false;
+    bool modelFromSetup_ = false;     // the current model import was started from the setup panel
+    int stageSwitchTo_ = -1;          // adapters_ index offered by "Use <GPU>" (-1 = none)
+    std::wstring importProgress_;     // "Copying LmxxfNrRuntime.pak", written by the worker (guarded by doneMutex_)
+    bool importing_ = false;
+    // AMDNR load check result for the installed runtime, keyed by RuntimeFileKey (UI thread only).
+    std::wstring amdCheckKey_;        // key of the checked file; empty = not checked
+    bool amdCheckRunning_ = false, amdCheckOk_ = false;
+    std::wstring amdCheckError_;
+    std::thread amdCheckThread_;
+    std::wstring intelCheckKey_, intelCheckError_;  // d5c_chain.dll export check, cached by file key
+    bool intelCheckOk_ = false;
     int countdown_ = 0;          // seconds remaining; 0 = no countdown running
     bool hotkeyOk_ = false;
     DWORD hotkeyError_ = 0;

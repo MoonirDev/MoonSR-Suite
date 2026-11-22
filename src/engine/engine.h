@@ -195,6 +195,9 @@ public:
     // True when intel-nr\ beside MoonSR.exe holds d5c_chain.dll, its gemm.spv shaders and dlssnr-logical.safetensors
     // (the user-built DLSS5_INTEL runtime and the user's own weights). Used on Intel processing GPUs.
     static bool IntelNeuralRuntimeAvailable();
+    // The folder the neural rendering bridge loads the AMD (amd-nr) or Intel (intel-nr) runtime from, beside
+    // MoonSR.exe. Empty for other vendors. The UI imports the user's runtime files there.
+    static std::wstring NeuralRuntimeDirectory(Vendor vendor);
 
     // Starts capturing and presenting. Returns false and fills `error` if initialisation fails.
     bool Start(const EngineConfig& config, std::wstring& error);

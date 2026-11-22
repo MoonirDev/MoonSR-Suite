@@ -42,6 +42,8 @@ UINT TaskbarCreatedMessage() {
 }
 constexpr UINT WM_APP_TEST_LATE = WM_APP + 1;
 constexpr UINT WM_APP_MODELS_DONE = WM_APP + 2;
+constexpr UINT WM_APP_AMDCHECK_DONE = WM_APP + 5;   // background AMDNR load check finished
+constexpr UINT WM_APP_IMPORT_PROGRESS = WM_APP + 6; // runtime import: new progress line in importProgress_
 constexpr wchar_t kFp16RuntimeHash[] = L"cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed";
 
 using Severity = ui::InfoBar::Severity;
@@ -257,6 +259,13 @@ TestOptions ParseTestOptions() {
         else if (a == L"--test-effects") t.effects = _wtoi(next().c_str()) != 0 ? 1 : 0;
         else if (a == L"--test-scroll") t.scroll = std::max(0, _wtoi(next().c_str()));
         else if (a == L"--test-themes-dir") t.themesDir = next();
+        else if (a == L"--test-nr-import") {
+            t.nrImportKind = next();
+            t.nrImportPaths = next();
+        }
+        else if (a == L"--test-nr-report") t.nrReport = next();
+        else if (a == L"--test-nr-gpu") t.nrGpu = next();
+        else if (a == L"--test-nr-setup") t.nrSetupExpand = next() == L"collapse" ? 0 : 1;
         else if (a == L"--test-wheel") {
             const std::wstring v = next();
             if (swscanf_s(v.c_str(), L"%d,%d,%d", &t.wheelX, &t.wheelY, &t.wheelNotches) == 3) t.wheel = true;
@@ -295,6 +304,7 @@ MainWindow::MainWindow() : view_(gfx_) {}
 
 MainWindow::~MainWindow() {
     if (worker_.joinable()) worker_.join();
+    if (amdCheckThread_.joinable()) amdCheckThread_.join();
 }
 
 bool MainWindow::Register(HINSTANCE instance) {
@@ -500,6 +510,21 @@ LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_MODELS_DONE:
         OnModelTasksDone();
         return 0;
+    case WM_APP_AMDCHECK_DONE: {
+        if (amdCheckThread_.joinable()) amdCheckThread_.join();
+        amdCheckRunning_ = false;
+        UpdateSetupPanel();
+        return 0;
+    }
+    case WM_APP_IMPORT_PROGRESS: {
+        std::wstring line;
+        {
+            std::lock_guard lock(doneMutex_);
+            line = importProgress_;
+        }
+        if (importing_ && !line.empty()) SetSetupMessage(L"Importing: " + line + L"...", Severity::Info);
+        return 0;
+    }
     case WM_APP_TEST_LATE:
         ApplyTestOptionsLate();
         return 0;
@@ -875,7 +900,30 @@ void MainWindow::WireHandlers() {
     ui_.openRecordings->onChange = [this] { OpenRecordingsFolder(); };
     ui_.openLog->onChange = [this] { OpenLogFolder(); };
     ui_.diagnosticsLink->onChange = [this] { view_.Navigate(PageSettings); };
-    ui_.addModel->onChange = [this] { OnAddModel(); };
+    ui_.addModel->onChange = [this] {
+        modelFromSetup_ = false;
+        OnAddModel();
+    };
+    for (int i = 0; i < AppUi::kSetupSlots; ++i) {
+        AppUi::SetupSlot& s = ui_.nrSlot[i];
+        s.primary->onChange = [this, i] { OnSetupAction(slotSetup_[i].primary); };
+        s.secondary->onChange = [this, i] { OnSetupAction(slotSetup_[i].secondary); };
+        s.link->onChange = [this, i] { OpenUrl(slotSetup_[i].link); };
+        s.link2->onChange = [this, i] { OpenUrl(slotSetup_[i].link2); };
+    }
+    ui_.nrSetupToggle->onChange = [this] {
+        setupCollapsed_ = !setupCollapsed_;
+        UpdateSetupPanel();
+        SaveNow();
+    };
+    ui_.nrStageOpen->onChange = [this] { view_.Navigate(PageLoadOrder); };
+    ui_.nrStageUse->onChange = [this] {
+        if (engineActive_ || stageSwitchTo_ < 0) return;
+        ui_.stageGpu[static_cast<int>(PipelineStage::NeuralRendering)]->SetSelected(stageSwitchTo_ + 1);
+        UpdateNeuralState();
+        SaveNow();
+    };
+    ui_.openReleases->onChange = [this] { OpenUrl(L"https://github.com/MoonirDev/MoonSR-Suite/releases"); };
     ui_.addLocalModel->onChange = [this] {
         if (busy_ || view_.DialogOpen()) return;
         const auto path = LocalNeuralModel();
@@ -1113,6 +1161,7 @@ void MainWindow::ApplySettingsToUi() {
 
     ui_.alsrHistory->SetValue(std::clamp(settings_.alsrHistoryPercent, 50, 95));
     neuralWanted_ = settings_.neuralRendering;
+    setupCollapsed_ = test_.nrSetupExpand >= 0 ? test_.nrSetupExpand == 0 : settings_.neuralSetupCollapsed;
     selectedModelId_ = settings_.neuralModelId;
     const auto& nr = settings_.neuralSettings;
     ui_.nrPreset->SetSelected(static_cast<int>(nr.preset));
@@ -1167,6 +1216,7 @@ AppSettings MainWindow::CaptureSettings() const {
     }
 
     s.alsrHistoryPercent = ui_.alsrHistory->value();
+    s.neuralSetupCollapsed = setupCollapsed_;
     s.neuralRendering = neuralWanted_;
     s.neuralModelId = selectedModelId_;
     s.neuralSettings = CurrentNeuralSettings();
@@ -1898,6 +1948,13 @@ void MainWindow::ApplyTestOptionsEarly() {
             }
     }
     if (!test_.order.empty()) SetOrderUi(OrderFromString(test_.order));
+    if (!test_.nrGpu.empty()) {
+        for (size_t i = 0; i < adapters_.size(); ++i)
+            if (ContainsNoCase(adapters_[i].name, test_.nrGpu)) {
+                ui_.stageGpu[static_cast<int>(PipelineStage::NeuralRendering)]->SetSelected(static_cast<int>(i + 1));
+                break;
+            }
+    }
     if (!test_.page.empty()) {
         static const struct { const wchar_t* name; int page; } kPages[] = {
             {L"home", PageHome}, {L"upscaling", PageUpscaling}, {L"framegen", PageFrameGen},
@@ -1923,6 +1980,7 @@ void MainWindow::ApplyTestOptionsLate() {
     if (!test_.importTheme.empty()) ImportThemeFile(test_.importTheme, ui::ThemeCatalog::ImportMode::Rename);
     if (!test_.importModel.empty()) BeginImport(test_.importModel);
     if (!test_.inspectModel.empty()) BeginInspect(test_.inspectModel);
+    if (!test_.nrImportKind.empty()) RunTestImport();
     if (test_.seconds > 0) SetTimer(hwnd_, IDT_TESTEXIT, static_cast<UINT>(test_.seconds) * 1000, nullptr);
     if (!test_.statusFile.empty()) {
         SetTimer(hwnd_, IDT_TESTSTATUS, 1000, nullptr);
@@ -2085,6 +2143,7 @@ void MainWindow::OnPictureChange() {
 void MainWindow::SetNeuralMessage(const std::wstring& text, Severity sev) {
     ui_.neuralMsg->Set(sev, text);
     ui_.neuralMsg->SetVisible(true);
+    if (modelFromSetup_) SetSetupMessage(text, sev);  // started from the setup panel: show it there too
 }
 
 // Rebuilds the installed-models list and the "Active model" choice from the catalogue.
@@ -2159,7 +2218,7 @@ void MainWindow::UpdateNeuralState() {
     }
     const wchar_t* desc = L"Enhances frames with the selected model. RTX 20, 30 and 40 series require the patched FP16 model.";
     const int capableCount = (canUseAmd ? 1 : 0) + (canUseIntel ? 1 : 0) + (canUseNvidia ? 1 : 0);
-    if (capableCount == 0) desc = L"Select an AMD, Intel or NVIDIA GPU for this stage on the Load order page.";
+    if (capableCount == 0) desc = L"Needs an NVIDIA GeForce RTX card, AMD Radeon RX 7000 / RX 9000 or Intel Arc A/B-series GPU for this stage (Load order page).";
     else if (capableCount > 1 && (amdReady || intelReady))
         desc = L"Uses AMDNR on AMD, DLSS5_INTEL on Intel, or the selected model on NVIDIA. Choose the GPU for this stage on the Load order page.";
     else if (canUseAmd && !canUseNvidia && !canUseIntel)
@@ -2171,6 +2230,7 @@ void MainWindow::UpdateNeuralState() {
     else if (models_.empty()) desc = L"Add a model file first";
     else if (!avail) desc = L"Select a DLSS Neural Rendering model first";
     ui_.neuralRow->desc = desc;
+    UpdateSetupPanel();
     view_.Invalidate();
     if (ui_.orderList) RefreshOrderUi();
 }
@@ -2397,6 +2457,454 @@ void MainWindow::ConfirmRemove(size_t index) {
         });
     };
     view_.ShowDialog(std::move(spec));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Neural rendering: guided setup
+// ---------------------------------------------------------------------------------------------------------------------
+
+namespace {
+constexpr wchar_t kAmdReleaseUrl[] = L"https://github.com/3zwr1/AMD-NR---OptiScaler/releases/tag/Alpha0.3.5.6";
+constexpr wchar_t kIntelProjectUrl[] = L"https://github.com/geladons/DLSS5_INTEL";
+constexpr wchar_t kIntelWeightsDocUrl[] = L"https://github.com/geladons/DLSS5_INTEL/blob/master/docs/weights-format.md";
+constexpr wchar_t kIntelSpeed[] =
+    L" Not real time: about 0.2 to 0.8 s per frame on an Arc Pro B50 by that project's own figures.";
+
+// Standard open dialog. `folder`: pick a folder. `multi`: several files. Returns the chosen paths (empty = cancelled).
+std::vector<std::wstring> PickPaths(HWND owner, const wchar_t* title, const COMDLG_FILTERSPEC* filters, UINT filterCount,
+                                    bool folder, bool multi) {
+    std::vector<std::wstring> out;
+    Microsoft::WRL::ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(__uuidof(FileOpenDialog), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.GetAddressOf())))) {
+        MSR_LOG_ERROR(L"IFileOpenDialog could not be created");
+        return out;
+    }
+    if (filterCount) {
+        dlg->SetFileTypes(filterCount, filters);
+        dlg->SetFileTypeIndex(1);
+    }
+    dlg->SetTitle(title);
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) {
+        opts |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        opts |= folder ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
+        if (multi) opts |= FOS_ALLOWMULTISELECT;
+        dlg->SetOptions(opts);
+    }
+    if (FAILED(dlg->Show(owner))) return out;
+    Microsoft::WRL::ComPtr<IShellItemArray> items;
+    if (FAILED(dlg->GetResults(items.GetAddressOf()))) return out;
+    DWORD count = 0;
+    items->GetCount(&count);
+    for (DWORD i = 0; i < count; ++i) {
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        PWSTR name = nullptr;
+        if (SUCCEEDED(items->GetItemAt(i, item.GetAddressOf())) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &name)) && name) {
+            out.emplace_back(name);
+            CoTaskMemFree(name);
+        }
+    }
+    return out;
+}
+
+const wchar_t* VendorName(Vendor v) {
+    switch (v) {
+    case Vendor::Nvidia: return L"NVIDIA";
+    case Vendor::Amd: return L"AMD";
+    case Vendor::Intel: return L"Intel";
+    default: return L"Other";
+    }
+}
+}  // namespace
+
+void MainWindow::OpenUrl(const std::wstring& url) {
+    if (url.empty()) return;
+    const auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    if (r <= 32) {
+        MSR_LOG_WARN(L"ShellExecute({}) failed ({})", url, static_cast<long long>(r));
+        SetSetupMessage(L"Could not open the browser. The address is: " + url, Severity::Error);
+    }
+}
+
+void MainWindow::SetSetupMessage(const std::wstring& text, Severity sev) {
+    ui_.nrSetupMsg->Set(sev, text);
+    ui_.nrSetupMsg->SetVisible(!text.empty());
+}
+
+std::wstring MainWindow::RuntimeFileKey(const std::wstring& path) const {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (path.empty() || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) return {};
+    return std::format(L"{}|{}|{}|{}", path, d.nFileSizeLow, d.ftLastWriteTime.dwLowDateTime, d.ftLastWriteTime.dwHighDateTime);
+}
+
+void MainWindow::StartAmdLoadCheck() {
+    if (amdCheckRunning_) return;
+    const std::wstring dll = Engine::NeuralRuntimeDirectory(Vendor::Amd) + L"\\LmxxfNrRuntime.dll";
+    const std::wstring key = RuntimeFileKey(dll);
+    if (key.empty() || key == amdCheckKey_) return;
+    if (amdCheckThread_.joinable()) amdCheckThread_.join();
+    amdCheckRunning_ = true;
+    try {
+        amdCheckThread_ = std::thread([this, dll, key] {
+            std::wstring err;
+            const bool ok = nr::ProbeLoad(dll, "LmxxfNrGetApi", err);
+            {
+                std::lock_guard lock(doneMutex_);
+                amdCheckKey_ = key;
+                amdCheckOk_ = ok;
+                amdCheckError_ = err;
+            }
+            PostMessageW(hwnd_, WM_APP_AMDCHECK_DONE, 0, 0);
+        });
+    } catch (const std::system_error&) {
+        amdCheckRunning_ = false;
+    }
+}
+
+MainWindow::GpuSetup MainWindow::EvaluateGpu(const AdapterInfo& a) {
+    GpuSetup g;
+    const nr::GpuSupport sup = nr::ClassifyGpu(a);
+    g.summary = std::wstring(VendorName(a.vendor)) + L"  ·  " + sup.family;
+    if (sup.support == nr::Support::NotSupported) {
+        g.state = SetupState::NotSupported;
+        g.severity = Severity::Info;
+        g.status = L"Not supported. " + sup.reason;
+        return g;
+    }
+    const std::wstring caution = sup.support == nr::Support::Unknown ? sup.reason + L" " : std::wstring();
+    if (a.vendor == Vendor::Nvidia) {
+        const ModelInfo* model = nullptr;
+        for (const ModelInfo& m : models_)
+            if (m.kind == ModelKind::DlssNeuralRendering && (!model || m.id == selectedModelId_)) model = &m;
+        if (model) {
+            g.state = SetupState::Ready;
+            g.severity = Severity::Success;
+            g.status = L"Ready. DLSS Neural Rendering model imported: " + model->displayName + L".";
+        } else {
+            g.severity = Severity::Warning;
+            g.status = L"Model needed. Import your own nvngx_dlssnr.dll (the DLSS Neural Rendering model); MoonSR checks "
+                       L"and copies it. RTX 20, 30 and 40 series need the patched FP16 version.";
+            g.primary = SetupAction::ImportNvidiaModel;
+            g.primaryText = L"Import nvngx_dlssnr.dll...";
+            if (!LocalNeuralModel().empty()) {
+                g.secondary = SetupAction::ReviewLocalModel;
+                g.secondaryText = L"Use the copy beside MoonSR";
+            }
+        }
+        return g;
+    }
+    if (a.vendor == Vendor::Amd) {
+        const std::wstring dir = Engine::NeuralRuntimeDirectory(Vendor::Amd);
+        auto needButtons = [&] {
+            g.primary = SetupAction::AmdZip;
+            g.primaryText = L"Import AMDNR release (.zip)...";
+            g.secondary = SetupAction::AmdFiles;
+            g.secondaryText = L"Choose files...";
+            g.link = kAmdReleaseUrl;
+            g.linkText = L"AMDNR release page";
+        };
+        if (!nr::AmdFilesPresent(dir)) {
+            g.severity = Severity::Warning;
+            g.status = caution + L"Runtime needed. Import LmxxfNrRuntime.dll and LmxxfNrRuntime.pak from the AMDNR release "
+                                 L"(AMDNR-v0.3.5.6.zip, from its release page). MoonSR does not download it.";
+            needButtons();
+            return g;
+        }
+        const std::wstring key = RuntimeFileKey(dir + L"\\LmxxfNrRuntime.dll");
+        std::wstring checkedKey, checkError;
+        bool checkedOk = false;
+        {
+            std::lock_guard lock(doneMutex_);
+            checkedKey = amdCheckKey_;
+            checkedOk = amdCheckOk_;
+            checkError = amdCheckError_;
+        }
+        if (key != checkedKey) {
+            StartAmdLoadCheck();
+            g.state = SetupState::Checking;
+            g.severity = Severity::Info;
+            g.status = caution + L"Checking the AMDNR runtime in amd-nr...";
+            return g;
+        }
+        if (checkedOk) {
+            g.state = SetupState::Ready;
+            g.severity = caution.empty() ? Severity::Success : Severity::Warning;
+            g.status = caution + L"Ready. LmxxfNrRuntime.dll and LmxxfNrRuntime.pak are in amd-nr and the runtime loads.";
+            return g;
+        }
+        g.severity = Severity::Warning;
+        g.status = caution + L"The AMDNR runtime in amd-nr does not load: " + checkError + L" Import the release again if the files are damaged.";
+        needButtons();
+        return g;
+    }
+    // Intel (Arc A/B-series or an unknown Arc)
+    const std::wstring dir = Engine::NeuralRuntimeDirectory(Vendor::Intel);
+    const nr::IntelFiles f = nr::IntelStatus(dir);
+    auto runtimeButtons = [&] {
+        g.primary = SetupAction::IntelZip;
+        g.primaryText = L"Import DLSS5_INTEL bundle (.zip)...";
+        g.secondary = SetupAction::IntelFolder;
+        g.secondaryText = L"Choose folder...";
+        g.link = kIntelProjectUrl;
+        g.linkText = L"DLSS5_INTEL project";
+        g.link2 = kIntelWeightsDocUrl;
+        g.link2Text = L"Weights format";
+    };
+    std::wstring chainError;
+    if (f.chain) {
+        const std::wstring chain = dir + L"\\d5c_chain.dll";
+        const std::wstring key = RuntimeFileKey(chain);
+        if (key != intelCheckKey_) {
+            intelCheckKey_ = key;
+            intelCheckOk_ = nr::CheckIntelChain(chain, intelCheckError_);
+        }
+        if (!intelCheckOk_) chainError = intelCheckError_;
+    }
+    if (!f.chain || !f.shaders || !chainError.empty()) {
+        g.severity = Severity::Warning;
+        g.status = caution + (chainError.empty() ? L"Runtime needed. Import d5c_chain.dll and its .spv shaders, built from "
+                                                   L"the DLSS5_INTEL project or taken from its bundle."
+                                                 : L"The runtime in intel-nr is not usable: " + chainError + L".") +
+                   L" It needs an Arc GPU with a current driver (Vulkan VK_KHR_cooperative_matrix)." + kIntelSpeed;
+        runtimeButtons();
+        return g;
+    }
+    if (!f.weights) {
+        g.severity = Severity::Warning;
+        g.status = caution + L"Weights needed. Import dlssnr-logical.safetensors: you convert it yourself from your own "
+                             L"nvngx_dlssnr.dll with the DLSS5_INTEL project's tool (see Weights format). MoonSR never "
+                             L"converts or shares NVIDIA's files." + kIntelSpeed;
+        g.primary = SetupAction::IntelWeights;
+        g.primaryText = L"Import weights (dlssnr-logical.safetensors)...";
+        g.link = kIntelProjectUrl;
+        g.linkText = L"DLSS5_INTEL project";
+        g.link2 = kIntelWeightsDocUrl;
+        g.link2Text = L"Weights format";
+        return g;
+    }
+    if (!Engine::IntelNeuralRuntimeAvailable()) {  // the bridge's own check (should agree with the files above)
+        g.severity = Severity::Warning;
+        g.status = caution + L"intel-nr is incomplete. Import the DLSS5_INTEL bundle again.";
+        runtimeButtons();
+        return g;
+    }
+    g.state = SetupState::Ready;
+    g.severity = caution.empty() ? Severity::Success : Severity::Warning;  // the speed warning is part of the text
+    g.status = caution + L"Ready. d5c_chain.dll, its shaders and your weights are in intel-nr." + kIntelSpeed;
+    return g;
+}
+
+void MainWindow::UpdateSetupPanel() {
+    if (!ui_.nrSetupRow) return;
+    const bool canImport = !busy_ && !engineActive_;
+    int used = 0, supported = 0, ready = 0;
+    for (size_t i = 0; i < adapters_.size() && used < AppUi::kSetupSlots; ++i) {
+        const AdapterInfo& a = adapters_[i];
+        if (a.isSoftware || a.vendorId == 0x1414) continue;  // WARP / Microsoft Basic Render Driver
+        slotAdapter_[used] = static_cast<int>(i);
+        slotSetup_[used] = EvaluateGpu(a);
+        if (slotSetup_[used].state != SetupState::NotSupported) ++supported;
+        if (slotSetup_[used].state == SetupState::Ready) ++ready;
+        ++used;
+    }
+    for (int s = used; s < AppUi::kSetupSlots; ++s) {
+        slotAdapter_[s] = -1;
+        slotSetup_[s] = GpuSetup{};
+    }
+
+    const bool allReady = supported > 0 && ready == supported;
+    const bool collapsed = allReady && setupCollapsed_;
+    if (supported == 0)
+        ui_.nrSetupRow->desc = used == 0 ? L"No GPU was found." : L"No GPU in this PC supports neural rendering.";
+    else if (allReady)
+        ui_.nrSetupRow->desc = supported == 1 ? L"Your GPU is ready." : std::format(L"All {} supported GPUs are ready.", supported);
+    else
+        ui_.nrSetupRow->desc = std::format(L"{} of {} supported GPUs ready. Follow the next step below.", ready, supported);
+    ui_.nrSetupToggle->SetText(collapsed ? L"Show details" : L"Hide details");
+    ui_.nrSetupToggle->SetVisible(allReady);
+
+    for (int s = 0; s < AppUi::kSetupSlots; ++s) {
+        AppUi::SetupSlot& slot = ui_.nrSlot[s];
+        const bool show = s < used && !collapsed;
+        const GpuSetup& g = slotSetup_[s];
+        slot.row->visible = show;
+        if (show) {
+            const AdapterInfo& a = adapters_[static_cast<size_t>(slotAdapter_[s])];
+            slot.row->title = a.name.empty() ? std::wstring(L"Unknown GPU") : a.name;
+            slot.row->desc = g.summary;
+            slot.status->Set(g.severity, g.status);
+        }
+        slot.primary->SetText(g.primaryText);
+        slot.primary->SetVisible(show && g.primary != SetupAction::None);
+        slot.secondary->SetText(g.secondaryText);
+        slot.secondary->SetVisible(show && g.secondary != SetupAction::None);
+        const bool nvidiaAction = g.primary == SetupAction::ImportNvidiaModel;
+        slot.primary->SetEnabled(nvidiaAction ? !busy_ : canImport);
+        slot.secondary->SetEnabled(g.secondary == SetupAction::ReviewLocalModel ? !busy_ : canImport);
+        slot.link->text = g.linkText;
+        slot.link2->text = g.link2Text;
+        slot.link->SetVisible(show && !g.link.empty());
+        slot.link2->SetVisible(show && !g.link2.empty());
+        slot.linkRow->visible = show && !g.link.empty();
+        slot.status->SetVisible(show);
+    }
+
+    // The GPU chosen for the Neural rendering stage (Load order page).
+    const AdapterInfo* chosen = StageAdapter(PipelineStage::NeuralRendering);
+    const bool automatic = chosen == nullptr;
+    const AdapterInfo* stage = automatic ? OutputAdapter() : chosen;
+    int stageSlot = -1, readySlot = -1;
+    for (int s = 0; s < used; ++s) {
+        const AdapterInfo& a = adapters_[static_cast<size_t>(slotAdapter_[s])];
+        if (stage && LuidEqual(a.luid, stage->luid)) stageSlot = s;
+        if (readySlot < 0 && slotSetup_[s].state == SetupState::Ready && !(stage && LuidEqual(a.luid, stage->luid))) readySlot = s;
+    }
+    const std::wstring stageName = stage ? (stage->name.empty() ? std::wstring(L"Unknown GPU") : stage->name) : std::wstring();
+    if (!stage) ui_.nrStageRow->desc = L"Auto: the GPU that drives the monitor the game is on";
+    else ui_.nrStageRow->desc = automatic ? L"Auto: " + stageName + L" (drives the monitor)" : stageName + L" (chosen on the Load order page)";
+    const bool stageReady = stageSlot >= 0 && slotSetup_[stageSlot].state == SetupState::Ready;
+    const bool warn = stageSlot >= 0 && !stageReady && slotSetup_[stageSlot].state != SetupState::Checking;
+    stageSwitchTo_ = warn && readySlot >= 0 ? slotAdapter_[readySlot] : -1;
+    if (warn) {
+        std::wstring text = stageName + L" is set to run neural rendering but is not ready (" +
+                            (slotSetup_[stageSlot].state == SetupState::NotSupported ? L"not supported" : L"setup not finished") + L").";
+        if (stageSwitchTo_ >= 0)
+            text += L" Use " + adapters_[static_cast<size_t>(stageSwitchTo_)].name + L" instead, which is ready, or finish the setup below.";
+        else
+            text += L" Finish the setup below, or choose another GPU on the Load order page.";
+        ui_.nrStageWarn->Set(Severity::Warning, text);
+    }
+    ui_.nrStageWarn->SetVisible(warn);
+    ui_.nrStageUse->SetText(stageSwitchTo_ >= 0 ? L"Use " + adapters_[static_cast<size_t>(stageSwitchTo_)].name : std::wstring());
+    ui_.nrStageUse->SetVisible(stageSwitchTo_ >= 0);
+    ui_.nrStageUse->SetEnabled(!engineActive_);
+    view_.RequestLayout();
+    view_.Invalidate();
+}
+
+void MainWindow::OnSetupAction(SetupAction action) {
+    if (view_.DialogOpen()) return;
+    static const COMDLG_FILTERSPEC kZip[] = {{L"Zip archives (*.zip)", L"*.zip"}, {L"All files", L"*.*"}};
+    static const COMDLG_FILTERSPEC kAmd[] = {{L"AMDNR runtime (*.dll; *.pak)", L"*.dll;*.pak"}, {L"All files", L"*.*"}};
+    static const COMDLG_FILTERSPEC kWeights[] = {{L"Weights (*.safetensors)", L"*.safetensors"}, {L"All files", L"*.*"}};
+    std::vector<std::wstring> paths;
+    switch (action) {
+    case SetupAction::ImportNvidiaModel:
+        modelFromSetup_ = true;
+        OnAddModel();
+        return;
+    case SetupAction::ReviewLocalModel: {
+        if (busy_) return;
+        const auto path = LocalNeuralModel();
+        modelFromSetup_ = true;
+        if (!path.empty()) BeginInspect(path);
+        else SetSetupMessage(L"The model file beside MoonSR is no longer there.", Severity::Error);
+        return;
+    }
+    case SetupAction::AmdZip:
+        paths = PickPaths(hwnd_, L"Import the AMDNR release (AMDNR-v0.3.5.6.zip)", kZip, 2, false, false);
+        if (!paths.empty()) BeginRuntimeImport(nr::ImportKind::AmdArchive, paths);
+        return;
+    case SetupAction::AmdFiles:
+        paths = PickPaths(hwnd_, L"Choose LmxxfNrRuntime.dll and LmxxfNrRuntime.pak", kAmd, 2, false, true);
+        if (!paths.empty()) BeginRuntimeImport(nr::ImportKind::AmdFiles, paths);
+        return;
+    case SetupAction::IntelZip:
+        paths = PickPaths(hwnd_, L"Import a DLSS5_INTEL bundle (.zip)", kZip, 2, false, false);
+        if (!paths.empty()) BeginRuntimeImport(nr::ImportKind::IntelArchive, paths);
+        return;
+    case SetupAction::IntelFolder:
+        paths = PickPaths(hwnd_, L"Choose the folder that holds d5c_chain.dll and its .spv shaders", nullptr, 0, true, false);
+        if (!paths.empty()) BeginRuntimeImport(nr::ImportKind::IntelFolder, paths);
+        return;
+    case SetupAction::IntelWeights:
+        paths = PickPaths(hwnd_, L"Import your dlssnr-logical.safetensors", kWeights, 2, false, false);
+        if (!paths.empty()) BeginRuntimeImport(nr::ImportKind::IntelWeights, paths);
+        return;
+    default:
+        return;
+    }
+}
+
+void MainWindow::BeginRuntimeImport(nr::ImportKind kind, std::vector<std::wstring> paths) {
+    if (busy_) return;
+    if (engineActive_) {
+        SetSetupMessage(L"Stop scaling before importing a runtime: its files may be in use.", Severity::Warning);
+        return;
+    }
+    const bool amd = kind == nr::ImportKind::AmdArchive || kind == nr::ImportKind::AmdFiles;
+    const std::wstring dest = Engine::NeuralRuntimeDirectory(amd ? Vendor::Amd : Vendor::Intel);
+    if (dest.empty()) {
+        SetSetupMessage(L"The MoonSR folder could not be found.", Severity::Error);
+        return;
+    }
+    importing_ = true;
+    {
+        std::lock_guard lock(doneMutex_);
+        importProgress_.clear();
+    }
+    SetSetupMessage(L"Importing...", Severity::Info);
+    RunModelTask([this, kind, paths, dest, amd]() -> std::function<void()> {
+        auto progress = [this](const std::wstring& line) {
+            {
+                std::lock_guard lock(doneMutex_);
+                importProgress_ = line;
+            }
+            PostMessageW(hwnd_, WM_APP_IMPORT_PROGRESS, 0, 0);
+        };
+        auto r = std::make_shared<nr::ImportResult>(nr::RunImport(kind, paths, dest, progress));
+        return [this, r, amd, dest] {
+            importing_ = false;
+            if (amd && r->installed) {
+                // The import ran the same load check; remember its outcome for this file.
+                std::lock_guard lock(doneMutex_);
+                amdCheckKey_ = RuntimeFileKey(dest + L"\\LmxxfNrRuntime.dll");
+                amdCheckOk_ = r->validated;
+                const std::wstring marker = L"does not load on this PC: ";
+                const size_t at = r->message.find(marker);
+                amdCheckError_ = at != std::wstring::npos ? r->message.substr(at + marker.size()) : r->message;
+            }
+            if (!amd) intelCheckKey_.clear();
+            SetSetupMessage(r->message, !r->installed ? Severity::Error : r->validated ? Severity::Success : Severity::Warning);
+            if (!test_.nrReport.empty()) {
+                std::wstring text = std::format(L"installed={}\r\nvalidated={}\r\nmessage={}\r\nfiles=", r->installed ? 1 : 0,
+                                                r->validated ? 1 : 0, r->message);
+                for (const auto& f : r->files) text += f + L";";
+                text += L"\r\ndestination=" + dest + L"\r\n";
+                const int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+                std::string utf8(static_cast<size_t>(std::max(n, 0)), '\0');
+                WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), utf8.data(), n, nullptr, nullptr);
+                HANDLE f = CreateFileW(test_.nrReport.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (f != INVALID_HANDLE_VALUE) {
+                    DWORD written = 0;
+                    WriteFile(f, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+                    CloseHandle(f);
+                }
+            }
+            UpdateNeuralState();
+        };
+    });
+}
+
+void MainWindow::RunTestImport() {
+    static const struct { const wchar_t* name; nr::ImportKind kind; } kKinds[] = {
+        {L"amd-zip", nr::ImportKind::AmdArchive}, {L"amd-files", nr::ImportKind::AmdFiles},
+        {L"intel-zip", nr::ImportKind::IntelArchive}, {L"intel-folder", nr::ImportKind::IntelFolder},
+        {L"intel-weights", nr::ImportKind::IntelWeights}};
+    std::vector<std::wstring> paths;
+    size_t pos = 0;
+    while (pos <= test_.nrImportPaths.size()) {
+        size_t end = test_.nrImportPaths.find(L';', pos);
+        if (end == std::wstring::npos) end = test_.nrImportPaths.size();
+        if (end > pos) paths.push_back(test_.nrImportPaths.substr(pos, end - pos));
+        pos = end + 1;
+    }
+    for (const auto& k : kKinds)
+        if (EqualNoCase(test_.nrImportKind, k.name)) {
+            BeginRuntimeImport(k.kind, paths);
+            return;
+        }
+    SetSetupMessage(L"Test: unknown import kind " + test_.nrImportKind, Severity::Error);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.0.0**
+**Version 1.0.1**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -19,8 +19,9 @@ It is an experimental personal project. Quality and speed claims come only from 
   frames as needed, placing each at its true time between real frames). With V-Sync off it is not capped to the
   display's refresh rate. Motion is estimated from the captured frames only. HUD protection applies to generated
   frames.
-- **Neural rendering (optional):** runs a vendor neural-rendering model on the captured frames. You supply the
-  runtime and model yourself:
+- **Neural rendering (optional):** runs a vendor neural-rendering model on the captured frames. Supported cards:
+  NVIDIA GeForce RTX, AMD Radeon RX 7000 and RX 9000 series, and Intel Arc A- and B-series (Intel is far from real
+  time). You supply the runtime and model yourself; the Neural rendering page guides you through it:
   - NVIDIA: your DLSS Neural Rendering model (`nvngx_dlssnr.dll`).
   - AMD: the AMDNR runtime.
   - Intel: the DLSS5_INTEL runtime (experimental and far from real time).
@@ -49,9 +50,20 @@ Download `MoonSR-Setup-<version>.exe` and run it. It installs for the current Wi
 
 - **Updating:** run the newer installer. It updates the existing installation in place; your settings, themes and
   models in `%LOCALAPPDATA%\MoonSR` are kept. Close MoonSR first (the installer asks if it is running).
-- **Uninstalling:** Windows Settings > Apps > MoonSR, or the uninstaller in the Start menu. It asks whether to also
-  delete your settings (default: keep them).
+- **Uninstalling:** Windows Settings > Apps > MoonSR, or the uninstaller in the Start menu. It removes the program
+  and any neural rendering runtimes you imported through MoonSR, and asks whether to also delete your settings
+  (default: keep them).
 - The installer is not code-signed yet, so Windows SmartScreen may warn the first time.
+
+### No internet connection, ever
+
+MoonSR never connects to the internet: no update checks, telemetry, analytics, downloads or accounts. It will not
+gain any such feature. Links in the app (for example to this page) open in your own web browser; MoonSR itself sends
+nothing. Neural rendering runtimes you install yourself (NVIDIA, AMD or Intel) are third-party software that MoonSR
+loads but does not control.
+
+**Updates are manual.** Settings > Application has a link that opens the releases page in your browser; download
+the newer installer and run it. Your settings are kept.
 
 ## Requirements
 
@@ -83,8 +95,12 @@ Binaries are written to `build\main\bin`:
 
 ## Releases
 
+- **1.0.1** (2026-11-22): guided neural rendering setup on the Neural rendering page (status per GPU, the next step for
+  each, and Import buttons for `nvngx_dlssnr.dll`, the AMDNR release zip or files, and the DLSS5_INTEL bundle and
+  weights); clearer supported-card wording; an Updates row in Settings with a link to the releases page; uninstalling
+  now also removes runtimes imported through MoonSR.
 - **1.0.0** (2026-11-22): first versioned release with an installer. Frame generation Fixed (2X-20X) and Auto
-  (target frame rate) modes; no refresh-rate cap with V-Sync off; neural rendering on any GPU; themes with custom
+  (target frame rate) modes; no refresh-rate cap with V-Sync off; neural rendering on a GPU other than the one driving the monitor; themes with custom
   theme import; new logo; close to tray; groundwork for Smart parallax; output window that other windows can cover; online learning removed and the
   temporal upscaler renamed MoonSR.
 

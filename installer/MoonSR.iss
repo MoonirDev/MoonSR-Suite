@@ -1,4 +1,4 @@
-﻿; MoonSR installer (Inno Setup 6).
+; MoonSR installer (Inno Setup 6).
 ;
 ; Build with tools\make_installer.ps1, which passes:
 ;   /DMyAppVersion=<x.y.z>   version read from CMakeLists.txt (project(MoonSR VERSION x.y.z ...))
@@ -117,8 +117,14 @@ Name: "{autodesktop}\{#MyAppName}";  Filename: "{app}\{#MyAppExe}"; Tasks: deskt
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
-; No [UninstallDelete] on purpose: %LOCALAPPDATA%\MoonSR (settings, models, profiles, recordings, logs) is handled in
-; [Code] below, and only after the user is asked.
+[UninstallDelete]
+; Neural rendering runtimes the user imported through MoonSR's setup panel live beside MoonSR.exe. Updates keep them
+; (Inno only replaces its own files); uninstalling MoonSR removes them with the program folder.
+Type: filesandordirs; Name: "{app}\amd-nr"
+Type: filesandordirs; Name: "{app}\intel-nr"
+Type: dirifempty; Name: "{app}"
+; %LOCALAPPDATA%\MoonSR (settings, models, profiles, recordings, logs) is handled in [Code] below, and only after the
+; user is asked.
 
 [Code]
 const

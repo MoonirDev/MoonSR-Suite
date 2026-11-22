@@ -46,6 +46,19 @@ MoonSR uses a model supplied by the user. For RTX 20, 30, and 40 series, select 
 `nvngx_dlssnr.dll`. If the file is beside `MoonSR.exe`, the Neural rendering page offers it under
 **Local model file** for review and import. The bridge uses the imported model and the installed NVIDIA NGX core.
 
+## Guided setup and import (1.0.1)
+
+The Neural rendering page starts with a **Set up neural rendering** panel: one card per GPU with its status and next
+step (NVIDIA: import `nvngx_dlssnr.dll`; AMD: import the AMDNR release zip or choose its `.dll` and `.pak`; Intel:
+import the DLSS5_INTEL bundle and the user-converted weights). Supported cards: NVIDIA GeForce RTX, Radeon RX 7000 /
+RX 9000 (and RDNA 3-class APUs, by PCI device ID in `nr::ClassifyAmd`), Intel Arc A/B (by name). Imports
+(`src/app/nr_import.cpp`) read the zip directory first and reject unsafe paths, links, encryption and oversized
+archives, extract only the needed files with Windows' own `tar.exe` into a temporary folder, and install into
+`amd-nr` / `intel-nr` beside MoonSR.exe through a staging folder and renames (all or nothing). Nothing from an archive
+is executed by the importer. After an AMD import, a child `MoonSR.exe --nr-probe-load <dll> LmxxfNrGetApi` loads the
+runtime without calling it, to report load errors in plain language; Intel is checked from the DLL's export table.
+Imported runtimes survive updates and are removed by the uninstaller. MoonSR never downloads them.
+
 ## AMDNR
 
 The AMD path uses the lmxxf C ABI and character-mask mapping from the supplied AMDNR OptiScaler source.
@@ -103,7 +116,7 @@ The **Load order** page sets a GPU per stage. Neural rendering can run on a GPU 
 that captures and presents); each frame and its optical-flow guide are then copied to that GPU and the result copied
 back (`src/engine/remote_stages.cpp`).
 
-**NVIDIA (any GPU, verified 2026-11-21/22 on an RTX 5060 + RTX A400, driver 621.14, Windows 11 build 26300).**
+**NVIDIA (on any NVIDIA GPU in the PC, verified 2026-11-21/22 on an RTX 5060 + RTX A400, driver 621.14, Windows 11 build 26300).**
 NVIDIA's NGX only creates features on the GPU of the process's oldest live D3D11/D3D12 device. On another NVIDIA GPU
 `CreateFeature` returns `0xBAD00002` (`FAIL_PlatformError`). Windows Graphics Capture, the swapchain, RTSS, GPU priority
 and the cross-adapter links were ruled out as causes. In `MoonSR.exe` the Direct2D UI device is the oldest device.

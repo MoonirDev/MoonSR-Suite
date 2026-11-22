@@ -120,10 +120,18 @@ std::wstring ExecutableDirectory() {
 }
 } // namespace
 
-std::wstring NeuralBridge::AmdRuntimePath() {
+std::wstring NeuralBridge::RuntimeDirectory(Vendor vendor) {
     const auto directory = ExecutableDirectory();
     if (directory.empty()) return {};
-    const auto base = directory + L"\\amd-nr\\LmxxfNrRuntime";
+    if (vendor == Vendor::Amd) return directory + L"\\amd-nr";
+    if (vendor == Vendor::Intel) return directory + L"\\intel-nr";
+    return {};
+}
+
+std::wstring NeuralBridge::AmdRuntimePath() {
+    const auto directory = RuntimeDirectory(Vendor::Amd);
+    if (directory.empty()) return {};
+    const auto base = directory + L"\\LmxxfNrRuntime";
     for (const wchar_t* suffix : {L".dll", L".pak"}) {
         const DWORD attrs = GetFileAttributesW((base + suffix).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return {};
@@ -132,9 +140,9 @@ std::wstring NeuralBridge::AmdRuntimePath() {
 }
 
 std::wstring NeuralBridge::IntelRuntimePath() {
-    const auto directory = ExecutableDirectory();
+    const auto directory = RuntimeDirectory(Vendor::Intel);
     if (directory.empty()) return {};
-    const auto base = directory + L"\\intel-nr\\";
+    const auto base = directory + L"\\";
     for (const wchar_t* name : {L"d5c_chain.dll", L"gemm.spv", L"dlssnr-logical.safetensors"}) {
         const DWORD attrs = GetFileAttributesW((base + name).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return {};
@@ -146,7 +154,7 @@ std::unique_ptr<NeuralBridge> NeuralBridge::Create(GpuDevice& device, const std:
                                                   const NeuralSettings& settings, std::wstring& error) {
     const Vendor vendor = device.Info().vendor;
     if (vendor != Vendor::Nvidia && vendor != Vendor::Amd && vendor != Vendor::Intel) {
-        error = L"Neural rendering requires an AMD, Intel or NVIDIA processing adapter.";
+        error = L"Neural rendering needs an NVIDIA GeForce RTX card, an AMD Radeon RX 7000 or RX 9000 series GPU, or an Intel Arc A- or B-series GPU for the Neural rendering stage.";
         return nullptr;
     }
     const std::wstring runtime = vendor == Vendor::Amd     ? AmdRuntimePath()

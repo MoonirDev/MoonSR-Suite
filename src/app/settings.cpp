@@ -99,6 +99,7 @@ AppSettings LoadSettings() {
     s.vsync = ReadInt(path, L"Scaling", L"VSync", 0) != 0;
     s.showCursor = ReadInt(path, L"Scaling", L"ShowCursor", 1) != 0;
     s.closeToTray = ReadInt(path, L"App", L"CloseToTray", 0) != 0;
+    s.neuralSetupCollapsed = ReadInt(path, L"Neural", L"SetupCollapsed", 0) != 0;
     s.visualEffects = ReadInt(path, L"App", L"VisualEffects", 1) != 0;
     s.theme = ReadString(path, L"App", L"Theme");
     if (s.theme.empty()) s.theme = L"dark";
@@ -180,6 +181,7 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Scaling", L"VSync", s.vsync ? 1 : 0);
     ok &= WriteInt(path, L"Scaling", L"ShowCursor", s.showCursor ? 1 : 0);
     ok &= WriteInt(path, L"App", L"CloseToTray", s.closeToTray ? 1 : 0);
+    ok &= WriteInt(path, L"Neural", L"SetupCollapsed", s.neuralSetupCollapsed ? 1 : 0);
     ok &= WriteInt(path, L"App", L"VisualEffects", s.visualEffects ? 1 : 0);
     ok &= WriteString(path, L"App", L"Theme", s.theme);
     ok &= WriteInt(path, L"Scaling", L"ShowFrameCounter", s.showFrameCounter ? 1 : 0);

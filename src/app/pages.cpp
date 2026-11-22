@@ -217,7 +217,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Page* p = view.AddPage(L"Neural rendering", kIconNeuralNav, L"Neural rendering");
         u.neuralInfo = p->Make<ui::InfoBar>();
         u.neuralInfo->Set(ui::InfoBar::Severity::Info,
-                          L"NVIDIA uses an imported DLSS model. RTX 20, 30 and 40 series need the patched FP16 runtime. AMD uses AMDNR. Intel uses the DLSS5_INTEL runtime (1 pass).");
+                          L"NVIDIA GeForce RTX uses an imported DLSS model; RTX 20, 30 and 40 series need the patched FP16 runtime. AMD Radeon RX 7000 and RX 9000 series use AMDNR. Intel Arc A- and B-series use the DLSS5_INTEL runtime (1 pass, far from real time).");
         u.neuralDev = p->Make<ui::InfoBar>();
         u.neuralDev->Set(ui::InfoBar::Severity::Warning,
                          L"Experimental community integration. Compatibility depends on the runtime, GPU, and driver.");
@@ -261,6 +261,53 @@ void BuildPages(ui::View& view, AppUi& u) {
             u.pictureControls[i]->SetDisplayDivisor(100);
         }
 
+        // Guided setup: status and the next step for every GPU in this PC (filled by MainWindow::UpdateSetupPanel).
+        p->AddSection(L"Set up neural rendering");
+        u.nrSetupIntro = p->Make<ui::InfoBar>();
+        u.nrSetupIntro->Set(ui::InfoBar::Severity::Info,
+                            L"Neural rendering runs on NVIDIA GeForce RTX cards, AMD Radeon RX 7000 and RX 9000 series, and "
+                            L"Intel Arc A- and B-series (on Intel it is far from real time). MoonSR includes no runtime or "
+                            L"model: you import your own files below.");
+        p->AddInfo(u.nrSetupIntro);
+        u.nrSetupToggle = p->Make<ui::Button>();
+        u.nrSetupToggle->text = L"Hide details";
+        u.nrSetupToggle->visible = false;
+        u.nrStageUse = p->Make<ui::Button>();
+        u.nrStageUse->accent = true;
+        u.nrStageUse->visible = false;
+        u.nrStageOpen = p->Make<ui::LinkButton>();
+        u.nrStageOpen->text = L"Load order";
+        ui::Card& setup = p->AddCard();
+        u.nrSetupRow = &p->AddRow(setup, kIconInfo, L"Setup status", L"Checking...", {{u.nrSetupToggle, 0.0f}});
+        u.nrSetupRow->gate = nullptr;
+        u.nrStageRow = &p->AddRow(setup, kIconNeural, L"GPU for neural rendering", L"Auto",
+                                  {{u.nrStageUse, 0.0f}, {u.nrStageOpen, 0.0f}});
+        u.nrStageRow->gate = nullptr;
+        u.nrStageWarn = p->Make<ui::InfoBar>();
+        u.nrStageWarn->visible = false;
+        p->AddInfo(u.nrStageWarn);
+        u.nrSetupMsg = p->Make<ui::InfoBar>();
+        u.nrSetupMsg->visible = false;
+        p->AddInfo(u.nrSetupMsg);
+        for (AppUi::SetupSlot& s : u.nrSlot) {
+            s.primary = p->Make<ui::Button>();
+            s.secondary = p->Make<ui::Button>();
+            s.link = p->Make<ui::LinkButton>();
+            s.link2 = p->Make<ui::LinkButton>();
+            s.status = p->Make<ui::InfoBar>();
+            s.primary->visible = s.secondary->visible = s.link->visible = s.link2->visible = s.status->visible = false;
+            s.primary->accent = true;
+            ui::Card& gpu = p->AddCard();
+            s.row = &p->AddRow(gpu, kIconMonitor, L"", L"", {{s.secondary, 0.0f}, {s.primary, 0.0f}});
+            s.row->gate = nullptr;
+            s.row->visible = false;
+            s.linkRow = &p->AddRow(gpu, kIconOpenLocal, L"Official pages", L"", {{s.link, 0.0f}, {s.link2, 0.0f}});
+            s.linkRow->gate = nullptr;
+            s.linkRow->visible = false;
+            p->AddInfo(s.status);
+        }
+
+        p->AddSection(L"About");
         p->AddInfo(u.neuralInfo);
         p->AddInfo(u.neuralDev);
         p->AddInfo(u.neuralNote);
@@ -469,6 +516,16 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.visualEffectsRow = &p->AddRow(app, kIconEffects, L"Visual effects",
                                         L"Transparency, glow and animations. Turn off for a plain look or on slower PCs.",
                                         {{u.visualEffects, kToggleW}});
+        u.openReleases = p->Make<ui::LinkButton>();
+        u.openReleases->text = L"Open releases page";
+        ui::Row& updates = p->AddRow(app, kIconSync, L"Updates", std::wstring(L"This is MoonSR ") + MOONSR_VERSION_WSTRING,
+                                     {{u.openReleases, 0.0f}});
+        updates.gate = nullptr;
+        ui::InfoBar* updatesHelp = p->Make<ui::InfoBar>();
+        updatesHelp->Set(ui::InfoBar::Severity::Info,
+                         L"MoonSR never connects to the internet. Check for new versions on GitHub and run the newer "
+                         L"installer; your settings are kept.");
+        p->AddInfo(updatesHelp);
 
         p->AddSection(L"Themes");
         u.themePicker = p->Make<ui::ThemePicker>();

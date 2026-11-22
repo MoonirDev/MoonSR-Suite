@@ -69,6 +69,22 @@ struct AppUi {
     ui::ToggleSwitch* neural = nullptr;
     ui::Row* neuralRow = nullptr;
     ui::InfoBar* neuralHomeNote = nullptr;  // Home page
+    // Neural rendering: guided setup (top of the page). One pooled slot per detected GPU.
+    static constexpr int kSetupSlots = 4;
+    struct SetupSlot {
+        ui::Row* row = nullptr;            // GPU name, vendor and family; next-step buttons
+        ui::Button *primary = nullptr, *secondary = nullptr;
+        ui::Row* linkRow = nullptr;        // official pages
+        ui::LinkButton *link = nullptr, *link2 = nullptr;
+        ui::InfoBar* status = nullptr;     // Ready / needed / not supported, with the explanation
+    };
+    ui::InfoBar *nrSetupIntro = nullptr, *nrStageWarn = nullptr, *nrSetupMsg = nullptr;
+    ui::Row *nrSetupRow = nullptr, *nrStageRow = nullptr;
+    ui::Button *nrSetupToggle = nullptr, *nrStageUse = nullptr;
+    ui::LinkButton* nrStageOpen = nullptr;
+    SetupSlot nrSlot[kSetupSlots];
+    // Settings: Updates
+    ui::LinkButton* openReleases = nullptr;
     // Smart parallax (experimental)
     ui::InfoBar *reliefDev = nullptr, *reliefNote = nullptr, *reliefModeNote = nullptr;
     ui::ToggleSwitch *relief = nullptr, *reliefSplit = nullptr;

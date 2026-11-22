@@ -1,5 +1,6 @@
 // MoonSR application entry point: single instance, log setup, common controls, message loop.
 #include "main_window.h"
+#include "nr_import.h"
 #include "settings.h"
 #include "ui/theme_file.h"
 
@@ -9,6 +10,9 @@
 #include "core/log.h"
 
 #include <windows.h>
+#include <shellapi.h>
+
+#include <cwchar>
 
 namespace {
 
@@ -29,6 +33,18 @@ void ActivateExistingInstance() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
+    {
+        // Load check for an imported neural runtime (nr_import.cpp, ProbeLoad): a separate process, so a runtime that
+        // crashes or hangs while loading cannot take the UI down. No window, no log, no single-instance mutex.
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc == 4 && wcscmp(argv[1], L"--nr-probe-load") == 0) {
+            const int code = moonsr::app::nr::RunProbeChild(argv[2], argv[3]);
+            LocalFree(argv);
+            ExitProcess(static_cast<UINT>(code));
+        }
+        if (argv) LocalFree(argv);
+    }
     const moonsr::app::TestOptions test = moonsr::app::ParseTestOptions();
     HANDLE mutex = CreateMutexW(nullptr, FALSE, test.active ? kTestMutexName : kMutexName);
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
