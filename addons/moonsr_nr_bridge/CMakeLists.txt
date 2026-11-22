@@ -38,7 +38,7 @@ foreach(stage vs ps)
         DEPENDS "${CMAKE_CURRENT_LIST_DIR}/copy.hlsl" VERBATIM)
     list(APPEND NR_HEADERS "${out}")
 endforeach()
-add_library(MoonSR_NrBridge SHARED bridge.cpp amd_model.cpp intel_model.cpp
+add_library(MoonSR_NrBridge SHARED bridge.cpp amd_model.cpp intel_model.cpp nr_bridge.rc
     "${NR_SOURCE}/src/gpu.cpp" "${NR_SOURCE}/src/optical_flow.cpp"
     "${NR_SOURCE}/src/composition.cpp" "${NR_SOURCE}/src/model.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/pipeline.cpp" "${NR_SOURCE}/src/picture.cpp" ${NR_HEADERS})

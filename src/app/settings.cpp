@@ -130,6 +130,12 @@ AppSettings LoadSettings() {
     pic.tint = std::clamp(ReadSignedInt(path, L"Picture", L"Tint", 0), -200, 200);
     pic.sharpen = std::clamp(ReadSignedInt(path, L"Picture", L"Sharpen", 0), 0, 400);
     s.alsrHistoryPercent = std::clamp(ReadSignedInt(path, L"Alsr", L"HistoryPercent", 85), 50, 95);
+    s.reliefEnabled = ReadSignedInt(path, L"Relief", L"Enabled", 0) != 0;
+    s.reliefMode = std::clamp(ReadSignedInt(path, L"Relief", L"Mode", 0), 0, 2);
+    s.reliefStrengthPercent = std::clamp(ReadSignedInt(path, L"Relief", L"StrengthPercent", 35), 0, 100);
+    s.reliefParallaxHundredths = std::clamp(ReadSignedInt(path, L"Relief", L"ParallaxPx100", 200), 0, 300);
+    s.reliefDetailHundredths = std::clamp(ReadSignedInt(path, L"Relief", L"DetailPx100", 150), 75, 400);
+    s.reliefSplit = ReadSignedInt(path, L"Relief", L"SplitView", 0) != 0;
     s.pipelineOrder = ReadString(path, L"Pipeline", L"Order");
     s.hasWindowPos = ReadInt(path, L"Window", L"HasPosition", 0) != 0;
     s.windowX = ReadSignedInt(path, L"Window", L"X", 0);
@@ -211,6 +217,12 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Picture", L"Tint", pic.tint);
     ok &= WriteInt(path, L"Picture", L"Sharpen", pic.sharpen);
     ok &= WriteInt(path, L"Alsr", L"HistoryPercent", s.alsrHistoryPercent);
+    ok &= WriteInt(path, L"Relief", L"Enabled", s.reliefEnabled ? 1 : 0);
+    ok &= WriteInt(path, L"Relief", L"Mode", s.reliefMode);
+    ok &= WriteInt(path, L"Relief", L"StrengthPercent", s.reliefStrengthPercent);
+    ok &= WriteInt(path, L"Relief", L"ParallaxPx100", s.reliefParallaxHundredths);
+    ok &= WriteInt(path, L"Relief", L"DetailPx100", s.reliefDetailHundredths);
+    ok &= WriteInt(path, L"Relief", L"SplitView", s.reliefSplit ? 1 : 0);
     ok &= WriteString(path, L"Pipeline", L"Order", s.pipelineOrder);
     ok &= WriteInt(path, L"Window", L"HasPosition", s.hasWindowPos ? 1 : 0);
     ok &= WriteInt(path, L"Window", L"X", s.windowX);

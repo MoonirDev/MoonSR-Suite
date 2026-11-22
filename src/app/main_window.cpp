@@ -948,6 +948,13 @@ void MainWindow::WireHandlers() {
     ui_.fgMode->onChange = [this] { OnFrameGenMode(); };
     ui_.fgMultiplier->onChange = [this] { OnFrameGenValue(); };
     ui_.fgTarget->onChange = [this] { OnFrameGenValue(); };
+    for (ui::Control* control : std::initializer_list<ui::Control*>{ui_.relief, ui_.reliefMode, ui_.reliefStrength,
+             ui_.reliefParallax, ui_.reliefDetail, ui_.reliefSplit})
+        control->onChange = [this] {
+            UpdateReliefUi();
+            if (!engineActive_) ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
+            OnLiveChange();
+        };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1125,6 +1132,14 @@ void MainWindow::ApplySettingsToUi() {
     ui_.pictureEnabled->SetChecked(pic.enabled);
     for (int i = 0; i < AppUi::kPictureControls; ++i) ui_.pictureControls[i]->SetValue(pictureValues[i]);
     UpdatePictureState();
+    ui_.relief->SetChecked(settings_.reliefEnabled);
+    ui_.reliefMode->SetSelected(std::clamp(settings_.reliefMode, 0, 2));
+    ui_.reliefStrength->SetValue(std::clamp(settings_.reliefStrengthPercent, 0, 100));
+    ui_.reliefParallax->SetValue(std::clamp(settings_.reliefParallaxHundredths, 0, 300));
+    ui_.reliefDetail->SetValue(std::clamp(settings_.reliefDetailHundredths, 75, 400));
+    ui_.reliefSplit->SetChecked(settings_.reliefSplit);
+    UpdateReliefUi();
+    if (!engineActive_) ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
     SetOrderUi(OrderFromString(settings_.pipelineOrder));
 }
 
@@ -1156,6 +1171,12 @@ AppSettings MainWindow::CaptureSettings() const {
     s.neuralModelId = selectedModelId_;
     s.neuralSettings = CurrentNeuralSettings();
     s.pictureSettings = CurrentPictureSettings();
+    s.reliefEnabled = ui_.relief->checked();
+    s.reliefMode = std::clamp(ui_.reliefMode->Selected(), 0, 2);
+    s.reliefStrengthPercent = ui_.reliefStrength->value();
+    s.reliefParallaxHundredths = ui_.reliefParallax->value();
+    s.reliefDetailHundredths = ui_.reliefDetail->value();
+    s.reliefSplit = ui_.reliefSplit->checked();
     s.pipelineOrder = OrderToString(CurrentOrder());
 
     s.monitorDevice.clear();
@@ -1576,6 +1597,7 @@ void MainWindow::ApplyLiveSettings() {
     engine_.SetFrameGen(CurrentFrameGen());
     engine_.SetAlsrSettings(CurrentAlsr());
     engine_.SetPictureSettings(CurrentPictureSettings());
+    engine_.SetReliefSettings(CurrentRelief());
 }
 
 void MainWindow::StartScaling(HWND target) {
@@ -1595,6 +1617,7 @@ void MainWindow::StartScaling(HWND target) {
     cfg.neuralModelId = selectedModelId_;
     cfg.neuralSettings = CurrentNeuralSettings();
     cfg.pictureSettings = CurrentPictureSettings();
+    cfg.relief = CurrentRelief();
 
     // Re-resolve the monitor handle in case the display configuration changed since the list was built.
     const int m = ui_.monitor->Selected();
@@ -1759,6 +1782,16 @@ void MainWindow::ShowStats(const EngineStats& st) {
     }
     ui_.alsrNote->Set(Severity::Warning, st.alsrNote);
     ui_.alsrNote->SetVisible(!st.alsrNote.empty() && AlsrSelected());
+    {
+        std::wstring relief = ReliefSummary(&st);
+        if (ui_.relief->checked() && st.reliefGpuMs > 0.0) relief += std::format(L" · {:.3f} ms GPU", st.reliefGpuMs);
+        ui_.details->SetValue(DetRelief, relief);
+        // The page's warning already says "in development"; show the engine note only when it adds something.
+        const bool extra = ui_.relief->checked() && !st.reliefNote.empty() &&
+                           st.reliefNote != L"Smart parallax is in development: no effect yet.";
+        if (extra) ui_.reliefNote->Set(Severity::Warning, st.reliefNote);
+        ui_.reliefNote->SetVisible(extra);
+    }
     ui_.details->SetValue(DetCpu, st.cpuFrameMs > 0.0 ? std::format(L"{:.2f} ms", st.cpuFrameMs) : std::wstring(L"-"));
     ui_.details->SetValue(DetDropped, std::to_wstring(st.framesDropped));
     ui_.details->SetValue(DetSkipped, fgOn ? std::format(L"{} / {}", st.generatedLate, st.generatedSkipped) : std::wstring(L"-"));
@@ -1781,7 +1814,9 @@ void MainWindow::ClearStats(const wchar_t* stateText) {
         t->SetValue(L"-");
     for (size_t i = 0; i < DetCount; ++i) ui_.details->SetValue(i, i == DetState ? stateText : L"-");
     ui_.details->SetVisible(DetStageGpus, false);
-    for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote}) bar->SetVisible(false);
+    for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote, ui_.reliefNote})
+        bar->SetVisible(false);
+    ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
     status_ = TestStatus{};
     status_.state = stateText;
 }
@@ -1867,7 +1902,7 @@ void MainWindow::ApplyTestOptionsEarly() {
         static const struct { const wchar_t* name; int page; } kPages[] = {
             {L"home", PageHome}, {L"upscaling", PageUpscaling}, {L"framegen", PageFrameGen},
             {L"settings", PageSettings}, {L"diagnostics", PageSettings}, {L"neural", PageNeural},
-            {L"loadorder", PageLoadOrder}};
+            {L"loadorder", PageLoadOrder}, {L"relief", PageRelief}, {L"parallax", PageRelief}};
         for (const auto& p : kPages)
             if (EqualNoCase(test_.page, p.name)) view_.Navigate(p.page);
     }
@@ -2413,6 +2448,47 @@ void MainWindow::UpdateAlsrUi() {
     ui_.alsrHistory->SetEnabled(ui_.upscaling->checked());
     if (!alsr) ui_.alsrNote->SetVisible(false);
     if (wasShown != alsr) view_.RequestLayout();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Smart parallax (experimental)
+// ---------------------------------------------------------------------------------------------------------------------
+
+ReliefSettings MainWindow::CurrentRelief() const {
+    ReliefSettings r;  // protectHud / protectEdges / protectCharacters and autoDisable stay at their defaults (on)
+    const long long mode = ui_.reliefMode->Selected() >= 0 ? ui_.reliefMode->ItemData(ui_.reliefMode->Selected()) : 0;
+    r.tier = !ui_.relief->checked() ? ReliefTier::Off
+           : mode == 2              ? ReliefTier::MotionDepth
+           : mode == 1              ? ReliefTier::Parallax
+                                    : ReliefTier::Shading;
+    r.strength = static_cast<float>(ui_.reliefStrength->value()) / 100.0f;
+    r.parallaxMaxPx = static_cast<float>(ui_.reliefParallax->value()) / 100.0f;
+    r.detailScalePx = static_cast<float>(ui_.reliefDetail->value()) / 100.0f;
+    r.debugView = ui_.reliefSplit->checked() ? ReliefDebugView::Split : ReliefDebugView::None;
+    return r;
+}
+
+void MainWindow::UpdateReliefUi() {
+    const bool on = ui_.relief->checked();
+    const long long mode = ui_.reliefMode->Selected() >= 0 ? ui_.reliefMode->ItemData(ui_.reliefMode->Selected()) : 0;
+    ui_.reliefMode->SetEnabled(on);
+    ui_.reliefStrength->SetEnabled(on);
+    ui_.reliefDetail->SetEnabled(on);
+    ui_.reliefSplit->SetEnabled(on);
+    const bool parallax = mode >= 1;
+    const bool layoutChange = ui_.reliefParallaxRow->visible != parallax || ui_.reliefModeNote->visible != (mode == 2);
+    ui_.reliefParallaxRow->visible = parallax;
+    ui_.reliefParallax->SetVisible(parallax);
+    ui_.reliefParallax->SetEnabled(on);
+    ui_.reliefModeNote->SetVisible(mode == 2);
+    if (layoutChange) view_.RequestLayout();
+}
+
+std::wstring MainWindow::ReliefSummary(const EngineStats* st) const {
+    if (!ui_.relief->checked()) return L"Off";
+    if (st && st->reliefActive) return L"On";
+    if (st && !st->reliefNote.empty() && st->reliefTier == ReliefTier::Off) return L"On (could not start)";
+    return L"On (in development: no effect yet)";
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

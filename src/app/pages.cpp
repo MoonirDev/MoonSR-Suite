@@ -1,5 +1,7 @@
 #include "pages.h"
 
+#include "core/version.h"
+
 namespace moonsr::app {
 namespace {
 
@@ -52,6 +54,8 @@ constexpr wchar_t kIconPicture = 0xE8B9;
 constexpr wchar_t kIconReset = 0xE7A7; // Undo
 constexpr wchar_t kIconDetail = 0xE8A3; // ZoomIn
 constexpr wchar_t kIconSharpening = 0xE8FE; // Scan
+constexpr wchar_t kIconReliefNav = ui::kGlyphReliefLayers;  // vector stacked-layers glyph (Canvas::ReliefLayersGlyph)
+constexpr wchar_t kIconCompare = 0xE8A9;    // ViewAll (A/B split view)
 
 using ui::ComboBox;
 using ui::Slider;
@@ -117,7 +121,8 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddTiles({u.tGame, u.tDisplayed, u.tGenerated, u.tFrameGen, u.tFgDelay, u.tLatency, u.tInput, u.tOutput});
 
         p->AddSection(L"Details");
-        u.details = p->AddDetails({L"GPU", L"GPU per stage", L"Capture method", L"Scaler", L"Processing order", L"CPU per frame", L"Frames dropped",
+        u.details = p->AddDetails({L"GPU", L"GPU per stage", L"Capture method", L"Scaler", L"Processing order", L"Smart parallax",
+                                   L"CPU per frame", L"Frames dropped",
                                    L"Generated frames: scheduler late / skipped", L"State"});
         p->AddFree(u.diagnosticsLink, 0.0f, 24.0f);
     }
@@ -338,6 +343,62 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddRow(folder, kIconFolder, L"Models folder", L"Where the copies you added are stored", {{u.openModels, 0.0f}});
     }
 
+    // ---------------------------------------------------------------- Smart parallax (experimental)
+    {
+        ui::Page* p = view.AddPage(L"Smart parallax (experimental)", kIconReliefNav, L"Smart parallax");
+        u.reliefDev = p->Make<ui::InfoBar>();
+        u.reliefDev->Set(ui::InfoBar::Severity::Warning, L"In development: turning it on has no visible effect yet.");
+        ui::InfoBar* about = p->Make<ui::InfoBar>();
+        about->Set(ui::InfoBar::Severity::Info,
+                   L"Experimental. Smart parallax is designed to estimate surface relief from the captured picture and "
+                   L"add subtle relief shading and a small parallax that follows camera motion. It is an approximation: "
+                   L"the game's depth is not available to MoonSR.");
+        u.reliefNote = p->Make<ui::InfoBar>();
+        u.reliefNote->visible = false;
+        u.relief = p->Make<ToggleSwitch>();
+        u.reliefMode = p->Make<ComboBox>();
+        u.reliefMode->AddItem(L"Shading", 0);
+        u.reliefMode->AddItem(L"Parallax", 1);
+        u.reliefMode->AddItem(L"Motion depth", 2);
+        u.reliefMode->SetSelected(0);
+        u.reliefModeNote = p->Make<ui::InfoBar>();
+        u.reliefModeNote->Set(ui::InfoBar::Severity::Info,
+                              L"Motion depth needs frame generation on (it reuses its motion analysis). Without it, "
+                              L"Parallax is used.");
+        u.reliefModeNote->visible = false;
+        u.reliefStrength = p->Make<Slider>();
+        u.reliefStrength->Setup(0, 100, 5, L"%");
+        u.reliefStrength->SetValue(35);
+        u.reliefParallax = p->Make<Slider>();
+        u.reliefParallax->Setup(0, 300, 25, L" px");
+        u.reliefParallax->SetDisplayDivisor(100);
+        u.reliefParallax->SetValue(200);
+        u.reliefDetail = p->Make<Slider>();
+        u.reliefDetail->Setup(75, 400, 25, L" px");
+        u.reliefDetail->SetDisplayDivisor(100);
+        u.reliefDetail->SetValue(150);
+        u.reliefSplit = p->Make<ToggleSwitch>();
+
+        p->AddInfo(u.reliefDev);
+        p->AddInfo(about);
+        p->AddInfo(u.reliefNote);
+        ui::Card& c = p->AddCard();
+        p->AddRow(c, kIconReliefNav, L"Smart parallax", L"Adds estimated depth to textured surfaces", {{u.relief, kToggleW}});
+        p->AddRow(c, kIconPersonalize, L"Mode", L"Shading only, or shading plus a small parallax offset",
+                  {{u.reliefMode, 200.0f}});
+        p->AddInfo(u.reliefModeNote);
+        ui::Card& look = p->AddCard();
+        p->AddRow(look, kIconIntensity, L"Strength", L"How strong the relief is", {{u.reliefStrength, 300.0f}});
+        u.reliefParallaxRow = &p->AddRow(look, kIconFit, L"Parallax amount", L"Largest offset on the output, in pixels",
+                                         {{u.reliefParallax, 300.0f}});
+        p->AddRow(look, kIconDetail, L"Detail size", L"Size of the surface detail that gets relief, in game pixels",
+                  {{u.reliefDetail, 300.0f}});
+        p->AddSection(L"Compare");
+        ui::Card& cmp = p->AddCard();
+        p->AddRow(cmp, kIconCompare, L"A/B split view", L"Left half without, right half with Smart parallax",
+                  {{u.reliefSplit, kToggleW}});
+    }
+
     // ---------------------------------------------------------------- Load order
     {
         ui::Page* p = view.AddPage(L"Load order", kIconOrderNav, L"Load order");
@@ -397,7 +458,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         k2->text = L"Ctrl+Alt+R";
         k2->keycap = true;
         ui::TextLabel* ver = p->Make<ui::TextLabel>();
-        ver->text = L"0.1.0";
+        ver->text = MOONSR_VERSION_WSTRING;
         u.closeToTray = p->Make<ToggleSwitch>();
         u.visualEffects = p->Make<ToggleSwitch>();
 

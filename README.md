@@ -1,5 +1,7 @@
 # MoonSR Suite
 
+**Version 1.0.0**
+
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
 GPU vendors (NVIDIA, AMD, Intel). Lossless Scaling inspired the design. MoonSR does not inject anything into the 
@@ -13,8 +15,10 @@ It is an experimental personal project. Quality and speed claims come only from 
 - **Capture:** Windows Graphics Capture of any window, with the cursor drawn in software.
 - **Upscaling:** Nearest, Bilinear, Catmull-Rom, Lanczos-3, MoonSR Spatial (edge-adaptive) and MoonSR
   (temporal reconstruction from estimated motion; experimental), plus sharpening.
-- **Frame generation:** 2X to 6X and an adaptive mode. Motion is estimated from the captured frames only. HUD
-  protection and anti-aliasing apply to generated frames.
+- **Frame generation:** Fixed mode (2X to 20X) or Auto mode (type a target frame rate; MoonSR generates as many
+  frames as needed, placing each at its true time between real frames). With V-Sync off it is not capped to the
+  display's refresh rate. Motion is estimated from the captured frames only. HUD protection applies to generated
+  frames.
 - **Neural rendering (optional):** runs a vendor neural-rendering model on the captured frames. You supply the
   runtime and model yourself:
   - NVIDIA: your DLSS Neural Rendering model (`nvngx_dlssnr.dll`).
@@ -23,13 +27,31 @@ It is an experimental personal project. Quality and speed claims come only from 
 
   See [documentation/NR_BRIDGE.md](documentation/NR_BRIDGE.md).
 - **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling) can run on
-  its own GPU; frames are copied between GPUs where consecutive stages differ. NVIDIA neural rendering must share the
-  upscaling GPU.
+  its own GPU; frames are copied between GPUs where consecutive stages differ. NVIDIA neural rendering on a second GPU
+  runs in a small helper process (`MoonSR_NrHost.exe`).
+- **Smart parallax (in development):** a planned screen-space relief effect that estimates surface depth from the
+  captured picture and adds subtle relief shading and parallax to textured surfaces. The tab and settings exist; the
+  effect itself is not built yet. Design: [documentation/research/screen_space_relief.md](documentation/research/screen_space_relief.md).
+- **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
+  ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.
+- **Output window:** stays directly above the game, so other windows can be placed over it. MoonSR can close to the
+  system tray.
 - **Scheduling:** MoonSR runs at the realtime GPU scheduling class, so its work goes ahead of the game's on a busy
   GPU.
 
 Displayed frame rate includes generated frames. It is not the game's frame rate and does not reflect input
 responsiveness.
+
+## Install
+
+Download `MoonSR-Setup-<version>.exe` and run it. It installs for the current Windows user into
+`%LOCALAPPDATA%\Programs\MoonSR` without an administrator prompt and needs no internet connection or extra runtime.
+
+- **Updating:** run the newer installer. It updates the existing installation in place; your settings, themes and
+  models in `%LOCALAPPDATA%\MoonSR` are kept. Close MoonSR first (the installer asks if it is running).
+- **Uninstalling:** Windows Settings > Apps > MoonSR, or the uninstaller in the Start menu. It asks whether to also
+  delete your settings (default: keep them).
+- The installer is not code-signed yet, so Windows SmartScreen may warn the first time.
 
 ## Requirements
 
@@ -44,6 +66,14 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1                  # RelW
 powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Config Debug
 ```
 
+To build the installer (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\make_installer.ps1   # Release build, then dist\MoonSR-Setup-<version>.exe
+```
+
+The version is set in one place: the root `CMakeLists.txt` (`project(MoonSR VERSION x.y.z)`).
+
 Binaries are written to `build\main\bin`:
 
 - `MoonSR.exe`: the application.
@@ -51,18 +81,27 @@ Binaries are written to `build\main\bin`:
 - Test and benchmark tools: `moonsr_bench`, `moonsr_fgbench`, `moonsr_testpattern`, `moonsr_gpuload` and the smoke
   tests in `tests/`.
 
+## Releases
+
+- **1.0.0** (2026-11-22): first versioned release with an installer. Frame generation Fixed (2X-20X) and Auto
+  (target frame rate) modes; no refresh-rate cap with V-Sync off; neural rendering on any GPU; themes with custom
+  theme import; new logo; close to tray; groundwork for Smart parallax; output window that other windows can cover; online learning removed and the
+  temporal upscaler renamed MoonSR.
+
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `src/core`, `src/gpu`, `src/capture`, `src/present` | Types and logging; Direct3D devices and monitors; capture; output window |
 | `src/upscale`, `src/framegen`, `src/neural` | Scalers and the MoonSR temporal upscaler; frame generation; host side of the neural rendering bridge |
+| `src/relief` | Smart parallax stage (groundwork) |
 | `src/engine` | Pipeline thread. `engine.h` is the only API the UI uses |
 | `src/app` | User interface |
 | `shaders/` | HLSL, compiled with `fxc` at build time and embedded |
 | `sdk/include` | C ABI for neural rendering bridges |
 | `addons/moonsr_nr_bridge` | Neural rendering bridge (NVIDIA, AMD and Intel backends) |
 | `tools/`, `tests/`, `benchmarks/` | Measurement tools, smoke tests, reference implementations |
+| `installer/` | Inno Setup script for the Windows installer |
 | `documentation/` | Architecture, benchmarks, known issues, research notes |
 
 ## Credits

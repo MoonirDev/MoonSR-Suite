@@ -59,6 +59,7 @@ struct Engine::Impl {
     PipelineOrder liveOrder;
     AlsrSettings liveAlsr;          // guarded by mutex
     PictureSettings livePicture;    // guarded by mutex
+    ReliefSettings liveRelief;      // guarded by mutex
     struct NeuralChange {
         bool enabled;
         std::wstring modelId;
@@ -262,6 +263,78 @@ struct Engine::Impl {
     RectI sceneDestRect;
     CursorState drawnCursor;
 
+    // Smart parallax (relief/relief_pass.h). Exists only while a tier other than Off is requested; then every displayed
+    // frame is rendered into `scene` (as for the software cursor) and Apply writes scene -> back buffer before the
+    // cursor and the frame counter are drawn. With relief off (and no software cursor) frames go straight to the back
+    // buffer as before: no pass, no scene texture, no extra copy.
+    std::unique_ptr<ReliefPass> relief;
+    bool reliefFailed = false;      // creation failed; not retried until the pipeline is rebuilt
+    bool reliefAnalysed = false;    // the newest real frame was analysed (Apply is skipped otherwise)
+    float reliefPhase = 1.0f;       // phase of the frame in `scene`: 1 = real, (0,1) = generated
+    ReliefSettings appliedRelief;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv;
+
+    // Scene routing: the software cursor and relief both need the finished image in `scene`.
+    bool WantScene() const { return cursor != nullptr || relief != nullptr; }
+
+    void ReleaseRelief() {
+        relief.reset();
+        reliefAnalysed = false;
+        reliefPhase = 1.0f;
+        appliedRelief = ReliefSettings{};
+        sceneSrv.Reset();
+        if (!cursor) { // the scene texture existed only for relief
+            sceneRtv.Reset();
+            scene.Reset();
+            sceneSize = {};
+            sceneValid = false;
+        }
+    }
+
+    // Creates / releases / configures the pass for this loop iteration (pipeline thread).
+    void UpdateRelief(const ReliefSettings& requested) {
+        const bool want = requested.tier != ReliefTier::Off;
+        if (!want) {
+            if (relief) {
+                ReleaseRelief();
+                MSR_LOG_INFO(L"Smart parallax off");
+            }
+            return;
+        }
+        if (!relief && !reliefFailed) {
+            std::wstring error;
+            relief = ReliefPass::Create(*device, error);
+            if (!relief) {
+                reliefFailed = true; // logged by Create
+                return;
+            }
+            appliedRelief = ReliefSettings{};
+            reliefAnalysed = false;
+        }
+        if (relief && !(requested == appliedRelief)) {
+            relief->SetSettings(requested);
+            appliedRelief = requested;
+        }
+    }
+
+    // Once per real frame, on the original capture (never modified in place by the other stages: they write into their
+    // own textures). `motion` is passed only when the generator already measured it for this capture (D7).
+    void ReliefAnalyse(const CapturedFrame& frame, const MotionFieldView* motion) {
+        if (!relief) return;
+        reliefAnalysed = relief->Analyse(frame.texture, frame.contentRect, motion, frame.captureQpc);
+    }
+
+    bool EnsureSceneSrv() {
+        if (sceneSrv) return true;
+        if (!scene) return false;
+        const HRESULT hr = device->Device()->CreateShaderResourceView(scene.Get(), nullptr, &sceneSrv);
+        if (FAILED(hr)) {
+            MSR_LOG_ERROR(L"Scene view for Smart parallax failed: {}", HrToString(hr));
+            return false;
+        }
+        return true;
+    }
+
     // Frame counter overlay: "game fps / displayed fps", refreshed with the statistics.
     std::unique_ptr<StatsOverlay> overlay;
     bool overlayFailed = false;
@@ -432,7 +505,10 @@ struct Engine::Impl {
         overlayFailed = false;
         ResetFrameGen();
         fgCreateFailed = false;
+        ReleaseRelief();
+        reliefFailed = false;
         cursor.reset();
+        sceneSrv.Reset();
         sceneRtv.Reset();
         scene.Reset();
         sceneSize = {};
@@ -809,7 +885,7 @@ struct Engine::Impl {
 
     // Scales `tex` into the kept scene (software cursor active) or straight into the back buffer. No present.
     bool RenderOnly(ID3D11Texture2D* tex, const RectI& rect, const ScaleSettings& settings, RectI& destRect, bool& toScene) {
-        toScene = cursor && EnsureScene();
+        toScene = WantScene() && EnsureScene();
         ID3D11RenderTargetView* target = toScene ? sceneRtv.Get() : presenter->BackBufferRtv();
         const bool ok = scale->Render(tex, rect, target, presenter->BackBufferSize(), settings, &destRect);
         if (ok && toScene) {
@@ -950,13 +1026,14 @@ struct Engine::Impl {
     // Scales `tex` to the output (through the kept scene when the software cursor is active) and presents.
     PresentStatus RenderAndPresent(ID3D11Texture2D* tex, const RectI& rect, const ScaleSettings& settings,
                                    const CursorState& cursorState, RectI& destRect, bool& rendered) {
-        const bool useScene = cursor && EnsureScene();
+        const bool useScene = WantScene() && EnsureScene();
         ID3D11RenderTargetView* target = useScene ? sceneRtv.Get() : presenter->BackBufferRtv();
         rendered = scale->Render(tex, rect, target, presenter->BackBufferSize(), settings, &destRect);
         if (!rendered) return PresentStatus::Occluded; // "nothing presented"
         if (useScene) {
             sceneValid = true;
             sceneDestRect = destRect;
+            reliefPhase = 1.0f; // this path only shows real frames
             return ComposeAndPresent(cursorState);
         }
         return PresentBackBuffer();
@@ -965,6 +1042,7 @@ struct Engine::Impl {
     bool EnsureScene() {
         const Size size = presenter->BackBufferSize();
         if (scene && sceneSize == size) return true;
+        sceneSrv.Reset();
         sceneRtv.Reset();
         scene.Reset();
         sceneValid = false;
@@ -988,14 +1066,23 @@ struct Engine::Impl {
         return true;
     }
 
-    // Copies the kept scene to the back buffer, draws the software cursor on top and presents.
+    // Brings the kept scene to the back buffer (through Smart parallax when it is on, else a plain copy), draws the
+    // software cursor on top and presents. Relief runs before the cursor and the frame counter (PresentBackBuffer), so
+    // neither overlay is relief-processed, and a cursor-only re-composite re-applies relief to the same frame.
     PresentStatus ComposeAndPresent(const CursorState& state) {
         ID3D11RenderTargetView* bb = presenter->BackBufferRtv();
-        Microsoft::WRL::ComPtr<ID3D11Resource> bbTex;
-        bb->GetResource(&bbTex);
-        device->Context()->CopyResource(bbTex.Get(), scene.Get());
-        cursor->Draw(state, config.targetWindow, bb, sceneSize, sceneDestRect);
-        drawnCursor = state;
+        bool applied = false;
+        if (relief && reliefAnalysed && EnsureSceneSrv())
+            applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase);
+        if (!applied) { // relief off, not analysed, or failed: never lose the image
+            Microsoft::WRL::ComPtr<ID3D11Resource> bbTex;
+            bb->GetResource(&bbTex);
+            device->Context()->CopyResource(bbTex.Get(), scene.Get());
+        }
+        if (cursor) {
+            cursor->Draw(state, config.targetWindow, bb, sceneSize, sceneDestRect);
+            drawnCursor = state;
+        }
         return PresentBackBuffer();
     }
 
@@ -1038,6 +1125,9 @@ struct Engine::Impl {
             stats.error = exitError;
             stats.capturedFps = stats.presentedFps = stats.generatedFps = 0.0;
             stats.neuralRenderingActive = false;
+            stats.reliefActive = false;
+            stats.reliefTier = ReliefTier::Off;
+            stats.reliefGpuMs = 0.0;
         }
         if (!exitError.empty()) MSR_LOG_WARN(L"Pipeline stopped: {}", exitError);
         // If we never reported a start result (exception during init), report the failure now.
@@ -1126,6 +1216,7 @@ struct Engine::Impl {
             PipelineOrder order;
             AlsrSettings alsrSettings;
             PictureSettings pictureSettings;
+            ReliefSettings reliefSettings;
             std::optional<NeuralChange> neuralChange;
             bool vsync;
             {
@@ -1136,9 +1227,11 @@ struct Engine::Impl {
                 order = liveOrder;
                 alsrSettings = liveAlsr;
                 pictureSettings = livePicture;
+                reliefSettings = liveRelief;
                 if (pendingIndex >= pendingCount) neuralChange.swap(pendingNeuralChange);
                 overlayEnabled = liveFrameCounter;
             }
+            UpdateRelief(reliefSettings);
 
             // The generator's lifetime follows the REQUESTED multiplier. The effective multiplier is decided once
             // per real frame, when it is scheduled.
@@ -1388,7 +1481,8 @@ struct Engine::Impl {
                 PresentStatus ps = PresentStatus::Occluded;
                 if (rendered && toScene) {
                     // Sample the cursor as late as possible: after the wait, right before compositing.
-                    cursorState = cursor->Poll(config.targetWindow);
+                    if (cursor) cursorState = cursor->Poll(config.targetWindow);
+                    reliefPhase = p.real ? 1.0f : p.t;
                     ps = ComposeAndPresent(cursorState);
                 } else if (rendered) {
                     ps = PresentBackBuffer();
@@ -1506,6 +1600,7 @@ struct Engine::Impl {
                 if (frame.textureSize != lastTextureSize) {
                     // The capture pool was recreated; drop views that pin the old textures.
                     scale->ResetSourceCache();
+                    if (relief) relief->Reset();
                     lastTextureSize = frame.textureSize;
                 }
                 // Real frame time estimate; maintained with and without generation.
@@ -1637,6 +1732,18 @@ struct Engine::Impl {
                         continue;
                     }
                     if (pushed) {
+                        // Smart parallax analyses the original capture (still held). The generator's motion field is
+                        // passed only when it measured this real frame on the main device in capture pixels: local
+                        // generator, fed with a capture-sized image (not pre-scaled; neural output keeps the geometry).
+                        if (relief) {
+                            MotionFieldView motion;
+                            const Size content{static_cast<uint32_t>(frame.contentRect.Width()),
+                                               static_cast<uint32_t>(frame.contentRect.Height())};
+                            const bool motionMatches = !fgIsRemote && !preScaledNow && !capturePreScaled &&
+                                                       fg->FrameSize() == content;
+                            if (motionMatches) motion = fg->MotionField();
+                            ReliefAnalyse(frame, motionMatches && motion.valid ? &motion : nullptr);
+                        }
                         capture->ReleaseFrame();
                         fgFailStreak = 0;
                         fgHasHistory = true;
@@ -1731,6 +1838,7 @@ struct Engine::Impl {
                     pendingSlotMs = 0.0;
                 }
 
+                ReliefAnalyse(frame, nullptr); // no-op when relief is off; no motion on the direct path
                 RectI destRect;
                 bool rendered = false;
                 ScaleSettings directSettings = settings;
@@ -1846,6 +1954,7 @@ struct Engine::Impl {
                         if (!text.empty()) text += L" > ";
                         text += Engine::StageName(st);
                     }
+                    if (relief) text += text.empty() ? L"Smart parallax" : L" > Smart parallax"; // always last (D1)
                     stats.pipelineOrderText = text.empty() ? L"(no processing: frames shown as captured)" : text;
                     stats.pipelineOrderNote.clear();
                     if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && fgWanted) {
@@ -1861,6 +1970,19 @@ struct Engine::Impl {
                 stats.alsrNote.clear();
                 if (settings.enabled && settings.scaler == ScalerKind::MoonALSR && (alsrFailed || fgCreateFailed))
                     stats.alsrNote = L"MoonSR could not start on this GPU (see the log). Lanczos-3 is used instead.";
+                if (relief) {
+                    const ReliefStats rs = relief->Stats();
+                    stats.reliefActive = rs.active;
+                    stats.reliefTier = rs.tierInEffect;
+                    stats.reliefNote = rs.reason;
+                    stats.reliefGpuMs = rs.applyGpuMs + rs.analyseGpuMs;
+                } else {
+                    stats.reliefActive = false;
+                    stats.reliefTier = ReliefTier::Off;
+                    stats.reliefGpuMs = 0.0;
+                    stats.reliefNote = reliefSettings.tier != ReliefTier::Off && reliefFailed
+                        ? L"Smart parallax could not start on this GPU (see the log)." : L"";
+                }
                 stats.frameGenCoverage = windowReal ? static_cast<double>(windowRealWithGen) / windowReal : 0.0;
                 stats.frameGenNote.clear();
                 if (autoMode && autoRequestedFps > 0) {
@@ -2000,6 +2122,7 @@ bool Engine::Start(const EngineConfig& config, std::wstring& error) {
         impl_->liveOrder = NormalizeOrder(config.order);
         impl_->liveAlsr = config.alsr;
         impl_->livePicture = config.pictureSettings;
+        impl_->liveRelief = config.relief;
         impl_->pendingNeuralChange.reset();
         // The user-selected model is driven only through the optional, separately built bridge.
         impl_->stats.neuralRenderingActive = false;
@@ -2089,6 +2212,11 @@ PipelineOrder Engine::NormalizeOrder(const PipelineOrder& order) {
 void Engine::SetAlsrSettings(const AlsrSettings& settings) {
     std::lock_guard lock(impl_->mutex);
     impl_->liveAlsr = settings;
+}
+
+void Engine::SetReliefSettings(const ReliefSettings& settings) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->liveRelief = settings;
 }
 
 void Engine::SetPipelineOrder(const PipelineOrder& order) {

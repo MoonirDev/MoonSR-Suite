@@ -434,6 +434,10 @@ void Canvas::Icon(wchar_t glyph, const Rect& r, Font f, const D2D1_COLOR_F& c) {
         NeuralNetGlyph(r, gfx_.Format(f)->GetFontSize(), c);
         return;
     }
+    if (glyph == kGlyphReliefLayers) {
+        ReliefLayersGlyph(r, gfx_.Format(f)->GetFontSize(), c);
+        return;
+    }
     if (glyph == 0xE7A1 && !gfx_.hasFluentIcons()) glyph = 0xE9E9; // Contrast uses Equalizer in MDL2.
     Text(std::wstring(1, glyph), r, f, c, HAlign::Center);
 }
@@ -634,6 +638,30 @@ void Canvas::NeuralNetGlyph(const Rect& r, float em, const D2D1_COLOR_F& c) {
     for (const auto& p : l0) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
     for (const auto& p : l1) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
     for (const auto& p : l2) rt_->FillEllipse(D2D1::Ellipse(p, node, node), brush_.Get());
+}
+
+// Smart parallax: three flat layers seen at an angle, like the familiar "layers" sign, but each lower layer is shifted
+// sideways so the stack reads as depth with parallax. The top layer is a full rhombus; the two below show only their
+// lower edges (they are hidden behind it) and fade with distance. Same grid and stroke weight as NeuralNetGlyph.
+void Canvas::ReliefLayersGlyph(const Rect& r, float em, const D2D1_COLOR_F& c) {
+    if (!rt_) return;
+    const float u = em / 18.0f;  // the nav icons are 18 DIP glyphs
+    const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f;
+    const float hw = 6.6f * u, hh = 3.4f * u, step = 3.5f * u, shift = 1.3f * u, line = std::max(0.8f, 0.9f * u);
+    const float top = cy - step;  // centre of the top layer; the stack spans about cy - 6.9u .. cy + 6.9u
+    // Lower layers first (drawn underneath), farthest = most shifted and faintest.
+    const float alpha[2] = {0.72f, 0.45f};
+    for (int k = 2; k >= 1; --k) {
+        const float x = cx + shift * static_cast<float>(k) - shift, y = top + step * static_cast<float>(k);
+        brush_->SetColor(D2D1_COLOR_F{c.r, c.g, c.b, c.a * alpha[k - 1]});
+        rt_->DrawLine(D2D1::Point2F(x - hw, y), D2D1::Point2F(x, y + hh), brush_.Get(), line, gfx_.roundStroke());
+        rt_->DrawLine(D2D1::Point2F(x, y + hh), D2D1::Point2F(x + hw, y), brush_.Get(), line, gfx_.roundStroke());
+    }
+    const float x0 = cx - shift;
+    const D2D1_POINT_2F d[4] = {{x0 - hw, top}, {x0, top - hh}, {x0 + hw, top}, {x0, top + hh}};
+    brush_->SetColor(c);
+    for (int i = 0; i < 4; ++i) rt_->DrawLine(d[i], d[(i + 1) % 4], brush_.Get(), line, gfx_.roundStroke());
+    rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0, top), 1.1f * u, 1.1f * u), brush_.Get());  // surface point
 }
 
 void Canvas::PushClip(const Rect& r) {

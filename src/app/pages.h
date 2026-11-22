@@ -1,4 +1,5 @@
-// The MoonSR pages (Home, Upscaling, Frame generation, Neural rendering, Load order, Settings) and the handles to their controls.
+// The MoonSR pages (Home, Upscaling, Frame generation, Neural rendering, Smart parallax, Load order, Settings) and the
+// handles to their controls.
 // Pages only build the visual structure; MainWindow wires behaviour (change handlers, engine calls) to the handles.
 // Threading: UI thread only.
 #pragma once
@@ -9,7 +10,7 @@
 
 namespace moonsr::app {
 
-enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageLoadOrder, PageSettings };
+enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageRelief, PageLoadOrder, PageSettings };
 
 struct AppUi {
     // Home
@@ -68,6 +69,12 @@ struct AppUi {
     ui::ToggleSwitch* neural = nullptr;
     ui::Row* neuralRow = nullptr;
     ui::InfoBar* neuralHomeNote = nullptr;  // Home page
+    // Smart parallax (experimental)
+    ui::InfoBar *reliefDev = nullptr, *reliefNote = nullptr, *reliefModeNote = nullptr;
+    ui::ToggleSwitch *relief = nullptr, *reliefSplit = nullptr;
+    ui::ComboBox* reliefMode = nullptr;  // item data: 0 Shading, 1 Parallax, 2 Motion depth
+    ui::Slider *reliefStrength = nullptr, *reliefParallax = nullptr, *reliefDetail = nullptr;
+    ui::Row* reliefParallaxRow = nullptr;
     // Load order
     ui::InfoBar *orderInfo = nullptr, *orderNow = nullptr, *orderNote = nullptr;
     ui::OrderList* orderList = nullptr;
@@ -86,7 +93,7 @@ struct AppUi {
 };
 
 // Detail rows on the Home page, in display order.
-enum DetailRow { DetGpu, DetStageGpus, DetCapture, DetScaler, DetOrder, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
+enum DetailRow { DetGpu, DetStageGpus, DetCapture, DetScaler, DetOrder, DetRelief, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
 
 void BuildPages(ui::View& view, AppUi& ui);
 

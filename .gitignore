@@ -22,3 +22,6 @@ addons/OptiScaler_NR_ref/
 # Claude Code workflow files (kept locally, not published)
 CLAUDE.md
 .claude/
+
+# Installer output
+dist/

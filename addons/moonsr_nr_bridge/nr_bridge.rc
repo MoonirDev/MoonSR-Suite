@@ -1,0 +1,4 @@
+// Version resource for MoonSR_NrBridge.dll.
+#include <windows.h>
+#define NR_FILE_DESCRIPTION "MoonSR neural rendering bridge"
+#include "nr_version.rc.inc"

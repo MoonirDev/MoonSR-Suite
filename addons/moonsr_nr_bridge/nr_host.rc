@@ -1,2 +1,6 @@
-// Icon for the neural rendering helper process (shown in Task Manager). The icon is MoonSR's own MIT-licensed artwork.
+// Icon and version for the neural rendering helper process (shown in Task Manager). The icon is MoonSR's own
+// MIT-licensed artwork.
+#include <windows.h>
 1 ICON "../../assets/brand/moonsr.ico"
+#define NR_FILE_DESCRIPTION "MoonSR neural rendering helper"
+#include "nr_version.rc.inc"

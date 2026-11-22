@@ -4,6 +4,29 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-22 - Session 8: version 1.0.0, installer, Smart parallax groundwork
+
+- **Version 1.0.0.** Single source: root `CMakeLists.txt` `project(MoonSR VERSION ...)` -> generated `core/version.h`
+  -> .exe version resources (MoonSR.exe, MoonSR_NrHost.exe, MoonSR_NrBridge.dll), the Settings page and the installer.
+- **Static C runtime** (`CMAKE_MSVC_RUNTIME_LIBRARY` MultiThreaded): no Visual C++ Redistributable needed; verified
+  by scanning the shipped binaries for VCRUNTIME/MSVCP imports.
+- **Installer** (owner: small, offline, update in place, keep settings, uninstaller): Inno Setup 6, `installer/MoonSR.iss`,
+  `tools/make_installer.ps1` -> `dist/MoonSR-Setup-<version>.exe`. Per-user (`%LOCALAPPDATA%\Programs\MoonSR`, no UAC),
+  LZMA2 ultra solid, fixed AppId, AppMutex closes/blocks a running MoonSR, downgrade warning, uninstaller asks before
+  deleting `%LOCALAPPDATA%\MoonSR` (default keep). Ships only MoonSR.exe, MoonSR_NrHost.exe, MoonSR_NrBridge.dll,
+  NeuralRendering_nvngx.dll, README, licences and notices. Size 2.73 MiB. Silent tests: install, in-place update to a
+  test version (one entry, same folder), downgrade refused, uninstall clean; settings.ini hash and timestamp unchanged
+  throughout. Interactive wizard and the uninstall question not clicked through. Unsigned (SmartScreen warning).
+- **Smart parallax groundwork.** Research: `documentation/research/screen_space_relief.md` (screen-space relief: guided
+  band-pass height, relief shading, position-dependent parallax capped at 1-3 px, plane+parallax depth only when the
+  frame generator already runs; neural depth deferred). Lead decisions: two-rate stage at the end of the pipeline,
+  outside the load order; Upscaling GPU; never start the motion estimator for relief; off by default; name "Smart
+  parallax" (experimental); go/no-go after M2 on the owner's real-game A/B. Contract `src/relief/relief_pass.h`;
+  pass-through implementation (bit-exact: 0 of 2,073,600 pixels differ; Apply 0.017 ms RTX 5060, 0.19 ms RTX A400 at
+  1920x1080/1920x1200), engine wiring (Analyse per real frame, Apply per displayed frame before overlays), UI tab,
+  `[Relief]` settings, CLI `--relief`, `--relief-strength`, `--relief-selftest`. Zero cost when off rests on the code
+  path (nothing created); a pacing A/B could not be measured because other GPU work was running on the RTX 5060.
+
 ## 2026-11-22 - Session 7: frame generation Fixed/Auto modes, Settings page and themes
 
 Owner requests, in order. Nothing committed yet (uncommitted working tree).

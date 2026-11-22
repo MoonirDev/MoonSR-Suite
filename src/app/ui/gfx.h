@@ -29,6 +29,7 @@ enum class HAlign { Left, Center, Right };
 // Icon "glyphs" that are drawn as vectors by Canvas::Icon instead of coming from the icon font (control characters, so
 // they never collide with a font glyph).
 constexpr wchar_t kGlyphNeuralNet = 0x0001;  // small neural network: 2-3-2 nodes joined by thin lines
+constexpr wchar_t kGlyphReliefLayers = 0x0002;  // Smart parallax: three flat layers stacked with a sideways offset
 
 class Gfx {
 public:
@@ -148,6 +149,7 @@ public:
     // Single-line text with extra letter spacing (DIPs), top-left at (x, y). Returns its width.
     float SpacedText(const std::wstring& s, float x, float y, float size, DWRITE_FONT_WEIGHT weight, const D2D1_COLOR_F& c, float spacing);
     void NeuralNetGlyph(const Rect& r, float emSize, const D2D1_COLOR_F& c);
+    void ReliefLayersGlyph(const Rect& r, float emSize, const D2D1_COLOR_F& c);
     void PushClip(const Rect& r);
     void PopClip();
     void SetOffset(float dx, float dy);

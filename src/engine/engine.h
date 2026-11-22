@@ -10,6 +10,7 @@
 #include "framegen/frame_generator.h"
 #include "models/model_store.h"
 #include "neural/neural_settings.h"
+#include "relief/relief_pass.h"
 #include "upscale/alsr_upscaler.h"
 #include "upscale/scale_pass.h"
 
@@ -96,6 +97,11 @@ struct EngineConfig {
     NeuralSettings neuralSettings;
     PictureSettings pictureSettings;
     bool showFrameCounter = false; // draw "game fps / displayed fps" in the top-left corner of the output
+    // Smart parallax (experimental, relief/relief_pass.h). With tier Off (the default) nothing is created and the frame
+    // path is unchanged. Otherwise Analyse runs once per real frame on the original capture and Apply runs on every
+    // displayed frame as the last image operation on the main (Upscaling) GPU, before the software cursor and the frame
+    // counter are drawn, so neither is relief-processed.
+    ReliefSettings relief;
 };
 
 enum class EngineState : uint32_t { Idle, Starting, Running, Recovering, Failed };
@@ -147,6 +153,14 @@ struct EngineStats {
     // requested but is not in use.
     bool alsrActive = false;
     std::wstring alsrNote;
+    // Smart parallax. reliefActive: the effect is changing the image (false while it is in development, off, or not
+    // running). reliefTier: the tier in effect (may be lower than requested; Off when not running). reliefNote: plain-
+    // language state when requested but not (fully) active. reliefGpuMs: measured GPU time per displayed frame of Apply
+    // plus per real frame of Analyse (timestamp medians, lagged; 0 when off or not measured).
+    bool reliefActive = false;
+    ReliefTier reliefTier = ReliefTier::Off;
+    std::wstring reliefNote;
+    double reliefGpuMs = 0.0;
     // Diagnostic recording (see Engine::RecordFrames).
     bool recording = false;            // a recording is in progress
     std::wstring lastRecordingDir;     // folder of the most recently finished recording
@@ -206,6 +220,8 @@ public:
     void SetNeuralSettings(bool enabled, const std::wstring& modelId, const NeuralSettings& settings);
     void SetPipelineOrder(const PipelineOrder& order);
     void SetAlsrSettings(const AlsrSettings& settings);
+    // Smart parallax. Turning it on creates the pass on the next frame; turning it off releases it and its resources.
+    void SetReliefSettings(const ReliefSettings& settings);
 
     // Default order, display names and one-line descriptions for the UI.
     static PipelineOrder DefaultOrder();

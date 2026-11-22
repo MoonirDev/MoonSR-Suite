@@ -156,6 +156,9 @@ private:
     bool AlsrSelected() const;
     AlsrSettings CurrentAlsr() const;
     void UpdateAlsrUi();
+    ReliefSettings CurrentRelief() const;  // Smart parallax; tier Off while the switch is off
+    void UpdateReliefUi();                 // enabled / visible state of the Smart parallax controls
+    std::wstring ReliefSummary(const EngineStats* st) const;  // Home "Smart parallax" detail
 
     // Load order
     PipelineOrder CurrentOrder() const;

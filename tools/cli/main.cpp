@@ -10,6 +10,10 @@
 //              [--vsync-switch-at <second>] (toggles V-Sync live at that second of the run)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
 //              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
+//              [--relief off|shading|parallax|motion] [--relief-strength 0..1] (Smart parallax, experimental)
+//   moonsr_cli --relief-selftest [--adapter <name substring>]
+//              (Smart parallax pass-through check: Apply on a 1920x1080 noise image through both the copy path and the
+//               shader path, read back and compared byte for byte; prints the measured Apply GPU time of each path)
 //
 // --scaler takes a scaler name substring (case-insensitive), or one of the short names nearest, bilinear, bicubic,
 // lanczos, spatial, moonsr (the MoonSR temporal upscaler; `alsr` is accepted as an alias).
@@ -17,7 +21,10 @@
 #include "core/log.h"
 #include "engine/engine.h"
 
+#include <wrl/client.h>
+
 #include <algorithm>
+#include <cstdint>
 #include <cwctype>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +88,107 @@ void List() {
         wprintf(L"  [%s] %ux%u  %s\n", w.exeName.c_str(), w.clientSize.width, w.clientSize.height, w.title.c_str());
 }
 
+const wchar_t* ReliefTierName(ReliefTier t) {
+    switch (t) {
+    case ReliefTier::Shading: return L"shading";
+    case ReliefTier::Parallax: return L"parallax";
+    case ReliefTier::MotionDepth: return L"motion";
+    default: return L"off";
+    }
+}
+
+// Smart parallax pass-through self-test (test tool: allocates and reads back freely). Returns the process exit code.
+int ReliefSelfTest(const std::wstring& adapterName) {
+    using Microsoft::WRL::ComPtr;
+    LUID luid{};
+    bool haveLuid = false;
+    if (!adapterName.empty())
+        for (const auto& a : Engine::ListAdapters())
+            if (Contains(a.name, adapterName)) { luid = a.luid; haveLuid = true; break; }
+    std::wstring error;
+    auto device = GpuDevice::Create(haveLuid ? &luid : nullptr, error);
+    if (!device) { fwprintf(stderr, L"Device: %s\n", error.c_str()); return 1; }
+    wprintf(L"Adapter: %s\n", device->Info().name.c_str());
+    ID3D11Device1* d = device->Device();
+    ID3D11DeviceContext1* ctx = device->Context();
+    constexpr UINT W = 1920, H = 1080;
+    std::vector<uint32_t> noise(static_cast<size_t>(W) * H);
+    uint32_t x = 0x12345678u;
+    for (uint32_t& v : noise) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; v = x; } // xorshift32, alpha random too
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const D3D11_SUBRESOURCE_DATA init{noise.data(), W * 4, 0};
+    ComPtr<ID3D11Texture2D> src;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    if (FAILED(d->CreateTexture2D(&td, &init, &src)) || FAILED(d->CreateShaderResourceView(src.Get(), nullptr, &srv))) {
+        fwprintf(stderr, L"Source texture creation failed\n");
+        return 1;
+    }
+    int failures = 0;
+    // Path 1: same format (CopySubresourceRegion). Path 2: RGBA8 destination (fullscreen pass-through shader).
+    for (const DXGI_FORMAT dstFormat : {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM}) {
+        const bool swapRb = dstFormat == DXGI_FORMAT_R8G8B8A8_UNORM;
+        auto pass = ReliefPass::Create(*device, error);
+        if (!pass) { fwprintf(stderr, L"ReliefPass::Create: %s\n", error.c_str()); return 1; }
+        ReliefSettings rs;
+        rs.tier = ReliefTier::Shading;
+        pass->SetSettings(rs);
+        D3D11_TEXTURE2D_DESC dd = td;
+        dd.Format = dstFormat; dd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        ComPtr<ID3D11Texture2D> dst;
+        ComPtr<ID3D11RenderTargetView> rtv;
+        if (FAILED(d->CreateTexture2D(&dd, nullptr, &dst)) || FAILED(d->CreateRenderTargetView(dst.Get(), nullptr, &rtv))) {
+            fwprintf(stderr, L"Destination texture creation failed\n");
+            return 1;
+        }
+        const RectI rect{0, 0, static_cast<int32_t>(W), static_cast<int32_t>(H)};
+        bool ok = pass->Analyse(src.Get(), rect, nullptr, QpcNow());
+        constexpr int kRuns = 300;
+        const int64_t loopStart = QpcNow();
+        for (int i = 0; i < kRuns && ok; ++i) {
+            ok = pass->Apply(srv.Get(), Size{W, H}, rtv.Get(), Size{W, H}, rect, 1.0f);
+            if ((i & 15) == 15) { ctx->Flush(); Sleep(1); } // let timestamps complete; the engine never waits
+        }
+        ctx->Flush();
+        wprintf(L"  %d Apply calls submitted in %.1f ms (CPU wall time incl. sleeps)\n", kRuns, QpcToMs(QpcNow() - loopStart));
+        D3D11_TEXTURE2D_DESC sdsc = dd;
+        sdsc.Usage = D3D11_USAGE_STAGING; sdsc.BindFlags = 0; sdsc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (!ok || FAILED(d->CreateTexture2D(&sdsc, nullptr, &staging))) { fwprintf(stderr, L"Apply or staging failed\n"); return 1; }
+        ctx->CopyResource(staging.Get(), dst.Get());
+        const int64_t mapStart = QpcNow();
+        if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) { fwprintf(stderr, L"Map failed\n"); return 1; }
+        wprintf(L"  readback Map waited %.1f ms for the GPU\n", QpcToMs(QpcNow() - mapStart));
+        uint64_t mismatched = 0;
+        for (UINT yy = 0; yy < H; ++yy) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(yy) * m.RowPitch);
+            for (UINT xx = 0; xx < W; ++xx) {
+                uint32_t v = row[xx];
+                if (swapRb) v = (v & 0xFF00FF00u) | ((v & 0x00FF0000u) >> 16) | ((v & 0x000000FFu) << 16);
+                if (v != noise[static_cast<size_t>(yy) * W + xx]) ++mismatched;
+            }
+        }
+        ctx->Unmap(staging.Get(), 0);
+        // The GPU has finished every Apply above (Map waited for it): further Apply calls collect their timestamps.
+        for (int i = 0; i < 20; ++i) {
+            (void)pass->Apply(srv.Get(), Size{W, H}, rtv.Get(), Size{W, H}, rect, 1.0f);
+            ctx->Flush();
+            Sleep(10);
+        }
+        const ReliefStats st = pass->Stats();
+        wprintf(L"%s path (%s destination): %llu of %u pixels differ -> %s; Apply GPU time %.4f ms (median of the last 64 timestamped calls, "
+                L"%dx%d); stats: active %d, tier %s, note '%s'\n",
+                swapRb ? L"Shader" : L"Copy", swapRb ? L"R8G8B8A8" : L"B8G8R8A8", mismatched, W * H,
+                mismatched ? L"FAIL" : L"exact", st.applyGpuMs, W, H, st.active ? 1 : 0, ReliefTierName(st.tierInEffect),
+                st.reason.c_str());
+        if (mismatched) ++failures;
+    }
+    wprintf(L"Relief self-test: %s\n", failures ? L"FAILED" : L"passed");
+    return failures ? 1 : 0;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -97,6 +205,9 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
     std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp;
+    std::wstring reliefMode = L"off";
+    float reliefStrength = -1.0f; // < 0: the ReliefSettings default
+    bool reliefSelfTest = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
@@ -130,6 +241,9 @@ int wmain(int argc, wchar_t** argv) {
         }
         else if (a == L"--fgquality") fgQuality = Lower(next());
         else if (a == L"--flowscale") flowScale = static_cast<float>(_wtof(next().c_str()));
+        else if (a == L"--relief") reliefMode = Lower(next());
+        else if (a == L"--relief-strength") reliefStrength = static_cast<float>(_wtof(next().c_str()));
+        else if (a == L"--relief-selftest") reliefSelfTest = true;
         else {
             fwprintf(stderr, L"Unknown argument: %s\n", a.c_str());
             return 2;
@@ -137,6 +251,17 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     InitLog(L"moonsr_cli.log");
+
+    if (reliefSelfTest) return ReliefSelfTest(adapterName);
+
+    ReliefTier reliefTier = ReliefTier::Off;
+    if (reliefMode == L"shading") reliefTier = ReliefTier::Shading;
+    else if (reliefMode == L"parallax") reliefTier = ReliefTier::Parallax;
+    else if (reliefMode == L"motion" || reliefMode == L"motiondepth") reliefTier = ReliefTier::MotionDepth;
+    else if (reliefMode != L"off") {
+        fwprintf(stderr, L"--relief takes off, shading, parallax or motion (got '%s')\n", reliefMode.c_str());
+        return 2;
+    }
 
     if (list || window.empty()) {
         List();
@@ -196,6 +321,8 @@ int wmain(int argc, wchar_t** argv) {
                                     : fgQuality == L"quality"   ? FrameGenQuality::Quality
                                                                 : FrameGenQuality::Balanced;
     cfg.cursor = cursorMode == L"none" ? CursorMode::None : cursorMode == L"captured" ? CursorMode::Captured : CursorMode::Software;
+    cfg.relief.tier = reliefTier;
+    if (reliefStrength >= 0.0f) cfg.relief.strength = std::clamp(reliefStrength, 0.0f, 1.0f);
 
     if (monitorIndex >= 0) {
         const auto monitors = Engine::ListMonitors();
@@ -270,6 +397,10 @@ int wmain(int argc, wchar_t** argv) {
         if (cfg.scale.scaler == ScalerKind::MoonALSR)
             wprintf(L"     MoonSR %s%s%s\n", s.alsrActive ? L"active" : L"NOT active", s.alsrNote.empty() ? L"" : L" | ",
                     s.alsrNote.c_str());
+        if (reliefTier != ReliefTier::Off)
+            wprintf(L"     smart parallax: requested %s, in effect %s, %s, GPU %.4f ms%s%s\n", ReliefTierName(reliefTier),
+                    ReliefTierName(s.reliefTier), s.reliefActive ? L"active" : L"not active", s.reliefGpuMs,
+                    s.reliefNote.empty() ? L"" : L" | ", s.reliefNote.c_str());
         if (upscaleFirst || orderSwitchAt) wprintf(L"     order: %s%s%s\n", s.pipelineOrderText.c_str(), s.pipelineOrderNote.empty() ? L"" : L" | ", s.pipelineOrderNote.c_str());
         if (tick == orderSwitchAt) {
             cfg.order.stages = upscaleFirst ? Engine::DefaultOrder().stages :

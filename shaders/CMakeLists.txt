@@ -28,6 +28,9 @@ moonsr_add_shader(upscale/alsr_refluma_ps.hlsl     ps_5_0 g_ps_alsr_refy DEFINES
 moonsr_add_shader(upscale/alsr_seed_ps.hlsl        ps_5_0 g_ps_alsr_seed)
 moonsr_add_shader(upscale/alsr_seedblend_ps.hlsl   ps_5_0 g_ps_alsr_seedblend)
 
+# --- upscaling-engineer: Smart parallax (screen-space relief, src/relief) ---
+moonsr_add_shader(relief/relief_passthrough_ps.hlsl ps_5_0 g_ps_relief_passthrough)
+
 # --- gpu-rendering-engineer: cursor overlay ---
 moonsr_add_shader(cursor/cursor_vs.hlsl     vs_5_0 g_vs_cursor)
 moonsr_add_shader(cursor/cursor_ps.hlsl     ps_5_0 g_ps_cursor)
