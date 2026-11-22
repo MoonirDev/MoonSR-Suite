@@ -512,25 +512,33 @@ void HeroBanner::Draw(Canvas& c, const Palette& p) {
     }
     const float w = RW(bounds), h = RH(bounds), s = ScaleFor(w);
     const float radius = 16.0f;
-    // Brand navy gradient (the same in both themes), diagonal like the logo artwork.
-    c.FillGradient(bounds, radius, {{0.0f, Rgb(0x202B48)}, {0.5f, Rgb(0x111A31)}, {1.0f, Rgb(0x17142F)}}, bounds.left, bounds.top,
-                   bounds.right, bounds.bottom);
+    // Dark themes: the brand navy gradient with the Windows 11 Dark logo colours and glow. Light themes: a pale
+    // blue-to-lavender wash with the light logo colours (deeper, no heavy glow) and dark text, to match the page.
+    const bool light = !p.dark;
+    if (light)
+        c.FillGradient(bounds, radius, {{0.0f, Rgb(0xFFFFFF)}, {0.55f, Rgb(0xEEF3FC)}, {1.0f, Rgb(0xECE8FB)}}, bounds.left,
+                       bounds.top, bounds.right, bounds.bottom);
+    else
+        c.FillGradient(bounds, radius, {{0.0f, Rgb(0x202B48)}, {0.5f, Rgb(0x111A31)}, {1.0f, Rgb(0x17142F)}}, bounds.left,
+                       bounds.top, bounds.right, bounds.bottom);
     c.PushClip(bounds);
-    // The banner keeps the brand look in every Fluent theme: the Windows 11 Dark logo colours on the navy gradient.
     static const LogoColors kBrand = LogoColorsFor(MakePalette(ThemeId::Dark));
+    const LogoColors logo = light ? LogoColorsFor(p) : kBrand;
     const float markH = 104.0f * s, markW = markH * 228.0f / 176.0f;
     const float mx = bounds.left + 30.0f * s, my = bounds.top + (h - markH) * 0.5f;
-    c.LogoMark(Rect{mx, my, mx + markW, my + markH}, kBrand, Effects());
+    c.LogoMark(Rect{mx, my, mx + markW, my + markH}, logo, Effects());
     const float tx = mx + markW + 30.0f * s;
     const float wordSize = 54.0f * s;
     const float wordY = bounds.top + 30.0f * s;
-    c.Wordmark(tx - 2.0f * s, wordY, wordSize, Rgb(0xFFFFFF), kBrand.srA, kBrand.srB);
+    c.Wordmark(tx - 2.0f * s, wordY, wordSize, light ? Rgb(0x14213D) : Rgb(0xFFFFFF), logo.srA, logo.srB);
     const float tagSize = std::max(11.5f, 13.0f * s);
     const float tagY = wordY + wordSize * 1.36f + 2.0f * s;
-    c.SpacedText(L"GAME UPSCALING AND MORE", tx + 2.0f * s, tagY, tagSize, DWRITE_FONT_WEIGHT_MEDIUM, Rgb(0xB4C6E5), 0.27f * tagSize);
+    c.SpacedText(L"GAME UPSCALING AND MORE", tx + 2.0f * s, tagY, tagSize, DWRITE_FONT_WEIGHT_MEDIUM,
+                 light ? Rgb(0x4A5B7A) : Rgb(0xB4C6E5), 0.27f * tagSize);
     const float ruleY = tagY + tagSize * 1.45f + 8.0f * s;
     const Rect rule{tx + 2.0f * s, ruleY, tx + 2.0f * s + 130.0f * s, ruleY + 3.0f};
-    c.FillGradient(rule, 1.5f, {{0.0f, Rgb(0x5CE5FF, 0.85f)}, {1.0f, Rgb(0x9584FF, 0.85f)}}, rule.left, 0.0f, rule.right, 0.0f);
+    c.FillGradient(rule, 1.5f, {{0.0f, light ? logo.srA : Rgb(0x5CE5FF, 0.85f)}, {1.0f, light ? logo.srB : Rgb(0x9584FF, 0.85f)}},
+                   rule.left, 0.0f, rule.right, 0.0f);
     c.PopClip();
     c.StrokeRound(bounds, radius, p.dark ? Argb(0x2EB4C6E5) : Argb(0x33203B6B), 1.0f);
 }
