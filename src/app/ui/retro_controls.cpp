@@ -156,7 +156,7 @@ void HeroBanner::DrawRetro(Canvas& c, const Palette& p) {
            p.textOnAccent, HAlign::Left);
     const float x = bounds.left + 16.0f;
     c.Text(L"MoonSR Suite", Rect{x, bounds.top + 32.0f, bounds.right - 16.0f, bounds.top + 70.0f}, Font::Title, p.accent);
-    c.Text(L"Game upscaling and frame generation.", Rect{x, bounds.top + 70.0f, bounds.right - 16.0f, bounds.top + 92.0f}, Font::Body,
+    c.Text(L"Game upscaling and more.", Rect{x, bounds.top + 70.0f, bounds.right - 16.0f, bounds.top + 92.0f}, Font::Body,
            p.textSecondary);
     const std::wstring prompt = L"C:\\MoonSR> ";
     const float pw = c.gfx().MeasureWidth(prompt, Font::Body);
