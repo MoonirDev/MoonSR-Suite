@@ -1,0 +1,24 @@
+build/
+out/
+.vs/
+*.user
+*.obj
+*.pdb
+*.ilk
+__pycache__/
+*.pyc
+benchmarks/output/
+.claude/settings.local.json
+moonsr_cli.log
+gpu_smoke.log
+*.log
+*.log.prev
+
+# Local clones of github.com/Dagherbou/OptiScaler_DLSSNR (third-party reference source, own git repositories)
+addons/OptiScalerSource/
+addons/OptiScaler_DLSSNR/
+addons/OptiScaler_NR_ref/
+
+# Claude Code workflow files (kept locally, not published)
+CLAUDE.md
+.claude/

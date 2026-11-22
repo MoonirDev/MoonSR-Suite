@@ -1,0 +1,6 @@
+add_subdirectory(gpu_smoke)
+add_subdirectory(cursor_smoke)
+add_subdirectory(recorder_smoke)
+add_subdirectory(overlay_smoke)
+add_subdirectory(model_store_smoke)
+add_subdirectory(nr_engine_smoke)

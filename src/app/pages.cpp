@@ -1,0 +1,440 @@
+#include "pages.h"
+
+namespace moonsr::app {
+namespace {
+
+// Segoe Fluent Icons / Segoe MDL2 Assets code points.
+constexpr wchar_t kIconHome = 0xE80F;
+constexpr wchar_t kIconUpscale = 0xE740;
+constexpr wchar_t kIconFrames = 0xE786;
+constexpr wchar_t kIconOutput = 0xE7F4;
+constexpr wchar_t kIconDiag = 0xE9D9;
+constexpr wchar_t kIconWindow = 0xE8A7;
+constexpr wchar_t kIconForeground = 0xE73F;
+constexpr wchar_t kIconPlay = 0xE768;
+constexpr wchar_t kIconScaler = 0xE71E;
+constexpr wchar_t kIconFit = 0xE9A6;
+constexpr wchar_t kIconSharp = 0xE9E9;
+constexpr wchar_t kIconSync = 0xE895;
+constexpr wchar_t kIconCursor = 0xE7C9;
+constexpr wchar_t kIconCounter = 0xE9D2;
+constexpr wchar_t kIconMonitor = 0xE7F4;
+constexpr wchar_t kIconGpu = 0xE950;
+constexpr wchar_t kIconMult = 0xE762;
+constexpr wchar_t kIconQuality = 0xE734;
+constexpr wchar_t kIconFlow = 0xE9F5;
+constexpr wchar_t kIconShield = 0xEA18;
+constexpr wchar_t kIconRecord = 0xE7C8;
+constexpr wchar_t kIconFolder = 0xE8B7;
+constexpr wchar_t kIconKeyboard = 0xE765;
+constexpr wchar_t kIconLog = 0xE8A5;
+constexpr wchar_t kIconInfo = 0xE946;
+constexpr wchar_t kIconNeuralNav = 0xE9F3; // Process
+constexpr wchar_t kIconNeural = 0xE9A1;
+constexpr wchar_t kIconOrderNav = 0xE8CB;
+constexpr wchar_t kIconModel = 0xE7B8;
+constexpr wchar_t kIconAddFile = 0xE8E5;
+constexpr wchar_t kIconDocument = 0xE8A5;
+constexpr wchar_t kIconOpenLocal = 0xE8DA;
+constexpr wchar_t kIconRepeat = 0xE8EE;
+constexpr wchar_t kIconPersonalize = 0xE771;
+constexpr wchar_t kIconIntensity = 0xE945; // LightningBolt
+constexpr wchar_t kIconStructure = 0xE81E; // MapLayers
+constexpr wchar_t kIconColour = 0xE790;
+constexpr wchar_t kIconBrightness = 0xE706;
+constexpr wchar_t kIconContrast = 0xE7A1;
+constexpr wchar_t kIconShadow = 0xE708; // QuietHours
+constexpr wchar_t kIconLight = 0xE793;
+constexpr wchar_t kIconWarmth = 0xEA80; // Lightbulb
+constexpr wchar_t kIconTint = 0xEB42; // Drop
+constexpr wchar_t kIconSkinDetection = 0xE928; // Fingerprint
+constexpr wchar_t kIconFace = 0xE76E; // Emoji2
+constexpr wchar_t kIconPicture = 0xE8B9;
+constexpr wchar_t kIconReset = 0xE7A7; // Undo
+constexpr wchar_t kIconDetail = 0xE8A3; // ZoomIn
+constexpr wchar_t kIconSharpening = 0xE8FE; // Scan
+
+using ui::ComboBox;
+using ui::Slider;
+using ui::ToggleSwitch;
+
+constexpr float kToggleW = 100.0f;
+
+}  // namespace
+
+void BuildPages(ui::View& view, AppUi& u) {
+    // ---------------------------------------------------------------- Home
+    {
+        ui::Page* p = view.AddPage(L"Home", kIconHome, L"Home");
+        u.window = p->Make<ComboBox>();
+        u.refresh = p->Make<ui::Button>();
+        u.refresh->text = L"Refresh";
+        u.useForeground = p->Make<ToggleSwitch>();
+        u.start = p->Make<ui::Button>();
+        u.start->accent = true;
+        u.start->text = L"Start scaling";
+        u.start->height = 40.0f;
+        u.message = p->Make<ui::InfoBar>();
+        u.diagnosticsLink = p->Make<ui::LinkButton>();
+        u.diagnosticsLink->text = L"Open Diagnostics";
+
+        p->AddFree(p->Make<ui::HeroBanner>(), -1.0f, -1.0f);
+
+        p->AddSection(L"Source");
+        ui::Card& src = p->AddCard();
+        p->AddRow(src, kIconWindow, L"Game window", L"The window to capture and scale",
+                  {{u.window, 340.0f}, {u.refresh, 88.0f}});
+        p->AddRow(src, kIconForeground, L"Use the foreground window when scaling starts",
+                  L"Picks whatever you are playing when the countdown ends", {{u.useForeground, kToggleW}});
+
+        ui::Card& hero = p->AddCard();
+        ui::Row& heroRow = p->AddRow(hero, kIconPlay, L"Scaling",
+                                     L"Starts after a 5 second countdown. Ctrl+Alt+S starts at once.",
+                                     {{u.start, 190.0f}});
+        heroRow.height = 84.0f;
+        heroRow.hero = true;
+        u.heroRow = &heroRow;
+        p->AddInfo(u.message);
+        u.neuralHomeNote = p->Make<ui::InfoBar>();
+        u.neuralHomeNote->visible = false;
+        p->AddInfo(u.neuralHomeNote);
+
+        p->AddSection(L"Status");
+        auto tile = [&](const wchar_t* label) {
+            ui::Tile* t = p->Make<ui::Tile>();
+            t->label = label;
+            return t;
+        };
+        u.tGame = tile(L"Game FPS (captured)");
+        u.tDisplayed = tile(L"Displayed FPS");
+        u.tGenerated = tile(L"Generated FPS");
+        u.tFrameGen = tile(L"Frame generation");
+        u.tFgDelay = tile(L"Added latency (frame gen)");
+        u.tLatency = tile(L"Capture to present");
+        u.tInput = tile(L"Input resolution");
+        u.tOutput = tile(L"Output resolution");
+        p->AddTiles({u.tGame, u.tDisplayed, u.tGenerated, u.tFrameGen, u.tFgDelay, u.tLatency, u.tInput, u.tOutput});
+
+        p->AddSection(L"Details");
+        u.details = p->AddDetails({L"GPU", L"Capture method", L"Scaler", L"Processing order", L"CPU per frame", L"Frames dropped",
+                                   L"Generated frames: scheduler late / skipped", L"State"});
+        p->AddFree(u.diagnosticsLink, 0.0f, 24.0f);
+    }
+
+    // ---------------------------------------------------------------- Upscaling
+    {
+        ui::Page* p = view.AddPage(L"Upscaling", kIconUpscale, L"Upscaling");
+        u.upscaling = p->Make<ToggleSwitch>();
+        u.scaler = p->Make<ComboBox>();
+        u.fit = p->Make<ComboBox>();
+        u.sharpness = p->Make<Slider>();
+        u.sharpness->Setup(0, 100, 1, L"%");
+        u.cursor = p->Make<ToggleSwitch>();
+        u.fit->AddItem(L"Fit", 0);
+        u.fit->AddItem(L"Stretch", 1);
+        u.fit->AddItem(L"Integer", 2);
+
+        ui::Card& c = p->AddCard();
+        p->AddRow(c, kIconUpscale, L"Upscaling",
+                  L"Off shows the game at its original size (1:1) - useful for frame generation only",
+                  {{u.upscaling, kToggleW}});
+        u.scalerRow = &p->AddRow(c, kIconScaler, L"Scaler", L"The algorithm that enlarges the image", {{u.scaler, 240.0f}});
+        p->AddRow(c, kIconFit, L"Fit mode", L"How the image fills the output", {{u.fit, 240.0f}});
+        p->AddRow(c, kIconSharp, L"Sharpness", L"Extra edge sharpening after scaling", {{u.sharpness, 300.0f}});
+
+        u.alsrInfo = p->Make<ui::InfoBar>();
+        u.alsrInfo->Set(ui::InfoBar::Severity::Info,
+                        L"Moon ALSR rebuilds detail from several frames and learns each game's look over time. It uses more GPU "
+                        L"time than the other scalers.");
+        u.alsrLearn = p->Make<ToggleSwitch>();
+        u.alsrUseLearned = p->Make<ToggleSwitch>();
+        u.alsrHistory = p->Make<Slider>();
+        u.alsrHistory->Setup(50, 95, 5, L"%");
+        u.alsrReset = p->Make<ui::Button>();
+        u.alsrReset->text = L"Reset what was learned for this game";
+        u.alsrProfiles = p->Make<ui::LinkButton>();
+        u.alsrProfiles->text = L"Open profiles folder";
+        u.alsrStatus = p->Make<ui::TextBlock>();
+        u.alsrStatus->title = L"Moon ALSR status";
+        u.alsrNote = p->Make<ui::InfoBar>();
+        u.alsrNote->visible = false;
+        p->AddInfo(u.alsrInfo);
+        ui::Card& ac = p->AddCard();
+        u.alsrLearnRow = &p->AddRow(ac, kIconNeural, L"Learn from this game",
+                                    L"Collects samples while you play and refines a profile for this game", {{u.alsrLearn, kToggleW}});
+        u.alsrUseRow = &p->AddRow(ac, kIconQuality, L"Apply learned filters (experimental)",
+                                  L"May improve or reduce image quality; turn off to compare", {{u.alsrUseLearned, kToggleW}});
+        u.alsrHistoryRow = &p->AddRow(ac, kIconFlow, L"History strength", L"How strongly earlier frames are trusted",
+                                      {{u.alsrHistory, 300.0f}});
+        u.alsrResetRow = &p->AddRow(ac, kIconShield, L"Learned profile",
+                                    L"Deletes what was learned for the game being scaled", {{u.alsrReset, 0.0f}});
+        u.alsrFolderRow = &p->AddRow(ac, kIconFolder, L"Profiles folder", L"Where each game's learned profile is stored",
+                                     {{u.alsrProfiles, 0.0f}});
+        p->AddFree(u.alsrStatus, -1.0f, -1.0f);
+        p->AddInfo(u.alsrNote);
+
+        p->AddSection(L"Presentation");
+        ui::Card& d = p->AddCard();
+        p->AddRow(d, kIconCursor, L"Show cursor in scaled image", L"Draws the mouse cursor over the scaled game",
+                  {{u.cursor, kToggleW}});
+    }
+
+    // ---------------------------------------------------------------- Frame generation
+    {
+        ui::Page* p = view.AddPage(L"Frame generation", kIconFrames, L"Frame generation");
+        u.vsync = p->Make<ToggleSwitch>();
+        u.counter = p->Make<ToggleSwitch>();
+        u.frameGen = p->Make<ToggleSwitch>();
+        u.fgMultiplier = p->Make<ComboBox>();
+        u.fgFlow = p->Make<Slider>();
+        u.fgFlow->Setup(25, 100, 5, L"%");
+        u.fgHud = p->Make<ToggleSwitch>();
+        u.fgLearning = p->Make<ToggleSwitch>();
+        u.fgLearningReset = p->Make<ui::Button>();
+        u.fgLearningReset->text = L"Reset learning for this game";
+        u.fgLearningProfiles = p->Make<ui::LinkButton>();
+        u.fgLearningProfiles->text = L"Open profiles folder";
+        u.fgLearningStatus = p->Make<ui::TextBlock>();
+        u.fgLearningStatus->title = L"Adaptive learning status";
+        for (int m = 2; m <= 6; ++m) u.fgMultiplier->AddItem(std::to_wstring(m) + L"X", m);
+        ui::InfoBar* note = p->Make<ui::InfoBar>();
+        note->Set(ui::InfoBar::Severity::Info,
+                  L"Generated frames make motion look smoother. They add latency and do not make the game more responsive.");
+
+        ui::Card& c = p->AddCard();
+        p->AddRow(c, kIconFrames, L"Frame generation", L"Inserts generated frames between the game's real frames",
+                  {{u.frameGen, kToggleW}});
+        p->AddRow(c, kIconMult, L"Multiplier", L"Displayed frames per real frame", {{u.fgMultiplier, 160.0f}});
+        p->AddRow(c, kIconFlow, L"Flow scale", L"Resolution of the motion analysis", {{u.fgFlow, 300.0f}});
+        p->AddRow(c, kIconShield, L"Protect HUD and static overlays", L"Keeps fixed on-screen elements from warping",
+                  {{u.fgHud, kToggleW}});
+        p->AddRow(c, kIconNeural, L"Adaptive learning (experimental)", L"Tests lower flow settings against real frames from this game",
+                  {{u.fgLearning, kToggleW}});
+        p->AddRow(c, kIconShield, L"Learned profile", L"Reset learning for the current game and settings",
+                  {{u.fgLearningReset, 0.0f}});
+        p->AddRow(c, kIconFolder, L"Profiles folder", L"Where per-game learning profiles are stored",
+                  {{u.fgLearningProfiles, 0.0f}});
+        p->AddFree(u.fgLearningStatus, -1.0f, -1.0f);
+        p->AddInfo(note);
+        p->AddSection(L"Presentation");
+        ui::Card& presentation = p->AddCard();
+        p->AddRow(presentation, kIconSync, L"V-Sync", L"Waits for the display refresh; avoids tearing", {{u.vsync, kToggleW}});
+        p->AddRow(presentation, kIconCounter, L"Show frame counter (game / displayed)",
+                  L"Overlay in the top-left corner of the output", {{u.counter, kToggleW}});
+    }
+
+    // ---------------------------------------------------------------- Neural rendering
+    {
+        ui::Page* p = view.AddPage(L"Neural rendering", kIconNeuralNav, L"Neural rendering");
+        u.neuralInfo = p->Make<ui::InfoBar>();
+        u.neuralInfo->Set(ui::InfoBar::Severity::Info,
+                          L"NVIDIA uses an imported DLSS model. RTX 20, 30 and 40 series need the patched FP16 runtime. AMD uses AMDNR. Intel uses the DLSS5_INTEL runtime (1 pass).");
+        u.neuralDev = p->Make<ui::InfoBar>();
+        u.neuralDev->Set(ui::InfoBar::Severity::Warning,
+                         L"Experimental community integration. Compatibility depends on the runtime, GPU, and driver.");
+        u.neuralNote = p->Make<ui::InfoBar>();
+        u.neuralNote->visible = false;
+        u.neuralMsg = p->Make<ui::InfoBar>();
+        u.neuralMsg->visible = false;
+        u.addModel = p->Make<ui::Button>();
+        u.addModel->accent = true;
+        u.addModel->text = L"Add model file...";
+        u.addLocalModel = p->Make<ui::Button>();
+        u.addLocalModel->text = L"Review and add";
+        u.openModels = p->Make<ui::LinkButton>();
+        u.openModels->text = L"Open models folder";
+        u.activeModel = p->Make<ComboBox>();
+        u.neural = p->Make<ToggleSwitch>();
+        u.nrPreset = p->Make<ComboBox>();
+        u.nrPreset->AddItem(L"Model default", 0);
+        u.nrPreset->AddItem(L"Original (A)", 1);
+        u.nrPreset->AddItem(L"Fast (B)", 2);
+        u.nrStyle = p->Make<ComboBox>();
+        u.nrStyle->AddItem(L"Default", 0); u.nrStyle->AddItem(L"Natural", 1); u.nrStyle->AddItem(L"Cinematic", 2);
+        u.nrPasses = p->Make<Slider>();
+        u.nrPasses->Setup(1, 20, 1, L"");
+        u.nrResolution = p->Make<Slider>(); u.nrResolution->Setup(25, 100, 5, L"%");
+        u.nrIntensity = p->Make<Slider>(); u.nrIntensity->Setup(0, 200, 5, L"%");
+        u.nrStructure = p->Make<Slider>(); u.nrStructure->Setup(0, 200, 5, L"%");
+        u.nrTone = p->Make<Slider>(); u.nrTone->Setup(0, 200, 5, L"%");
+        u.nrSkin = p->Make<Slider>(); u.nrSkin->Setup(0, 200, 5, L"%");
+        u.nrDetail = p->Make<Slider>(); u.nrDetail->Setup(0, 400, 5, L"%");
+        u.nrColour = p->Make<Slider>(); u.nrColour->Setup(0, 400, 5, L"%");
+        u.nrAutoSkin = p->Make<ToggleSwitch>();
+        u.nrReset = p->Make<ui::Button>(); u.nrReset->text = L"Restore defaults";
+        u.pictureEnabled = p->Make<ToggleSwitch>();
+        u.pictureReset = p->Make<ui::Button>(); u.pictureReset->text = L"Reset picture";
+        constexpr int pictureMin[] = {-400, -200, -200, -200, -200, 0, -100, -200, -200, 0};
+        constexpr int pictureMax[] = {400, 200, 200, 200, 200, 400, 200, 200, 200, 400};
+        for (int i = 0; i < AppUi::kPictureControls; ++i) {
+            u.pictureControls[i] = p->Make<Slider>();
+            u.pictureControls[i]->Setup(pictureMin[i], pictureMax[i], 5, L"");
+            u.pictureControls[i]->SetDisplayDivisor(100);
+        }
+
+        p->AddInfo(u.neuralInfo);
+        p->AddInfo(u.neuralDev);
+        p->AddInfo(u.neuralNote);
+
+        p->AddSection(L"Model");
+        ui::Card& use = p->AddCard();
+        u.neuralRow = &p->AddRow(use, kIconNeuralNav, L"DLSS Neural Rendering",
+                                 L"Enhances frames with the selected model.",
+                                 {{u.neural, kToggleW}});
+        p->AddRow(use, kIconDocument, L"Active model file", L"Choose between your imported model versions", {{u.activeModel, 310.0f}});
+        u.localModelRow = &p->AddRow(use, kIconOpenLocal, L"Local model file", L"Review nvngx_dlssnr.dll from the MoonSR folder",
+                                    {{u.addLocalModel, 170.0f}});
+        u.localModelRow->visible = false;
+        p->AddRow(use, kIconAddFile, L"Add a model file", L"The file is copied and inspected before use", {{u.addModel, 170.0f}});
+        p->AddInfo(u.neuralMsg);
+        auto* nrSettingsNote = p->Make<ui::InfoBar>();
+        nrSettingsNote->Set(ui::InfoBar::Severity::Info,
+                            L"Switch back to MoonSR to edit settings while scaling. Changes to the model, passes, or resolution may briefly pause the image.");
+        p->AddInfo(nrSettingsNote);
+        p->AddSection(L"Model and performance");
+        ui::Card& perf = p->AddCard();
+        p->AddRow(perf, kIconFlow, L"Model network", L"Original (A) or Fast (B). AMDNR uses its fast network by default.", {{u.nrPreset, 220.0f}});
+        p->AddRow(perf, kIconRepeat, L"Passes", L"More passes use more GPU time and memory. AMDNR runs up to 3, Intel runs 1.", {{u.nrPasses, 300.0f}});
+        p->AddRow(perf, kIconFit, L"Working resolution", L"Percent of the captured image used by the model", {{u.nrResolution, 300.0f}});
+        p->AddSection(L"Appearance");
+        ui::Card& appearance = p->AddCard();
+        p->AddRow(appearance, kIconPersonalize, L"Style", L"Select the model's visual style", {{u.nrStyle, 220.0f}});
+        p->AddRow(appearance, kIconIntensity, L"Intensity", L"Strength requested from the model", {{u.nrIntensity, 300.0f}});
+        p->AddRow(appearance, kIconStructure, L"Local structure", L"Controls local detail", {{u.nrStructure, 300.0f}});
+        p->AddRow(appearance, kIconContrast, L"Local tone", L"Controls local lighting and tone", {{u.nrTone, 300.0f}});
+        p->AddRow(appearance, kIconSkinDetection, L"Automatic skin detection", L"Apply separate skin structure settings", {{u.nrAutoSkin, kToggleW}});
+        p->AddRow(appearance, kIconFace, L"Skin structure", L"Detail strength for detected skin", {{u.nrSkin, 300.0f}});
+        p->AddRow(appearance, kIconDetail, L"Detail transfer", L"How much of the model's detail is applied", {{u.nrDetail, 300.0f}});
+        p->AddRow(appearance, kIconColour, L"Colour transfer", L"How much of the model's colour is applied", {{u.nrColour, 300.0f}});
+        p->AddRow(appearance, kIconReset, L"Restore defaults", L"Keeps the selected model file", {{u.nrReset, 160.0f}});
+        p->AddSection(L"Picture adjustments");
+        ui::Card& picture = p->AddCard();
+        p->AddRow(picture, kIconPicture, L"Enable picture adjustments", L"Adjust the finished neural image", {{u.pictureEnabled, kToggleW}});
+        constexpr struct {
+            wchar_t icon;
+            const wchar_t* title;
+            const wchar_t* description;
+        } adjustments[] = {
+            {kIconBrightness, L"Exposure", L"Stops of light; +1 doubles brightness"},
+            {kIconContrast, L"Contrast", L"Separate light and dark"},
+            {kIconSharp, L"Midtones", L"Adjust middle tones"},
+            {kIconShadow, L"Shadows", L"Lift or deepen dark areas"},
+            {kIconLight, L"Highlights", L"Adjust bright areas"},
+            {kIconColour, L"Saturation", L"Colour strength; 1.00 is unchanged"},
+            {kIconQuality, L"Vibrance", L"Boost muted colours"},
+            {kIconWarmth, L"Temperature", L"Cooler or warmer colour balance"},
+            {kIconTint, L"Tint", L"Green or magenta balance"},
+            {kIconSharpening, L"Sharpening", L"Sharpen the image at capture resolution"},
+        };
+        static_assert(std::size(adjustments) == AppUi::kPictureControls);
+        for (int i = 0; i < AppUi::kPictureControls; ++i) {
+            const auto& adjustment = adjustments[i];
+            p->AddRow(picture, adjustment.icon, adjustment.title, adjustment.description,
+                      {{u.pictureControls[i], 300.0f}});
+        }
+        p->AddRow(picture, kIconReset, L"Reset picture", L"Restore picture values without changing model settings", {{u.pictureReset, 160.0f}});
+        p->AddSection(L"Installed models");
+        ui::Card& list = p->AddCard();
+        for (int i = 0; i < AppUi::kModelRows; ++i) {
+            u.modelVerify[i] = p->Make<ui::Button>();
+            u.modelVerify[i]->text = L"Verify";
+            u.modelRemove[i] = p->Make<ui::Button>();
+            u.modelRemove[i]->text = L"Remove";
+            u.modelVerify[i]->visible = u.modelRemove[i]->visible = false;
+            ui::Row& r = p->AddRow(list, kIconModel, L"", L"", {{u.modelVerify[i], 88.0f}, {u.modelRemove[i], 88.0f}});
+            r.gate = nullptr;
+            r.visible = false;
+            u.modelRow[i] = &r;
+        }
+        ui::Row& empty = p->AddRow(list, kIconModel, L"No models added yet",
+                                   L"Use \"Add model file...\" above to add your own copy.", {});
+        empty.gate = nullptr;
+        u.modelEmptyRow = &empty;
+        ui::Card& folder = p->AddCard();
+        p->AddRow(folder, kIconFolder, L"Models folder", L"Where the copies you added are stored", {{u.openModels, 0.0f}});
+    }
+
+    // ---------------------------------------------------------------- Load order
+    {
+        ui::Page* p = view.AddPage(L"Load order", kIconOrderNav, L"Load order");
+        u.orderInfo = p->Make<ui::InfoBar>();
+        u.orderInfo->Set(ui::InfoBar::Severity::Info, L"Stages run from top to bottom. Neural motion analysis uses the original captured frames.");
+        u.orderNow = p->Make<ui::InfoBar>();
+        u.orderNow->visible = false;
+        u.orderNote = p->Make<ui::InfoBar>();
+        u.orderNote->visible = false;
+        u.orderList = p->Make<ui::OrderList>();
+        u.orderReset = p->Make<ui::Button>();
+        u.orderReset->text = L"Reset to default order";
+        u.orderExplain = p->Make<ui::TextBlock>();
+        u.addonsEmpty = p->Make<ui::TextBlock>();
+        u.addonsEmpty->text = L"No addons installed. Addons will appear here and can be placed anywhere in the order.";
+
+        p->AddInfo(u.orderInfo);
+        p->AddInfo(u.orderNow);
+        p->AddInfo(u.orderNote);
+        p->AddFree(u.orderList, -1.0f, -1.0f);
+        p->AddFree(u.orderReset, 0.0f, 32.0f);
+        p->AddSection(L"What this order does");
+        p->AddFree(u.orderExplain, -1.0f, -1.0f);
+        p->AddSection(L"Addons");
+        p->AddFree(u.addonsEmpty, -1.0f, -1.0f);
+    }
+
+    // ---------------------------------------------------------------- Output
+    {
+        ui::Page* p = view.AddPage(L"Output", kIconOutput, L"Output");
+        u.monitor = p->Make<ComboBox>();
+        u.adapter = p->Make<ComboBox>();
+        u.outputNote = p->Make<ui::InfoBar>();
+        u.outputNote->Set(ui::InfoBar::Severity::Info, L"These settings can be changed again after scaling is stopped.");
+        u.outputNote->visible = false;
+
+        ui::Card& c = p->AddCard();
+        p->AddRow(c, kIconMonitor, L"Monitor", L"Where the scaled image is shown", {{u.monitor, 400.0f}});
+        p->AddRow(c, kIconGpu, L"Processing GPU", L"The graphics card that does the scaling", {{u.adapter, 400.0f}});
+        p->AddInfo(u.outputNote);
+    }
+
+    // ---------------------------------------------------------------- Diagnostics
+    {
+        ui::Page* p = view.AddPage(L"Diagnostics", kIconDiag, L"Diagnostics");
+        u.record = p->Make<ui::Button>();
+        u.record->text = L"Record 120 frames for diagnostics";
+        u.openRecordings = p->Make<ui::Button>();
+        u.openRecordings->text = L"Open recordings folder";
+        u.openLog = p->Make<ui::Button>();
+        u.openLog->text = L"Open log folder";
+        u.hotkeyNote = p->Make<ui::InfoBar>();
+        u.hotkeyNote->visible = false;
+        ui::TextLabel* k1 = p->Make<ui::TextLabel>();
+        k1->text = L"Ctrl+Alt+S";
+        k1->keycap = true;
+        ui::TextLabel* k2 = p->Make<ui::TextLabel>();
+        k2->text = L"Ctrl+Alt+R";
+        k2->keycap = true;
+        ui::TextLabel* ver = p->Make<ui::TextLabel>();
+        ver->text = L"0.1.0";
+
+        p->AddSection(L"Recording");
+        ui::Card& rec = p->AddCard();
+        p->AddRow(rec, kIconRecord, L"Frame recording",
+                  L"Saves the output and the captured frames as PNG files. Scaling must be running.", {{u.record, 0.0f}});
+        p->AddRow(rec, kIconFolder, L"Recordings", L"Where diagnostic recordings are saved", {{u.openRecordings, 0.0f}});
+
+        p->AddSection(L"Hotkeys");
+        ui::Card& hk = p->AddCard();
+        u.hotkeyToggleRow = &p->AddRow(hk, kIconKeyboard, L"Start or stop scaling",
+                                       L"Starts on the foreground window with no countdown", {{k1, 0.0f}});
+        u.hotkeyRecordRow = &p->AddRow(hk, kIconRecord, L"Record frames", L"Records 120 output frames while scaling",
+                                       {{k2, 0.0f}});
+        p->AddInfo(u.hotkeyNote);
+
+        p->AddSection(L"Logs and version");
+        ui::Card& lg = p->AddCard();
+        p->AddRow(lg, kIconLog, L"Log files", L"moonsr.log in %LOCALAPPDATA%\\MoonSR", {{u.openLog, 0.0f}});
+        p->AddRow(lg, kIconInfo, L"MoonSR Suite", L"Version", {{ver, 0.0f}});
+    }
+}
+
+}  // namespace moonsr::app

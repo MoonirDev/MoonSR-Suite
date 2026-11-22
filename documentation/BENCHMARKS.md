@@ -1,0 +1,774 @@
+# MoonSR Suite — Benchmarks
+
+Rules: every number here was produced by a command that was run on the hardware listed, at the commit listed.
+No estimates, no third-party figures presented as ours. "Not measured" is a valid and expected entry.
+
+## Test machine
+
+| Item | Value |
+|---|---|
+| CPU | AMD Ryzen 9 7900X (12 cores) |
+| RAM | 31.1 GB |
+| GPU 0 | NVIDIA GeForce RTX 5060, driver 32.0.16.2114, drives a 1920x1080 @ 143 Hz display |
+| GPU 1 | NVIDIA RTX A400, driver 32.0.16.2114, drives a 1920x1200 @ 60 Hz display |
+| GPU 2 | AMD Radeon Graphics (Ryzen iGPU, device 0x164E), driver 31.0.24002.92, no display attached |
+| OS | Windows 11 Pro, build 26300 |
+| Toolchain | Visual Studio 2026 (MSVC 14.52), Windows SDK 10.0.26100 |
+
+Not available on this machine: any Intel GPU, any GPU older than the listed ones, a VRR measurement rig, a latency
+photodiode. Compatibility with those is therefore unverified.
+
+## Reference technologies — what can be measured here
+
+| Reference | Status | Reason |
+|---|---|---|
+| Bilinear, Catmull-Rom, Lanczos-3 | measurable | implemented in-tree |
+| NVIDIA Image Scaling | possible later | MIT shader source; needs a licence note and integration as a reference scaler |
+| FSR 1 | possible later | pending file-level licence check |
+| DLSS 4.5 SR, FSR 4, XeSS | not measurable on captures | need engine inputs; would require recording outputs from a game that supports them, with matched ground truth |
+| Lossless Scaling LS1 / LSFG | not measured | proprietary; requires a purchased copy and a capture-of-output methodology |
+| DLSS FG / MFG, XeSS FG, FSR FG | not measurable on captures | engine-integrated |
+| "ANR FG" | not measured | no public reference found |
+
+## Methodology (`tools/bench`, executable `moonsr_bench`)
+
+Build: `powershell -ExecutionPolicy Bypass -File tools\build.ps1 -BuildDir build\bench -Target moonsr_bench`
+(RelWithDebInfo, /W4 clean). `moonsr_bench --help` lists every option. The tool links the same `moonsr_upscale`
+static library as the application, so it runs the shipped shader bytecode through the real `ScalePass::Render`; nothing
+is re-implemented for the GPU part.
+
+**Upscaling quality.**
+1. Deterministic synthetic ground truth, 1920x1080, 8-bit sRGB-encoded PNGs written to `benchmarks/output/gt/`
+   (git-ignored; regenerate with `moonsr_bench --gen`; the FNV-1a hash of every image is recorded in the result files and
+   printed by `--gen`, and two consecutive `--gen` runs produced identical hashes). Seven images: `zone_plate` (local
+   frequency rises from 0 at the centre to exactly Nyquist at the corners), `slanted_edges` (six tiles with edges at
+   2, 5, 15, 30, 45 and 75 degrees, 8x8 supersampled), `thin_lines` (1-2 px lines horizontal, vertical, 45 deg, 20 deg,
+   concentric rings and sparse coloured 1 px lines, 4x4 supersampled), `checker` (1, 2, 4 px pixel-aligned and 3 px rotated
+   15 deg), `text` (GDI, greyscale anti-aliased Segoe UI 9-36 px and Consolas 10-20 px, dark-on-light and light-on-dark,
+   some coloured; the only image that depends on the installed fonts), `gradient_noise` (smooth ramps, a low-contrast
+   diagonal ramp, plus +-2 level triangular noise), `natural` (value-noise background, 70 soft discs of varying edge
+   softness, 14 hard-edged rotated rectangles, 2-4 px grain).
+2. The input is made by an exact area-averaging (box) downsample of the ground truth, in float, rounded to 8 bit, by the
+   factor 2 or 1.5 (input 960x540 / 1280x720).
+3. The input is uploaded as B8G8R8A8_UNORM, rendered with `ScalePass::Render` using `FitMode::Stretch` into a
+   B8G8R8A8_UNORM target of ground-truth size (the tool verifies the returned dest rect is the whole target) and read back
+   through a staging texture. Every scaler that `ScalePass::ListScalers()` reports as available is run, with sharpness 0
+   and 0.5.
+4. Metrics are computed on the CPU against the ground truth: PSNR on RGB (MSE over the three channels, peak 255) and on
+   BT.709 luma of the encoded values (float, not rounded); SSIM on that luma with the standard 11x11 Gaussian window
+   (sigma 1.5, normalised, K1 0.01, K2 0.03, L 255), valid region only (no border padding), mean over windows.
+
+**Gamma space (methodology limitation).** Downsampling, upscaling and every metric operate directly on the
+gamma-encoded 8-bit values, with no linearisation. This matches what the shaders do (see `shaders/README.md`, "Gamma
+space") and what a game-capture pipeline delivers, but a linear-light downsample of the ground truth would give a
+different input (different averages at edges) and different scores. All absolute numbers below are specific to this
+gamma-space definition and must not be compared with published figures computed in linear light or on other content.
+
+**Validation of the metric code (`moonsr_bench --selftest`, non-zero exit code on any failure).** Checks:
+identical images give PSNR +inf (RGB and luma) and SSIM exactly 1; a constant +10 level offset gives
+20*log10(255/10) = 28.1308 dB; an alternating +-7 error gives 20*log10(255/7) = 31.2288 dB; SSIM of two constant images
+equals the closed form (2*mx*my + C1)/(mx^2 + my^2 + C1); the separable Gaussian SSIM agrees with an independent
+straightforward 2-D 11x11 implementation to 3e-16 on three textured pairs; the window sums to 1 with the hand-computed
+centre tap 0.266012; the area downsample equals hand-computed 2x2 block means and 1.5x fractional-coverage averages; the
+CPU bilinear reference reproduces hand values and is the identity at 1x; PNG write/read is lossless; on the GPU,
+nearest-neighbour 2x of an asymmetric random colour image is bit-exact pixel replication (proves upload, channel order,
+orientation and readback) and bilinear 4x is within 1 level of the CPU reference. Not done: no comparison against an
+external reference implementation (no scikit-image / numpy on this machine and nothing was downloaded), so agreement with,
+for example, `skimage.metrics.structural_similarity` is argued from the formula and the independent in-tree
+implementation, not demonstrated. LPIPS and FLIP are not implemented.
+
+**Alignment check (run automatically with every bilinear sharpness-0 quality run).** The GPU bilinear output is compared
+with a CPU bilinear upscale of the same input using correct centre alignment (source position (x+0.5)*src/dst - 0.5,
+clamped). To show the check can see an offset, the GPU output is also compared with CPU references deliberately shifted by
++-0.5 source texel.
+
+**GPU timing (`--time`).** Isolated pass time on an otherwise idle GPU, *not* in-game cost (no capture, no present, no
+competition with a running game, no cross-adapter copy). The source is a generated `natural` image at the input size.
+After a warm-up of 50 renders and a flush/wait, 200 iterations are submitted in batches of 50; each batch sits inside one
+`D3D11_QUERY_TIMESTAMP_DISJOINT`, and every iteration is bracketed by its own pair of timestamp queries (so idle gaps
+between iterations are not counted). The context is flushed and every query is polled to completion before use; batches
+reporting `Disjoint` are discarded (none occurred in the runs below). A "pass" is exactly one `ScalePass::Render` call:
+render-target clear, the scaler draw and, if sharpness > 0 and the scaler is not Nearest, the second (sharpen) draw. As a
+validity cross-check the tool also records the CPU wall-clock time per iteration over each batch (submit to last timestamp
+readable). Timer frequency reported by the disjoint query: 1 GHz (NVIDIA), 100 MHz (AMD).
+
+Outputs: console tables plus `benchmarks/output/results/<mode>_<tag>.csv` and `.json` (adapter, driver UMD version,
+vendor/device id, OS build, git commit or "uncommitted", `source_hash`, date, sizes, scaler, sharpness, metrics, the
+command line). `source_hash` is an FNV-1a hash of the `shaders/`, `src/core`, `src/gpu` and `src/upscale` sources on disk
+at run time; it identifies the code state while the repository has no commit, and matches the executable only if the
+executable was rebuilt after the last edit of those files.
+
+Frame generation (later): take a high-frame-rate sequence, drop frames, interpolate, compare with the dropped
+frames; plus pacing statistics from present timestamps.
+
+## Results
+
+Common to all results below: machine as in "Test machine"; OS build 10.0.26300.9457; binary
+`build\bench\bin\moonsr_bench.exe` (RelWithDebInfo); application commit: **none** (the repository has no commit, so
+`git rev-parse --short HEAD` fails and the tool records "uncommitted"); source hash `8bfacb10fa5ba4bf` (21 files); run on
+2026-11-13. Scalers present in that build: Nearest, Bilinear, Bicubic (Catmull-Rom), Lanczos-3, MoonSR Spatial (the shader
+`shaders/upscale/moonsr_spatial_ps.hlsl` is work in progress, so its rows describe that exact state only and will change).
+Driver versions are the packed UMD versions reported by DXGI: RTX 5060 and RTX A400 32.0.16.2114, Radeon iGPU
+31.0.24002.92. Raw data: `benchmarks/output/results/` (git-ignored; reproduce with the commands). Self-test:
+`moonsr_bench --selftest` -> 18 checks, 0 failures (GPU checks ran on the RTX 5060).
+
+### Upscaling quality
+
+Commands:
+
+```
+moonsr_bench --quality --scales 2 --sharpness 0,0.5 --all-adapters --verbose --tag 2x_all_adapters
+moonsr_bench --quality --scales 1.5 --sharpness 0,0.5 --adapter "RTX 5060" --verbose --tag 1_5x_rtx5060
+moonsr_bench --quality --scales 2 --sharpness 0,0.5 --adapter "RTX 5060" --save-images --tag 2x_rtx5060_images
+```
+
+Scores below come from the RTX 5060. The RTX A400 produced bit-identical output to the RTX 5060 for every
+image/scaler/sharpness at 2x (see the cross-vendor check), so its scores are the same; the Radeon iGPU differs by at most
+2 levels per pixel and its scores differ in the third decimal at most.
+
+#### 2x (960x540 -> 1920x1080), RTX 5060
+
+Mean over the 7 images (PSNR is the arithmetic mean of per-image dB). The stress images (zone plate, thin lines, checker) pull the mean down and are dominated by content above the input's Nyquist limit, so read the per-image tables for anything beyond a coarse ranking.
+
+| Scaler | Sharpness | PSNR RGB (dB) | PSNR luma (dB) | SSIM |
+|---|---|---|---|---|
+| Nearest | 0 | 26.93 | 27.29 | 0.8313 |
+| Bilinear | 0 | 25.41 | 25.72 | 0.7699 |
+| Bicubic (Catmull-Rom) | 0 | 26.46 | 26.77 | 0.8185 |
+| Lanczos-3 | 0 | 26.64 | 26.95 | 0.8277 |
+| MoonSR Spatial | 0 | 27.38 | 27.70 | 0.8343 |
+| Nearest | 0.5 | 26.93 | 27.29 | 0.8313 |
+| Bilinear | 0.5 | 25.83 | 26.13 | 0.7798 |
+| Bicubic (Catmull-Rom) | 0.5 | 27.03 | 27.33 | 0.8264 |
+| Lanczos-3 | 0.5 | 27.22 | 27.53 | 0.8348 |
+| MoonSR Spatial | 0.5 | 28.05 | 28.38 | 0.8384 |
+
+PSNR luma (dB) per image, sharpness 0:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 13.25 | 37.90 | 16.26 | 11.81 | 24.01 | 52.25 | 35.54 |
+| Bilinear | 12.77 | 36.50 | 15.30 | 9.63 | 23.93 | 45.11 | 36.78 |
+| Bicubic (Catmull-Rom) | 13.43 | 38.09 | 16.06 | 10.78 | 24.73 | 46.47 | 37.82 |
+| Lanczos-3 | 13.54 | 38.37 | 16.04 | 10.95 | 25.00 | 46.19 | 38.55 |
+| MoonSR Spatial | 13.50 | 40.94 | 16.92 | 10.77 | 25.29 | 48.58 | 37.86 |
+
+PSNR luma (dB) per image, sharpness 0.5:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 13.25 | 37.90 | 16.26 | 11.81 | 24.01 | 52.25 | 35.54 |
+| Bilinear | 12.93 | 37.55 | 15.43 | 9.79 | 24.23 | 46.16 | 36.86 |
+| Bicubic (Catmull-Rom) | 13.55 | 39.66 | 16.17 | 10.93 | 24.97 | 48.14 | 37.88 |
+| Lanczos-3 | 13.62 | 40.14 | 16.16 | 11.10 | 25.29 | 47.72 | 38.65 |
+| MoonSR Spatial | 13.43 | 43.39 | 16.97 | 10.89 | 25.33 | 50.90 | 37.73 |
+
+SSIM (luma) per image, sharpness 0:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 0.5852 | 0.9968 | 0.7513 | 0.6698 | 0.9544 | 0.9939 | 0.8675 |
+| Bilinear | 0.4542 | 0.9911 | 0.6625 | 0.4481 | 0.9487 | 0.9926 | 0.8925 |
+| Bicubic (Catmull-Rom) | 0.5411 | 0.9939 | 0.7318 | 0.5968 | 0.9585 | 0.9930 | 0.9142 |
+| Lanczos-3 | 0.5539 | 0.9940 | 0.7423 | 0.6220 | 0.9615 | 0.9928 | 0.9277 |
+| MoonSR Spatial | 0.5668 | 0.9970 | 0.8029 | 0.6019 | 0.9661 | 0.9934 | 0.9122 |
+
+SSIM (luma) per image, sharpness 0.5:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 0.5852 | 0.9968 | 0.7513 | 0.6698 | 0.9544 | 0.9939 | 0.8675 |
+| Bilinear | 0.4773 | 0.9933 | 0.6762 | 0.4727 | 0.9531 | 0.9929 | 0.8929 |
+| Bicubic (Catmull-Rom) | 0.5619 | 0.9962 | 0.7432 | 0.6139 | 0.9620 | 0.9933 | 0.9144 |
+| Lanczos-3 | 0.5693 | 0.9963 | 0.7535 | 0.6381 | 0.9651 | 0.9931 | 0.9283 |
+| MoonSR Spatial | 0.5730 | 0.9988 | 0.8099 | 0.6151 | 0.9675 | 0.9937 | 0.9107 |
+
+#### 1.5x (1280x720 -> 1920x1080), RTX 5060
+
+Mean over the 7 images (PSNR is the arithmetic mean of per-image dB). The stress images (zone plate, thin lines, checker) pull the mean down and are dominated by content above the input's Nyquist limit, so read the per-image tables for anything beyond a coarse ranking.
+
+| Scaler | Sharpness | PSNR RGB (dB) | PSNR luma (dB) | SSIM |
+|---|---|---|---|---|
+| Nearest | 0 | 26.78 | 27.17 | 0.8247 |
+| Bilinear | 0 | 27.22 | 27.56 | 0.8267 |
+| Bicubic (Catmull-Rom) | 0 | 28.49 | 28.85 | 0.8634 |
+| Lanczos-3 | 0 | 28.87 | 29.25 | 0.8756 |
+| MoonSR Spatial | 0 | 29.71 | 30.10 | 0.8769 |
+| Nearest | 0.5 | 26.78 | 27.17 | 0.8247 |
+| Bilinear | 0.5 | 28.05 | 28.38 | 0.8406 |
+| Bicubic (Catmull-Rom) | 0.5 | 29.38 | 29.74 | 0.8752 |
+| Lanczos-3 | 0.5 | 29.83 | 30.20 | 0.8844 |
+| MoonSR Spatial | 0.5 | 29.97 | 30.35 | 0.8823 |
+
+PSNR luma (dB) per image, sharpness 0:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 13.69 | 36.46 | 15.69 | 9.22 | 24.82 | 52.72 | 37.61 |
+| Bilinear | 14.47 | 38.09 | 16.72 | 9.61 | 25.80 | 47.89 | 40.32 |
+| Bicubic (Catmull-Rom) | 15.57 | 39.55 | 17.64 | 10.24 | 26.88 | 49.66 | 42.44 |
+| Lanczos-3 | 16.02 | 40.02 | 17.89 | 10.57 | 27.36 | 49.27 | 43.60 |
+| MoonSR Spatial | 16.26 | 42.45 | 18.71 | 10.14 | 27.80 | 52.92 | 42.43 |
+
+PSNR luma (dB) per image, sharpness 0.5:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 13.69 | 36.46 | 15.69 | 9.22 | 24.82 | 52.72 | 37.61 |
+| Bilinear | 14.77 | 39.66 | 16.95 | 9.90 | 26.36 | 50.40 | 40.63 |
+| Bicubic (Catmull-Rom) | 15.86 | 41.32 | 17.82 | 10.60 | 27.43 | 52.27 | 42.85 |
+| Lanczos-3 | 16.27 | 42.29 | 18.00 | 10.82 | 27.97 | 51.87 | 44.20 |
+| MoonSR Spatial | 16.29 | 43.92 | 18.70 | 10.33 | 28.11 | 52.91 | 42.23 |
+
+SSIM (luma) per image, sharpness 0:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 0.6483 | 0.9930 | 0.7658 | 0.4760 | 0.9663 | 0.9943 | 0.9289 |
+| Bilinear | 0.6304 | 0.9936 | 0.7761 | 0.4681 | 0.9685 | 0.9941 | 0.9560 |
+| Bicubic (Catmull-Rom) | 0.7158 | 0.9954 | 0.8293 | 0.5589 | 0.9762 | 0.9944 | 0.9738 |
+| Lanczos-3 | 0.7384 | 0.9958 | 0.8438 | 0.5974 | 0.9788 | 0.9943 | 0.9804 |
+| MoonSR Spatial | 0.7620 | 0.9979 | 0.8772 | 0.5520 | 0.9819 | 0.9947 | 0.9724 |
+
+SSIM (luma) per image, sharpness 0.5:
+
+| Scaler | zone plate | slanted edges | thin lines | checker | text | gradient noise | natural |
+|---|---|---|---|---|---|---|---|
+| Nearest | 0.6483 | 0.9930 | 0.7658 | 0.4760 | 0.9663 | 0.9943 | 0.9289 |
+| Bilinear | 0.6576 | 0.9958 | 0.7930 | 0.5124 | 0.9734 | 0.9945 | 0.9577 |
+| Bicubic (Catmull-Rom) | 0.7379 | 0.9971 | 0.8409 | 0.6008 | 0.9799 | 0.9947 | 0.9753 |
+| Lanczos-3 | 0.7567 | 0.9976 | 0.8524 | 0.6248 | 0.9824 | 0.9946 | 0.9823 |
+| MoonSR Spatial | 0.7709 | 0.9986 | 0.8797 | 0.5766 | 0.9837 | 0.9947 | 0.9719 |
+
+Observations (measured, specific to this content and gamma-space definition): at sharpness 0, MoonSR Spatial has the highest
+SSIM on `slanted_edges` and `text` at both scales but not on `natural`, where Lanczos-3 is ahead (2x: SSIM 0.9277 vs 0.9122,
+PSNR luma 38.55 vs 37.86 dB; 1.5x: 0.9804 vs 0.9724, 43.60 vs 42.43 dB). On the stress images (`zone_plate`, `thin_lines`,
+`checker`) PSNR is 9-19 dB for every scaler because the content exceeds the input's Nyquist limit; only the ranking is
+informative there. Nearest beats Bilinear in the 2x mean because bilinear adds blur on top of an already box-filtered
+input. Sharpness 0.5 raised the mean PSNR and SSIM of every filtering scaler at both scales, but not on every image (for
+example MoonSR Spatial on `natural`: 2x 37.86 -> 37.73 dB, 1.5x 42.43 -> 42.23 dB). `Nearest` ignores sharpness
+(`ScalePass` skips the sharpen stage for it), which is why its rows are identical.
+
+#### Cross-vendor correctness check (2x, all 7 images, sharpness 0 and 0.5, reference = RTX 5060)
+
+Command: the first command above (`--all-adapters`; every output of adapters 2 and 3 is diffed per pixel against the
+RTX 5060 output of the same scaler/sharpness/image).
+
+| Adapter vs RTX 5060 | Scaler | Max abs pixel difference (8-bit levels, any channel), sharpness 0 / 0.5 | Worst-image share of differing pixels, sharpness 0 / 0.5 |
+|---|---|---|---|
+| RTX A400 | all five | 0 / 0 | 0% / 0% (bit-identical) |
+| Radeon iGPU | Nearest | 0 / 0 | 0% / 0% (bit-identical) |
+| Radeon iGPU | Bilinear | 1 / 2 | 5.59% / 5.61% |
+| Radeon iGPU | Bicubic (Catmull-Rom) | 1 / 2 | 4.65% / 5.46% |
+| Radeon iGPU | Lanczos-3 | 1 / 2 | 7.87% / 8.88% |
+| Radeon iGPU | MoonSR Spatial | 1 / 2 | 12.21% / 12.63% |
+
+The largest mean absolute difference on any image is 0.14 level (Lanczos-3, sharpness 0.5, iGPU). The same shader bytecode
+therefore produces the same picture on all three adapters up to last-bit differences on the Radeon (texture filtering /
+floating-point rounding); no vendor-specific error (swap, shift, wrong region) is visible. Per-image values are in
+`quality_2x_all_adapters.csv` (records of kind `cross_adapter`).
+
+#### Alignment / orientation check
+
+Same runs as above (records of kind `alignment`). GPU bilinear vs the CPU centre-aligned bilinear of the same input:
+
+| Run | PSNR GPU vs CPU reference (min over 7 images) | Max abs difference | PSNR GPU vs references shifted by +-0.5 texel (range over images) |
+|---|---|---|---|
+| 2x, RTX 5060 | 57.8 dB | 1 level | 15.0 to 38.9 dB |
+| 2x, RTX A400 | 57.8 dB | 1 level | 15.0 to 38.9 dB |
+| 2x, Radeon iGPU | 57.4 dB | 1 level | 15.0 to 38.9 dB |
+| 1.5x, RTX 5060 | 55.6 dB | 1 level | 15.6 to 40.2 dB |
+
+Result: the GPU matches the correctly aligned CPU reference to within rounding (max 1 level, mean <= 0.18 level), while a
+half-texel shifted reference scores 19 to 51 dB lower on the same image, so a half-pixel shift, flip or channel swap would
+be detected. The GPU bilinear PSNR against the ground truth equals the CPU reference's within 0.06 dB on every image.
+Visual check of the saved 2x outputs (`benchmarks/output/images/2x/NVIDIA_GeForce_RTX_5060/`):
+`natural_MoonSR_Spatial_s0.png` and `text_Lanczos_3_s0.5.png` are upright, correctly coloured (red/blue/yellow/green
+text; purple/teal discs), and not offset relative to the ground truth and the 960x540 input.
+
+### Upscaling GPU cost
+
+Commands:
+
+```
+moonsr_bench --time --all-adapters --sharpness 0,0.5 --tag all_adapters
+moonsr_bench --time --adapter "RTX 5060" --sharpness 0 --tag rtx5060_repeat
+```
+
+200 timed iterations per cell after 50 warm-up renders (defaults), default size pairs. **Isolated ScalePass pass time on an
+otherwise idle GPU, not in-game cost.** Cells are mean ms per pass with the minimum in parentheses. No disjoint batches
+were discarded. This was not a dedicated machine (other desktop applications were running), the power/clock state of each
+GPU was not controlled, and the Radeon iGPU shares system memory.
+
+#### 1280x720 -> 1920x1080, mean ms per pass (min ms in parentheses)
+
+| Scaler | Sharpness | RTX 5060 | RTX A400 | Radeon iGPU |
+|---|---|---|---|---|
+| Nearest | 0 | 0.017 (0.016) | 0.135 (0.129) | 0.407 (0.398) |
+| Bilinear | 0 | 0.017 (0.016) | 0.139 (0.129) | 0.415 (0.407) |
+| Bicubic (Catmull-Rom) | 0 | 0.061 (0.061) | 0.510 (0.498) | 1.441 (1.432) |
+| Lanczos-3 | 0 | 0.120 (0.119) | 0.871 (0.854) | 3.711 (3.707) |
+| MoonSR Spatial | 0 | 0.234 (0.232) | 1.692 (1.685) | 7.653 (7.645) |
+| Nearest | 0.5 | 0.017 (0.016) | 0.141 (0.134) | 0.406 (0.399) |
+| Bilinear | 0.5 | 0.047 (0.047) | 0.361 (0.349) | 1.287 (1.275) |
+| Bicubic (Catmull-Rom) | 0.5 | 0.094 (0.094) | 0.731 (0.718) | 2.280 (2.266) |
+| Lanczos-3 | 0.5 | 0.152 (0.152) | 1.093 (1.072) | 4.542 (4.535) |
+| MoonSR Spatial | 0.5 | 0.269 (0.268) | 1.925 (1.910) | 8.483 (8.473) |
+
+#### 1920x1080 -> 3840x2160, mean ms per pass (min ms in parentheses)
+
+| Scaler | Sharpness | RTX 5060 | RTX A400 | Radeon iGPU |
+|---|---|---|---|---|
+| Nearest | 0 | 0.065 (0.064) | 0.471 (0.464) | 1.477 (1.461) |
+| Bilinear | 0 | 0.070 (0.069) | 0.486 (0.471) | 1.585 (1.565) |
+| Bicubic (Catmull-Rom) | 0 | 0.253 (0.249) | 2.011 (2.002) | 5.697 (5.678) |
+| Lanczos-3 | 0 | 0.533 (0.505) | 3.451 (3.417) | 14.826 (14.817) |
+| MoonSR Spatial | 0 | 0.938 (0.937) | 6.797 (6.779) | 30.343 (30.327) |
+| Nearest | 0.5 | 0.066 (0.065) | 0.480 (0.464) | 1.478 (1.462) |
+| Bilinear | 0.5 | 0.234 (0.233) | 1.331 (1.302) | 4.983 (4.963) |
+| Bicubic (Catmull-Rom) | 0.5 | 0.412 (0.395) | 2.891 (2.881) | 9.022 (8.930) |
+| Lanczos-3 | 0.5 | 0.701 (0.696) | 4.318 (4.302) | 18.130 (18.114) |
+| MoonSR Spatial | 0.5 | 1.083 (1.080) | 7.685 (7.666) | 33.650 (33.626) |
+
+Validity cross-checks: the CPU wall-clock time per iteration differed from the timestamp mean by at most 0.16 ms in all 60
+rows (at most 8.5% in the rows whose mean exceeds 1 ms; the wall figure includes per-batch query readback). A second RTX
+5060 run (sharpness 0 only) reproduced all ten means to within 0.002 ms. Cost scales with output pixels (1080p -> 4K is 4x
+the pixels; Nearest 0.017 -> 0.065 ms on the RTX 5060, 0.135 -> 0.471 on the RTX A400, 0.407 -> 1.477 on the iGPU).
+Sub-0.05 ms values on the RTX 5060 are close to a fixed per-pass cost (clear + draw); treat them as resolution-limited, not
+as shader ALU cost. Sharpness 0.5 adds a second full pass (sharpen stage plus an intermediate render target); it is not
+applied to Nearest.
+
+### Known limitations of the harness
+
+- Gamma-space processing only (see Methodology); no linear-light variant.
+- Ground truth is synthetic and small (7 images, one resolution); `text` depends on the installed Segoe UI / Consolas.
+  PSNR and SSIM alone do not capture ringing, aliasing or temporal behaviour; LPIPS, FLIP and temporal metrics are not
+  implemented.
+- SSIM was validated analytically and against an independent in-tree implementation only, not against an external library.
+- Timing is isolated and single-process; it does not model a GPU shared with a game, clock/power state, or presentation.
+  Differences between GPUs reflect clocks and memory systems as well as shader cost.
+- The reference scalers listed under "Reference technologies" (NIS, FSR 1, Lossless Scaling, DLSS / FSR 4 / XeSS) are not run: not measured.
+- Results are not yet tied to a commit (the repository has none); `source_hash` is the only code identifier.
+
+### Pipeline (capture → scale → present)
+Not measured yet.
+
+### Frame-generation throughput investigation (2026-11-16)
+
+The supplied LSFG 3.x chart reports maximum **final output** FPS at fixed 2x, 100% flow and SDR, using a
+secondary GPU. It lists the RTX 5060 at 708 / 330 / 224 FPS for 1080p / 1440p / 4K. These are third-party
+measurements, not quality scores or MoonSR results. The chart's source procedure and hardware configuration have
+not been reproduced, so these numbers must not be presented as a direct head-to-head comparison.
+
+`moonsr_fgbench --time` measures a real PushFrame and one Interpolate as one GPU-timestamped pair, and now reports
+`2000 / pair_median_ms` as a theoretical 2x output rate. This excludes capture, cross-adapter transfer,
+presentation, latency, games, and sustained competing GPU load; it is not displayed FPS or the LSFG test.
+On this machine with 100% flow and the Performance tier, 40 measured iterations after 10 warm-ups produced:
+
+| Adapter | 1080p pair median / p95 | 1440p pair median / p95 | 4K pair median / p95 |
+|---|---|---|---|
+| RTX 5060 | 3.00 / 3.01 ms | 5.28 / 5.29 ms | 11.94 / 12.01 ms |
+| RTX A400 | 19.94 / 20.09 ms | 35.18 / 35.32 ms | 79.50 / 79.80 ms |
+
+The census-free search shader was specialized for Performance: at 1080p the measured push/interpolate medians
+changed from 3.133 / 0.314 ms to approximately 2.682 / 0.313 ms on the RTX 5060, and from 20.219 / 2.305 ms
+to 17.632 / 2.304 ms on the A400. On the 720p synthetic quality suite, the greatest PSNR decrease against the
+previous build was 0.002 dB. These comparisons are not a substitute for real-game visual evaluation.
+
+`--triplet A.png,B.png,C.png` compares interpolated A/C with the held-out B image for each selected config.
+The three images must be equally spaced and have identical dimensions; the tool reports scene cuts but does not
+exclude unsuitable triplets or account for irregular capture times. It is an offline measurement, not an adaptive
+learner or per-game profile.
+
+### Frame generation, iteration 1 (2026-11-13)
+
+Tool: `moonsr_fgbench` (`tools/fgbench`). Synthetic sequences at 1280x720 with CPU-rendered ground truth (3x3
+supersampled). Commands: `moonsr_fgbench --selftest --adapter 5060` (29/29 pass, re-run by the lead),
+`--quality --adapter 5060 --save-images --tag final_5060`, `--time --all-adapters --iterations 200 --warmup 30`.
+Run by the frame-generation engineer on the uncommitted tree; raw CSV/JSON in `benchmarks/output/results/fg_*`.
+These are synthetic results and say nothing about real games. Nothing was compared with any other product.
+
+Quality, PSNR in dB, mean over t in {1/4, 1/3, 1/2, 2/3, 3/4}, RTX 5060, Balanced tier, flowScale 0.5:
+
+| Sequence | MoonSR FG | Linear blend | Repeat nearest |
+|---|---|---|---|
+| pan_subpx (0.4, 0.25 px) | 40.94 | 40.82 | **43.15** |
+| pan_5px | 35.82 | 23.44 | 22.18 |
+| pan_20px | 34.86 | 18.89 | 17.81 |
+| pan_45px | 33.23 | 18.41 | 17.27 |
+| hud_pan | 32.69 | 19.06 | 17.98 |
+| layers_occlusion | 33.77 | 20.72 | 19.65 |
+| small_fast_object | 33.57 | 25.32 | 24.04 |
+| zoom_rotate | 29.65 | 18.81 | 17.72 |
+| brightness_pan | 32.08 | 21.93 | 19.57 |
+| periodic_fence | 29.76 | 14.64 | 12.63 |
+
+Loses on sub-pixel motion at t <= 1/3. The small fast object itself is not tracked (whole-frame PSNR hides it).
+HUD pixels fully covered by a static overlay are reproduced exactly at flowScale 0.5.
+
+Isolated GPU cost, median ms, flowScale 0.5 (PushFrame once per real frame / Interpolate once per generated frame):
+
+| Adapter | Size | Performance | Balanced | Quality |
+|---|---|---|---|---|
+| RTX 5060 | 720p | 0.52 / 0.08 | 0.76 / 0.13 | 1.01 / 0.19 |
+| RTX 5060 | 1080p | 1.07 / 0.17 | 1.56 / 0.28 | 2.15 / 0.41 |
+| RTX A400 | 720p | 2.98 / 0.62 | 3.98 / 1.03 | 5.43 / 1.58 |
+| RTX A400 | 1080p | 6.71 / 1.41 | 8.83 / 2.31 | 11.99 / 3.55 |
+| Radeon iGPU | 720p | 13.82 / 2.61 | 19.63 / 3.62 | 27.17 / 5.35 |
+| Radeon iGPU | 1080p | 31.11 / 5.95 | 43.66 / 8.16 | 60.63 / 12.06 |
+
+Live pipeline (lead, `moonsr_cli --fg N`, 30 fps test pattern 1280x720 -> 1920x1080, RTX 5060, 144 Hz monitor,
+external frame limiter active on this machine):
+
+| Requested | Effective | Displayed fps | Generated fps | Hold-back | Reported latency | Late generated skipped |
+|---|---|---|---|---|---|---|
+| off | 1 | 29.9 | 0 | 0 | 0.3-0.7 ms | - |
+| 2X | 2 | 59.9 | 29.9 | 16.6 ms | 17.2 ms (one run: 27 ms) | 0 |
+| 3X | 2 (limited) | 59.8-61.3 | 29.9-31.6 | 16.1-16.4 ms | 17.9-18.4 ms | 1 |
+| 4X | 2 (limited) | 61.9-62.0 | 30.0-32.0 | 16.1-16.2 ms | 18.7-21.8 ms | 3 |
+
+Before the automatic limiting existed, 3X on this machine ran at 51-55 ms latency with real frames dropped.
+
+After the scheduler rework (review fixes; same tool, 7-10 s runs, V-Sync off unless noted):
+
+| Source | Output | Requested | Effective | Displayed fps | Generated fps | Hold-back | Reported latency | Late skipped |
+|---|---|---|---|---|---|---|---|---|
+| 30 fps | 144 Hz, RTX 5060 | 2X | 2 | 57-61 | 28-30 | 16.0-16.7 ms | 16.8-18.4 ms | 0 |
+| 30 fps | 144 Hz, RTX 5060 | 4X | 2 after 2 back-offs | 59.5-59.8 | 29.7-29.9 | 16.3-17.0 ms | 17.4-18.0 ms | 38 (during back-off) |
+| 24 fps | 144 Hz, RTX 5060 | 3X | 3 | 71.4-72.0 | 47.6-48.0 | 27.1-28.1 ms | 38.2-38.6 ms | 1 |
+| 30 fps | 60 Hz, RTX A400 | 2X | 2 | 56-60 | 26-30 | 16.1-17.5 ms | 17.4-17.8 ms | 0 |
+| 30 fps | 60 Hz, RTX A400, V-Sync | 2X | 2 | 52 | 21-22 | 16.8 ms | 18.5-19.1 ms | 36 |
+| 60 fps | 60 Hz, RTX A400 | 2X | 1 (refresh cap) | 59.8-61.6 | 0 | 0 | 1.1-2.8 ms | 0 |
+
+Displayed fps counts presents submitted by MoonSR, not frames confirmed on screen.
+
+### MoonSR Temporal, iteration 1 (2026-11-15) - experimental, NOT in the application
+
+*Historical: `moonsr_tbench` and the temporal upscaler were removed; these results cannot be reproduced from this
+repository.*
+
+Tool `moonsr_tbench` (`tools/tbench`), synthetic sequences rendered at 1920x1080 with exact ground truth, RTX 5060,
+working tree at 1409101. Commands and raw CSVs: `benchmarks/output/results/temporal_quality_r*.csv`,
+`temporal_time_r2_time_*.csv`. Run by the upscaling engineer; self-test (38 checks) passes on all three adapters.
+Synthetic results are not evidence about real games. Nothing was compared with any other product.
+
+"Aliased" input = point-sampled, no anti-aliasing (the case of the owner's test game). PSNR in dB, no sharpening:
+
+| Sequence, aliased 1.5x | MoonSR Temporal | Lanczos-3 | MoonSR Spatial | Temporal vs best single-frame |
+|---|---|---|---|---|
+| static | 27.97 | **29.31** | 27.97 | -1.34 |
+| pan_slow | 29.15 | **29.70** | 28.13 | -0.55 |
+| pan_medium | **29.71** | 29.64 | 28.05 | +0.06 |
+| pan_fast | **30.40** | 29.69 | 28.09 | +0.71 |
+| hud_pan | 28.50 | **28.86** | 27.53 | -0.36 (HUD ghost error 18.1 vs 6.5) |
+| layers | **29.67** | 29.56 | 27.99 | +0.10 |
+| zoom_rotate | 28.35 | **29.85** | 28.56 | -1.51 |
+| scene_cut | 30.51 | **30.62** | 29.35 | -0.11 |
+| thin_features | 16.93 | 17.65 | 16.87 | -0.75 |
+
+At 2x aliased it leads on every moving sequence (+0.3 to +2.0 dB, flicker roughly halved); at 3x and on
+prefiltered input results are mixed. Known defects: dark halos around static HUD glyphs, undershoot on thin dark
+lines, no recovery of 1-px features, no gain on static content (no jitter = no new information).
+
+Finding for the current scalers: at 1.5x on aliased input **Lanczos-3 beats MoonSR Spatial v0.1 by about 1.3-1.6 dB**
+on every sequence.
+
+Isolated GPU cost of `Render`, mean ms (PushFrame for the motion estimate is extra):
+
+| Adapter | 720p -> 1080p | 1080p -> 1440p | 1080p -> 2160p |
+|---|---|---|---|
+| RTX 5060 | 4.24 | 8.44 | 9.83 |
+| RTX A400 | 21.9 | 48.3 | 57.9 |
+| Radeon iGPU | 64.3 | 135.4 | 175.0 |
+
+VRAM: 86 MB (720p -> 1080p) to 281 MB (1080p -> 2160p).
+
+## Regressions
+None recorded.
+
+## Adaptive frame generation: ATLYSS, 2026-11-17
+
+ATLYSS was capped at 60 FPS on the RTX A400; MoonSR used the RTX 5060 and the 144 Hz output at 1920x1080.
+For a 55-second diagnostic run, the sample interval was shortened from the normal two seconds to 500 ms. The learner
+evaluated 91 moving-game triplets and selected 75% of the requested 100% flow after its validation gate passed.
+It continued to collect evidence, saved 92 observations to an isolated test profile, and reapplied the setting on a
+subsequent run. This verifies actual game-data collection and persistence, not a guarantee for other games or scenes.
+
+With frame generation at 2x, the run reported about 60 captured and 120 submitted FPS, no dropped capture frames,
+and no late generated presents after startup. These are submission counts, not a physical display measurement.
+Windows GPU Engine counters averaged approximately 19.4% of the RTX 5060 3D engine at 100% flow and 13.0% at 75%
+over separate eight-second intervals. Lossless Scaling 3.2.2 measured approximately 9.5% over ten seconds in a
+separate run; the user reported stable 60/120, fewer artifacts and smoother motion, with more smearing at low FPS.
+Counter readings are workload-dependent and cannot establish visual or pacing parity.
+
+With V-Sync on, the old one-refresh submission lead produced ~15.9 ms p95 intervals between Present calls in the
+ATLYSS test. Scheduling at the intended time instead produced ~8.8–9.0 ms p95 with the same ~120 submitted FPS.
+At 30-to-60 FPS on the 60 Hz output, the corresponding p95 was ~20 ms instead of ~36 ms. DXGI frame statistics
+were sampled where available; because many present counts were not individually observed, they do not prove
+physical display cadence. A user-visible comparison of the final pacing change remains necessary.
+
+An experimental shortcut skipping the finest motion-regularization pass lowered isolated GPU time, but caused up
+to 0.65 dB PSNR loss on a synthetic fast pan and 0.35 dB on an ATLYSS-derived occlusion scene; it was not enabled.
+
+### Scheduling hypothesis, 2026-11-18
+
+The user reported that the revised pacing feels smoother, but still less smooth than Lossless Scaling. The monitor
+does not support variable refresh. The user clarified that their comparison used a 72 FPS game cap with 2x
+generation on the 144 Hz display, with both applications reporting stable 72 / 144 and V-Sync enabled. Thus the
+120 FPS / 144 Hz mismatch of the earlier diagnostic run does not explain their comparison. The counters report
+average rates and do not establish the actual cadence.
+
+A separate 24-pair ATLYSS recording (`build/main/alfg-real-frames/index.csv`) suggests another scheduling issue
+worth testing. Recorded generated outputs occurred a median 2.67 ms after the captured frame, while their real
+partners were still scheduled relative to capture. Output-record timestamps had a 5.68 ms p05 and 11.27 ms p95
+interval. An offline arithmetic exercise that shifted each recorded real output by its generated partner's delay
+gave 7.52 ms p05 and 9.13 ms p95, with a median added delay of 2.67 ms. This is not a presentation test: recording
+adds overhead, timestamps are before Present, the clip is short, and the calculation assumes the shift has no
+effect on later capture, GPU work, V-Sync or queueing. The separate live V-Sync run already had a much tighter
+8.10 ms median and 8.94 ms p95 at Present return. Neither result justifies enabling a scheduler change without a
+controlled live comparison, including missed captures, latency and physical display timing where measurable.
+
+In a subsequent 25-second 72-to-144 V-Sync CLI run on ATLYSS with 75% flow, MoonSR reported 1,823 captured and
+3,642 presented frames, zero discarded captures, and no late generated frames after startup. Rolling DXGI samples
+were typically 6.94 ms median and 6.95 ms p95; some Present-return windows had p95 around 9 ms. These are internal
+measurements, and the user reported that the test did not visibly start, so they do not establish what was actually
+visible or how motion felt. The test omitted the frame counter, which makes a visually identical output harder to
+distinguish from the game itself. A future visible test should enable the counter and confirm it appears first.
+
+The user then confirmed a counter-enabled 20-second repeat was visible and felt smoother than their normal MoonSR
+run. This repeat captured 1,450 frames and submitted 2,897, with no discarded captures and one generated frame
+flagged late. The rolling DXGI interval sample near the end was 6.94 ms median and p95. This still does not prove
+Lossless Scaling parity or rule out missing display observations; the comparison to the user's normal run was
+subjective and the CLI used an isolated learning profile at 75% flow.
+
+A visible 20-second 30-to-60 V-Sync test on the same 144 Hz monitor captured 606 and submitted 1,203 frames,
+with zero discarded captures or late generated frames. Present-return intervals at the end had a 16.48 ms median
+and 17.73 ms p95. The user saw approximately 30 / 60 on the counter and reported smooth motion. DXGI samples
+included gaps (13.90 ms median, 27.77 ms p95) and do not establish uninterrupted physical presentation. The 60 FPS
+output does not divide evenly into 144 Hz, which also limits what this particular display test can show.
+In the user's follow-up comparison at the same 30 FPS game cap, Lossless Scaling felt smoother overall, while
+MoonSR felt slightly less smooth but more responsive. This subjective result does not isolate interpolation,
+display cadence, frame buffering, or input latency; it suggests measuring those tradeoffs before changing them.
+
+In 20-second 30-to-60 tests, an experimental 3 ms pair hold-back felt smoother to the user but too delayed; the
+reported capture-to-present average at the end increased from 16.71 to 19.66 ms. A 1 ms hold-back felt smoother
+with acceptable responsiveness and reported 17.73 ms; end-of-run Present-return p95 was 17.32 ms versus 17.73 ms
+for the original. In a subsequent 72-to-144 test the 1 ms setting also felt smoother and responsive; 1,451 frames
+were captured, with one discarded capture and no generated frames flagged late. Results are short, unblinded,
+scene-dependent comparisons and do not establish parity with Lossless Scaling. MoonSR now applies up to 1 ms to
+both slots when generating with V-Sync (bounded to 20% of a slot at very high rates); non-V-Sync is unchanged.
+`MOONSR_FG_SCHEDULE_DELAY_MS=0` disables the hold-back for diagnostic comparisons.
+
+On 2026-11-18, refinement was changed to reuse the winning candidate's already-computed SSD instead of evaluating
+the same score again. On the RTX 5060, alternating 1080p performance-tier timings at 100% flow measured median
+PushFrame 2.645–2.648 ms before and 2.603–2.608 ms after (100 iterations per run). At 75% flow results varied
+enough that a speedup was not established. The complete quality CSVs for synthetic and ATLYSS-image-derived 720p
+sequences at 75% and 100% flow were byte-identical before and after. These isolated GPU timings do not establish
+whole-application GPU utilization or Lossless Scaling parity.
+
+Per-pass diagnostic profiling at 1080p and 75% flow measured roughly 0.75 ms search, 0.40 ms regularization,
+0.16 ms refinement and 0.19 ms HUD masking per pair; these instrumented numbers include profiler overhead and
+omit some passes. An experiment deduplicating equal neighboring vectors within regularization increased median
+PushFrame time from about 1.65 to 1.68 ms at 75% flow and showed no useful change at 100%; it was removed.
+An experiment detecting all-unit HUD weights inside search was also slower and was removed. Parallelizing the
+source-weight sum across eight lanes instead reduced median PushFrame from 1.640–1.642 to 1.619–1.621 ms at 75%
+flow and from 2.599–2.600 to 2.542–2.548 ms at 100% in alternating 1080p runs. Its 720p quality CSV matched the
+baseline byte-for-byte for the tested synthetic and game-image-derived sequences, and a captured ATLYSS triplet
+produced the same reported PSNR/SSIM at 75% and 100%. Floating-point addition order differs, so these cases do not
+prove bit-identical results for every possible HUD mask or scene.
+The same eight-lane source-weight reduction was then applied to regularization. Alternating 1080p runs at 100%
+flow measured median PushFrame 2.540–2.547 ms before and 2.452–2.453 ms after; at 75% flow, the second baseline
+was 1.613 ms and the two experimental runs were 1.568 ms (the first baseline was 1.686 ms). The tested 720p quality
+CSV remained byte-identical, the same captured ATLYSS triplet had unchanged reported PSNR/SSIM, and the
+frame-generator self-tests passed. Results remain scene- and hardware-dependent, and reordered sums may differ
+slightly for other masks.
+
+The 720p repeating-fence sequence exposes a sharp flow-scale sensitivity: at the midpoint, Performance flow 100%
+scored 30.37 dB versus 13.90 dB at 75%; 70% scored 31.25 dB. Enabling census only at the coarsest search level did
+not fix the 75% case and was removed. This synthetic sequence does not predict every game's outcome, but shows why
+an accepted lower scale must be reconsidered when the scene changes. The learner now rejects it if at least three
+of the latest four samples have MSE above 1.5 times the baseline plus 1.0; self-tests cover the guard and recovery.
+Additional 720p fence tests changed the coarse pyramid cutoff, enabled census at every level, and adjusted the
+near-best ambiguity margin. None resolved the 75% case, and several reduced quality at other scales; all three
+experiments were removed. A more reliable solution needs evidence beyond these parameter changes.
+The benchmark now accepts `--history N` (0–16 real frames before the tested pair). At 75% flow the fence midpoint
+scored 13.90, 13.25, 13.67 and 13.91 dB with 1, 4, 8 and 16 preceding frames, respectively. At 100% flow it scored
+30.37, 29.76, 29.77 and 29.77 dB. Thus this synthetic failure persists with temporal history rather than being
+limited to the first estimated pair. The default one-frame-history output matched the previous benchmark exactly.
+`--history 0` also allows a direct comparison with the learner's fresh two-frame generator. Across the 15 tested
+synthetic and game-image-derived sequences, the 75%-versus-100% midpoint PSNR difference with zero and eight
+preceding frames differed by at most 0.35 dB; the fence regression remained about 16 dB. This supports the approach
+on these scenes but does not establish that history is unimportant in all games.
+A camera-motion experiment reduced warp confidence where two visible samples disagreed. At the 1/3 and 2/3 phases
+it reduced PSNR by about 0.21 dB on `real_turn` and 0.18 dB on `real_rotate`, and increased the RMS error of the
+change between those phases from 11.03 to 11.31 and from 11.29 to 11.54 pixel levels, respectively. The experiment
+was removed. `moonsr_imgtool temporal` reports this phase-to-phase difference error against ground truth; it is a
+useful regression measure, not a direct measure of perceived flicker or game artifacting.
+An additional subpixel-refinement step improved the 1/3 and 2/3 phase PSNR by about 0.27 dB on `real_turn`, and
+its temporal-difference RMS changed from 11.03 to 10.75 pixel levels. In alternating 1080p RTX 5060 tests it added
+roughly 0.15–0.3 ms of analysis work, depending on flow scale and run. In ATLYSS at 30-to-90 FPS the user saw little
+difference in one area and fewer object glitches in another. MoonSR uses this refinement when 3x or more is requested;
+this includes the period when the display cap reduces the effective multiplier. The 2x benchmark CSV was identical
+to its previous baseline. Adaptive profiles for the refined and standard estimators use separate keys.
+After comparing the rebuilt MoonSR and Lossless Scaling at 30-to-90 FPS, the user reported that MoonSR felt similarly
+smooth and more responsive, with slightly more visual artifacts. This is a subjective comparison in one game and
+does not establish equality on other scenes or GPUs.
+In separate ten-second Windows GPU Engine counter samples from that 30-to-90 ATLYSS comparison, Lossless Scaling
+averaged approximately 7.25% of the RTX 5060 3D engine and MoonSR approximately 20.87% with upscaling disabled,
+100% flow, and precise motion. The tools ran at different times and their complete settings and scene motion were
+not independently matched, so the figures indicate a gap to investigate rather than a controlled performance ratio.
+An opt-in native-size generated-frame copy experiment measured 20.94% in another ten-second sample; it was removed
+because the run did not establish an improvement. Whole-application GPU utilization remains above the comparison
+sample, and isolated compute benchmarks do not prove performance parity.
+An exact-match shortcut skips subpixel refinement once a block's matching error is zero, when further refinement
+would yield a zero offset. In alternating precise-motion benchmarks using a transformed captured image, RTX 5060
+1080p full-flow PushFrame medians were 2.51–2.53 ms versus 2.69–2.82 ms without the shortcut; at 75% flow they
+were 1.67 ms versus 1.70–1.71 ms. On the A400 at 720p full flow, medians were 8.27–8.28 ms versus 8.40–8.47 ms.
+These are isolated, scene-dependent GPU timings, not whole-application utilization. The 720p quality benchmark's
+result CSV matched byte-for-byte at 75% and 100% flow, and both GPUs passed the frame-generation self-tests.
+Skipping neighbor candidates that exactly equal the already-scored parent vector further reduced RTX 5060
+1080p full-flow PushFrame medians from 2.527–2.531 ms to 2.470–2.479 ms in alternating runs. At 75% flow the
+difference was small (1.668–1.671 ms versus 1.658–1.666 ms). One A400 720p full-flow comparison measured
+8.198 ms versus 8.155 ms. Quality CSVs again matched byte-for-byte, and both GPU self-tests passed. These
+measurements retain the exact-match shortcut in both baseline and candidate and do not measure application GPU use.
+A further experimental early exit from the neighbor-candidate loop when its best score was zero measured
+2.453–2.459 ms versus 2.476–2.478 ms at 1080p full flow on the RTX 5060. At 75% flow the results overlapped
+(1.652–1.661 ms versus 1.654–1.657 ms). This additional branch was removed: the measured gain was below 1%
+in this workload and did not establish a meaningful improvement across flow settings. Raw timing results are
+under `build/main/alfg-zero-cost/results`; the experimental executable is not the main application build.
+The development profiler now reports cross-direction splatting and comparison, previously absent from its stage
+summary. With precise motion, transformed captured-image content, and 1080p input on the RTX 5060, a 100-pair
+profile averaged search 1.267 ms, regularization 0.636 ms, refinement 0.259 ms, and HUD masking 0.196 ms at
+100% flow; cross splatting/comparison together were 0.022 ms. At 75% flow the corresponding costs were
+0.722, 0.370, 0.255, 0.191, and 0.014 ms. The blocking development profiler perturbs execution; these figures
+identify optimization targets, not production latency or an application-level comparison with Lossless Scaling.
+Logs are under `build/main/alfg-stage-profile/results`. Search and regularization dominate the measured analysis
+work, while the HUD pass remains near-constant because it processes the original frame size.
+An experiment reused the first candidate's shared-memory samples when a regularization neighbor proposed the
+same vector. Alternating RTX 5060 1080p precise-motion runs regressed full-flow PushFrame medians from
+2.476–2.482 ms to 2.510–2.514 ms; 75% flow also regressed. The branch and shared-memory reuse were removed.
+Results are under `build/main/alfg-regularize-reuse/results`. This rules out this particular reuse implementation
+on the tested workload, rather than duplicate-candidate elimination in general.
+Moving the HUD surround-weight check before the 7x7 dilation also failed to establish an improvement:
+1080p full-flow RTX 5060 medians overlapped (baseline 2.472–2.476 ms, experiment 2.468–2.481 ms).
+The change was removed. Results are under `build/main/alfg-hud-surround/results`.
+A software regularization experiment also skipped scoring when all nine proposed
+vectors were identical, because downstream consumers use only the selected xy.
+Alternating 1080p timings were variable: baseline full-flow PushFrame medians
+2.468/2.481 ms versus candidate 2.480/2.375 ms; at 75% flow both varied from
+roughly 1.65 to 1.79 ms. This did not establish a consistent useful gain, and the
+shortcut was removed without promoting it. Raw results are under `build/main/alfg-unanimous/results`.
+
+For future live comparisons, `tools/measure_gpu_process.ps1 -ProcessId <pid> -Seconds 20
+-OutputDirectory <new-run-directory>` records raw Windows GPU Engine samples and a JSON summary by adapter and
+engine type, including OFA when exposed by the driver. It checks process start time against PID reuse, records
+missing samples separately, and rejects overall coverage below 80%. Per-engine observed sample counts must also
+be reviewed. Percentages across distinct engines are not a normalized whole-GPU load and can sum above 100%.
+The script was verified against a live desktop application's counters and a process without exposed counters;
+this validation is not a new MoonSR/Lossless Scaling measurement. Neither ATLYSS nor a scaling process was open
+at that check. Match scene motion, game/output rate, sync, flow scale, and background workload when collecting
+new comparison runs; prior 3D-only samples remain insufficient for a whole-GPU comparison.
+
+An exact unweighted search path now certifies that all source and loaded reference
+weights equal 1 before avoiding their multiplication and accumulation. Masked
+windows keep the weighted path. Alternating 1080p RTX 5060 precise-motion runs
+measured PushFrame medians 2.322–2.324 ms versus 2.477–2.481 ms at full flow, and
+1.587–1.589 ms versus 1.666–1.671 ms at 75%. One A400 720p comparison improved
+8.414 to 8.139 ms at full flow and 5.082 to 4.972 ms at 75%. Performance quality
+CSV output matched the prior precise-motion suite byte-for-byte; both GPU self-tests
+passed. This change is included in the normal build. Results: `build/main/alfg-unweighted-search`.
+
+On November 19, a new user-arranged ATLYSS 30-to-90 comparison collected 20 valid
+Windows GPU counter samples per application. Lossless Scaling averaged 7.00% on
+the RTX 5060 3D engine; rebuilt MoonSR averaged 19.74%. Copy usage was approximately
+0.02% in each, and the exposed OFA counter was zero. These are per-engine counters,
+not power/whole-device measurements, and the applications ran sequentially with
+user-controlled motion. MoonSR used no upscaling, Performance, 100% flow, V-Sync,
+3x requested/precise motion, and learning disabled. Its 26-second run logged near
+30/90 FPS, one discarded capture, and one late generated frame. The user confirmed
+LS's requested 3x/V-Sync setup; its complete internal configuration was not inspected.
+Logs and raw samples: `build/main/gpu-comparison-20261119-*`. The sizeable observed
+3D-engine gap remains unresolved; isolated search savings do not establish parity.
+The user confirmed the MoonSR counter was visible and reported smoother or more
+responsive motion with more visual artifacts. Tightening the boundary hypothesis
+weight barely changed the quality suite (mean full-frame/edge PSNR change of
+-0.0010/-0.0005 dB across 150 finite rows). Computing squared spread before the
+boundary branch also gave no measurable interpolation reduction (0.262–0.263 ms
+baseline, 0.263 ms candidate). Both experiments were reverted. Results are under
+`build/main/alfg-boundary-evidence`.
+
+The A400 capture-to-present check used a synthetic 1080p source at 30 FPS,
+Performance mode, 50% flow, 2x, and V-Sync on the 1920x1200 60 Hz output.
+The 16-second pattern run with learning off logged 959 presents, one dropped
+capture, and no late generated frames. A separate 45-second run with learning
+on used the slow-motion learning pattern and logged 2,597 presents, seven
+dropped captures, four late generated frames, and one skipped generated frame.
+ALFG evaluated four triplets and retained the configured 50% after detecting
+a regression in its lower-flow candidate. The runs used different patterns,
+so the difference in pacing cannot be attributed to learning alone. Logs are
+`build/main/alfg-a400-headroom/live-pattern.txt` and `live-learning.txt`.
+The matched 45-second slow-motion control with learning off presented 2,720
+frames with zero dropped captures and zero late generated frames. An experiment
+spacing learning evaluations one capture period apart presented 2,716 frames
+with one dropped capture, but reported 342 late generated frames and loaded an
+existing profile. The spacing change was reverted. See `live-learning-control.txt`
+and `live-learning-spaced.txt` in the same directory.
+At startup, a requested multiplier above 2x now begins at 2x while the game rate is measured, then rises when the
+refresh-rate cap permits. In ATLYSS at 72 FPS on the 144 Hz display, requesting 3x started at 2x with zero discarded
+captures in the 12-second check; an earlier run began at 3x and discarded 19 captures before the rate cap settled.
+At 30 FPS the same request rose from 2x to 3x after roughly two seconds, also with zero discarded captures. These
+short, separate runs do not establish pacing under every workload or display configuration.
+The tile-versus-full-frame mismatch was then reproduced using the same synthetic frames as a held-out triplet:
+full-frame Performance flow 75% scored 14.12 dB versus 30.39 dB at 100%, while all nine 160x160 grid crops scored
+higher at 75% than at 100%. The tile learner and its recent-regression guard cannot reliably identify this failure.
+On the RTX 5060, isolated PushFrame plus Interpolate medians at 720p were 0.88 ms (75%) and 1.31 ms (100%), versus
+0.10 and 0.11 ms on 160x160 tiles. These timings do not include capturing extra frames, allocating full-resolution
+generator resources, readback, memory impact, or contention with presentation; a full-frame validation design must
+measure those costs before enabling it.
+
+## GPU priority under contention, 2026-11-21
+
+Owner report: neural rendering performs poorly when the game drives the GPU to high usage. Cause: MoonSR ran at the
+default GPU scheduling priority, so a busy GPU was time-shared between the game and MoonSR. Fix: the engine raises
+the process GPU scheduling class to REALTIME (fallback HIGH) and the device thread priority to +7 right after device
+creation (`src/engine/gpu_priority.h`). `MOONSR_GPU_PRIORITY=normal` disables it for A/B runs.
+
+Setup: RTX 5060, driver 621.14, Windows 11 26300, hardware-accelerated GPU scheduling (HAGS) on, process not
+elevated (no `SeIncreaseBasePriorityPrivilege`). Competing load: `moonsr_gpuload` in a separate process at normal
+priority (two queued batches of ALU-bound compute at all times, about 8 ms per batch). Working tree on `d9bde08`.
+Model: DLSS NR 310.9.16.0 (patched FP16), 1 pass, 100 % working resolution, 1280x720.
+
+Mechanism check — a fixed 2.9 ms compute job (`moonsr_gpuload --probe --iterations 1200`) beside the load:
+
+| Probe process class | p50 | p95 | p99 |
+|---|---|---|---|
+| idle GPU, no load | 2.91 ms | 2.96 ms | 3.12 ms |
+| NORMAL | 7.42 ms | 7.62 ms | 15.6 ms |
+| ABOVE_NORMAL | 7.41 ms | 7.71 ms | 15.3 ms |
+| HIGH (+ device priority 7) | 7.42 ms | 7.75 ms | 18.2 ms |
+| REALTIME | 3.10 ms | 3.15 ms | 3.28 ms |
+| NORMAL, load process at IDLE | 3.08 ms | 3.11 ms | 3.14 ms |
+
+Under HAGS, NORMAL to HIGH form one band. Only REALTIME (or lowering the competitor) puts the work ahead.
+
+Neural rendering bridge alone (`MoonSR_NrBridgeSmoke [--priority] --timing <model> "RTX 5060"`, 160 frames, CPU
+wall time per frame including completion; stage times are the bridge's GPU timestamps, `MOONSR_NR_TRACE=1`):
+
+| Case | p50 | p95 | max | flow / model stage |
+|---|---|---|---|---|
+| idle GPU | 3.80 ms | 4.03 ms | 4.11 ms | 0.7 / 2.6 ms |
+| full load, normal priority | 15.74 ms | 17.90 ms | 20.79 ms | 4.3–8.7 / 3.4–7.2 ms |
+| full load, MoonSR priority | 4.65 ms | 4.72 ms | 4.82 ms | 1.0–1.2 / 2.6 ms |
+
+Live pipeline (`moonsr_testpattern --fps 120` 1280x720, `moonsr_cli --scaler lanczos --adapter "RTX 5060"
+--neural <id> --seconds 16`, output 1920x1080 at 144 Hz, V-Sync off):
+
+| Case | captured / presented fps | NR frames | dropped | load batches in 24 s |
+|---|---|---|---|---|
+| idle GPU | 120.0–120.4 | 1883 | 2 | — |
+| full load, `MOONSR_GPU_PRIORITY=normal` | 45.2–51.8 | 597 | 19 | 2553 |
+| full load, realtime priority | 119.6–120.4 | 1878 | 2 | 1891 |
+
+With priority the competing load lost 26 % of its throughput: the game pays for MoonSR's work, as intended.
+Remaining cost under load: about 0.85 ms per NR frame, mostly in the optical-flow stage (NVOFA runs on a
+driver-owned queue whose priority MoonSR does not set).

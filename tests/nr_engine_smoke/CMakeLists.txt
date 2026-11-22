@@ -1,0 +1,5 @@
+add_executable(moonsr_nr_engine_smoke EXCLUDE_FROM_ALL main.cpp)
+target_link_libraries(moonsr_nr_engine_smoke PRIVATE moonsr_engine user32 gdi32 ole32)
+if(TARGET MoonSR_NrBridge)
+    add_dependencies(moonsr_nr_engine_smoke MoonSR_NrBridge)
+endif()
