@@ -61,6 +61,13 @@ Binaries are written to `build\main\bin`:
 | `tools/`, `tests/`, `benchmarks/` | Measurement tools, smoke tests, reference implementations |
 | `documentation/` | Architecture, benchmarks, known issues, research notes |
 
+## Credits
+
+- **MoonDev**: project owner. Defines the goals, tests on real games and makes the design decisions.
+- **Claude** (Anthropic): wrote most of the code, shaders, tests and documentation with MoonDev, as an AI
+  coding assistant in Claude Code. Commits it co-wrote carry a `Co-Authored-By: Claude` trailer.
+- Third-party code and the projects it comes from are credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## Licence
 
 MoonSR is released under the [MIT licence](LICENSE).
