@@ -25,8 +25,22 @@ enum class CursorMode : uint32_t {
     Software, // MoonSR draws the cursor at the mapped position and hides the system cursor over the game
 };
 
+enum class FrameGenMode : uint32_t {
+    Fixed = 0, // a fixed number of displayed frames per real frame (`multiplier`)
+    Auto,      // generate as many frames as needed, varying per real frame, to present at `targetFps`
+};
+
+// Frame generation is ON when (mode == Fixed && multiplier >= 2) or (mode == Auto && targetFps > 0).
+// Refresh-rate limit: with V-Sync ON the engine never presents more frames per second than the display refreshes
+// (it lowers the multiplier / target). With V-Sync OFF frames are presented at the requested rate even above the
+// refresh rate (they tear); only GPU throughput limits it then.
 struct FrameGenConfig {
-    uint32_t multiplier = 1; // 1 = off. 2..6 = displayed frames per real frame (M - 1 generated per real frame)
+    FrameGenMode mode = FrameGenMode::Fixed;
+    uint32_t multiplier = 1; // Fixed: 1 = off. 2..20 = displayed frames per real frame (M - 1 generated per real frame)
+    // Auto: desired presented frames per second (0 = off). The engine presents at this rate (capped to what the GPU can
+    // generate, and with V-Sync on also to the display refresh rate), placing each generated frame at its true time between the two real frames, so the number of
+    // generated frames per real frame follows the game's frame rate and need not be a whole number on average.
+    uint32_t targetFps = 0;
     FrameGenSettings settings;
     bool operator==(const FrameGenConfig&) const = default;
 };
@@ -109,8 +123,11 @@ struct EngineStats {
     // Frame generation. Interpolation needs the NEXT real frame before it can show anything between two real
     // frames, so every real frame is deliberately held back by frameGenDelayMs. That is added latency, and it is
     // included in latencyMs. Generated frames raise displayed FPS only; they do not make the game more responsive.
-    uint32_t frameGenMultiplier = 1;   // multiplier currently in effect (1 = off or unavailable)
-    bool frameGenLimited = false;      // the engine lowered the requested multiplier to fit the display refresh rate
+    uint32_t frameGenMultiplier = 1;   // multiplier currently in effect (1 = off or unavailable); Auto: rounded average
+    bool frameGenLimited = false;      // the engine lowered the requested multiplier / target (display refresh with V-Sync on, or GPU)
+    FrameGenMode frameGenMode = FrameGenMode::Fixed;
+    double frameGenTargetFps = 0.0;    // Auto: the presented rate the engine is aiming for after any cap (0 otherwise)
+    double frameGenRatio = 1.0;        // measured displayed frames per real frame (fractional in Auto)
     // Plain-language explanation whenever frame generation is requested but not fully active (limited, paused on
     // irregular frames, unavailable). Empty when everything requested is being delivered. Show it to the user.
     std::wstring frameGenNote;

@@ -38,48 +38,10 @@ D2D1_COLOR_F SystemAccentColor() {
     return Rgb(0x0078D4);
 }
 
-Palette MakePalette(bool dark) {
+static Palette MakeLightPalette() {
     Palette p;
-    p.dark = dark;
-    if (dark) {
-        // Navy surfaces derived from the brand background gradient (#202B48 / #111A31 / #17142F).
-        p.bgA = Rgb(0x202B48);
-        p.bgB = Rgb(0x111A31);
-        p.bgC = Rgb(0x17142F);
-        p.bg = p.bgB;
-        p.micaTint = Rgb(0x111A31, 0.74f);
-        p.cardFill = Argb(0x14B4C6E5);
-        p.cardStroke = Argb(0x26B4C6E5);
-        p.divider = Argb(0x1AB4C6E5);
-        p.text = Rgb(0xFFFFFF);
-        p.textSecondary = Rgb(0xB4C6E5);
-        p.textDisabled = Argb(0x80B4C6E5);
-        p.ctrlFill = Argb(0x1AB4C6E5);
-        p.ctrlHover = Argb(0x2CB4C6E5);
-        p.ctrlPressed = Argb(0x10B4C6E5);
-        p.ctrlDisabled = Argb(0x0DB4C6E5);
-        p.ctrlStroke = Argb(0x33B4C6E5);
-        p.strong = Rgb(0x8EA3CB);  // off-state switch outline, slider rail (>= 3:1 on the navy surfaces)
-        p.accent = Rgb(0x5BC7FF);
-        p.accentHover = Rgb(0x73D8FF);
-        p.accentPressed = Rgb(0x5CE5FF);
-        p.accentDisabled = Argb(0x30B4C6E5);
-        p.gradA = Rgb(0x5CE5FF);
-        p.gradB = Rgb(0x9584FF);
-        p.brandSR = Rgb(0x73D8FF);
-        p.subtleHover = Argb(0x1CB4C6E5);
-        p.subtlePressed = Argb(0x10B4C6E5);
-        p.subtleSelected = Argb(0x335BC7FF);
-        p.thumb = Rgb(0x1E2A4A);
-        p.popupFill = Rgb(0x19233F);
-        p.popupStroke = Argb(0x45B4C6E5);
-        p.focus = Rgb(0x73D8FF);
-        p.textOnAccent = Rgb(0x0A1226);
-        p.info = {Rgb(0x1A2B4D), p.accent, p.textOnAccent};
-        p.success = {Rgb(0x153A38), Rgb(0x6CCB5F), Rgb(0x000000)};
-        p.warning = {Rgb(0x3B3520), Rgb(0xFCE100), Rgb(0x000000)};
-        p.error = {Rgb(0x42263A), Rgb(0xFF99A4), Rgb(0x000000)};
-    } else {
+    p.dark = false;
+    {
         // Light variant: same hue family, accent darkened to #0A6DAE (>= 4.5:1 for text on the light surfaces).
         p.bgA = Rgb(0xF4F8FE);
         p.bgB = Rgb(0xE8EFFA);
@@ -119,6 +81,105 @@ Palette MakePalette(bool dark) {
         p.error = {Rgb(0xFDE7E9), Rgb(0xC42B1C), Rgb(0xFFFFFF)};
     }
     return p;
+}
+
+static Palette MakeDarkPalette() {
+    Palette p;
+    p.dark = true;
+    {
+        // Navy surfaces derived from the brand background gradient (#202B48 / #111A31 / #17142F).
+        p.bgA = Rgb(0x202B48);
+        p.bgB = Rgb(0x111A31);
+        p.bgC = Rgb(0x17142F);
+        p.bg = p.bgB;
+        p.micaTint = Rgb(0x111A31, 0.74f);
+        p.cardFill = Argb(0x14B4C6E5);
+        p.cardStroke = Argb(0x26B4C6E5);
+        p.divider = Argb(0x1AB4C6E5);
+        p.text = Rgb(0xFFFFFF);
+        p.textSecondary = Rgb(0xB4C6E5);
+        p.textDisabled = Argb(0x80B4C6E5);
+        p.ctrlFill = Argb(0x1AB4C6E5);
+        p.ctrlHover = Argb(0x2CB4C6E5);
+        p.ctrlPressed = Argb(0x10B4C6E5);
+        p.ctrlDisabled = Argb(0x0DB4C6E5);
+        p.ctrlStroke = Argb(0x33B4C6E5);
+        p.strong = Rgb(0x8EA3CB);  // off-state switch outline, slider rail (>= 3:1 on the navy surfaces)
+        p.accent = Rgb(0x5BC7FF);
+        p.accentHover = Rgb(0x73D8FF);
+        p.accentPressed = Rgb(0x5CE5FF);
+        p.accentDisabled = Argb(0x30B4C6E5);
+        p.gradA = Rgb(0x5CE5FF);
+        p.gradB = Rgb(0x9584FF);
+        p.brandSR = Rgb(0x73D8FF);
+        p.subtleHover = Argb(0x1CB4C6E5);
+        p.subtlePressed = Argb(0x10B4C6E5);
+        p.subtleSelected = Argb(0x335BC7FF);
+        p.thumb = Rgb(0x1E2A4A);
+        p.popupFill = Rgb(0x19233F);
+        p.popupStroke = Argb(0x45B4C6E5);
+        p.focus = Rgb(0x73D8FF);
+        p.textOnAccent = Rgb(0x0A1226);
+        p.info = {Rgb(0x1A2B4D), p.accent, p.textOnAccent};
+        p.success = {Rgb(0x153A38), Rgb(0x6CCB5F), Rgb(0x000000)};
+        p.warning = {Rgb(0x3B3520), Rgb(0xFCE100), Rgb(0x000000)};
+        p.error = {Rgb(0x42263A), Rgb(0xFF99A4), Rgb(0x000000)};
+    }
+    return p;
+}
+
+// Retro console theme (Windows Terminal "Campbell" family): near-black background, light grey text, green accent.
+static Palette MakeRetroPalette() {
+    Palette p;
+    p.dark = true;
+    p.retro = true;
+    p.promptHeaders = true;
+    p.opaqueBg = true;
+    p.radius = 0.0f;
+    p.font = L"Cascadia Mono";
+    p.bgA = p.bgB = p.bgC = p.bg = Rgb(0x0C0C0C);
+    p.micaTint = Rgb(0x0C0C0C);
+    p.cardFill = Rgb(0x0C0C0C);
+    p.cardStroke = Rgb(0x4A4A4A);
+    p.divider = Rgb(0x2A2A2A);
+    p.text = Rgb(0xCCCCCC);
+    p.textSecondary = Rgb(0x8A8A8A);
+    p.textDisabled = Rgb(0x555555);
+    p.ctrlFill = Rgb(0x0C0C0C);
+    p.ctrlHover = Rgb(0x1F1F1F);
+    p.ctrlPressed = Rgb(0x2E2E2E);
+    p.ctrlDisabled = Rgb(0x0C0C0C);
+    p.ctrlStroke = Rgb(0x5C5C5C);
+    p.strong = Rgb(0x767676);
+    p.accent = Rgb(0x16C60C);
+    p.accentHover = Rgb(0x4CE043);
+    p.accentPressed = Rgb(0x13A10E);
+    p.accentDisabled = Rgb(0x2E4A2C);
+    p.gradA = p.accent;
+    p.gradB = p.accent;
+    p.brandSR = p.accent;
+    p.subtleHover = Rgb(0x1F1F1F);
+    p.subtlePressed = Rgb(0x2E2E2E);
+    p.subtleSelected = p.accent;  // inverted selection: accent background, black text
+    p.thumb = p.accent;
+    p.popupFill = Rgb(0x0C0C0C);
+    p.popupStroke = Rgb(0x16C60C);
+    p.focus = Rgb(0xF2F2F2);
+    p.textOnAccent = Rgb(0x0C0C0C);
+    p.info = {Rgb(0x0C0C0C), Rgb(0x3A96DD), Rgb(0x0C0C0C)};
+    p.success = {Rgb(0x0C0C0C), Rgb(0x16C60C), Rgb(0x0C0C0C)};
+    p.warning = {Rgb(0x0C0C0C), Rgb(0xE9B824), Rgb(0x0C0C0C)};
+    p.error = {Rgb(0x0C0C0C), Rgb(0xE74856), Rgb(0x0C0C0C)};
+    return p;
+}
+
+Palette MakePalette(ThemeId theme) {
+    return theme == ThemeId::Retro ? MakeRetroPalette() : theme == ThemeId::Light ? MakeLightPalette() : MakeDarkPalette();
+}
+
+const wchar_t* ThemeKey(ThemeId t) { return t == ThemeId::Retro ? L"retro" : t == ThemeId::Light ? L"light" : L"dark"; }
+ThemeId ThemeFromKey(const std::wstring& key) {
+    return key == L"retro" ? ThemeId::Retro : key == L"light" ? ThemeId::Light : ThemeId::Dark;
 }
 
 }  // namespace moonsr::app::ui

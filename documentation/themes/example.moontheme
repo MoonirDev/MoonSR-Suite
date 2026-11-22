@@ -1,0 +1,27 @@
+# MoonSR theme file. Every key except "name" is optional; a missing key comes from the base theme.
+# Import it in MoonSR: Settings > Themes > Import theme...
+[theme]
+name = Amber Terminal
+base = dark
+
+# Colours are #RRGGBB.
+background = #140E00
+surface = #1C1400
+border = #7A5A00
+text = #FFD47A
+text_secondary = #B8923F
+accent = #FFB000
+accent_text = #140E00
+success = #8FD14F
+warning = #FFB000
+error = #FF5C4D
+info = #6CB6FF
+
+# Shape and type.
+font = Consolas
+radius = 0
+border_width = 1
+
+# Console-style options.
+bracketed_controls = true
+prompt_headers = true

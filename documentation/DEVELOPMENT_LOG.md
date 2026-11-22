@@ -4,6 +4,44 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-22 - Session 7: frame generation Fixed/Auto modes, Settings page and themes
+
+Owner requests, in order. Nothing committed yet (uncommitted working tree).
+
+- **Frame generation modes.** Fixed multiplier now 2x to 20x (was 2 to 6), with a slider in the UI. New Auto mode: the
+  user types a target frame rate (30 to 1000). The engine presents on a steady grid at 1/target and generates each slot
+  at its true phase between the two real frames (`AutoPhaseScheduler`, `src/engine/frame_pacing.h`), so generated
+  frames per real frame vary and can average a fraction. With V-Sync off nothing is capped to the display refresh
+  rate; with V-Sync on, Fixed and Auto are capped to the refresh rate with a plain-language note, and live V-Sync
+  toggles re-evaluate the cap. Auto favours lower latency over perfectly even pacing (owner's choice; see
+  ARCHITECTURE.md A12). An Auto GPU-limit controller lowers the target when more than 10% of generated slots are
+  skipped in two consecutive windows, and raises it again after 10 quiet windows. Only exercised in the fgbench
+  simulation; it did not trigger on the RTX 5060.
+- **UI.** Frame generation page: Mode selector (Fixed / Auto), 2x to 20x slider, target-fps box (new `ui::NumberBox`
+  control). Settings keys: `[FrameGen] Enabled, Mode, TargetFps, Multiplier, LastMultiplier` (2..20). Older settings
+  files load.
+- **CLI.** `--fg 1..20`, `--fg-auto <fps>` (overrides `--fg`), `--vsync-switch-at <s>`, and a Summary line.
+- **Settings page.** Diagnostics page renamed Settings. New Themes section with live-preview cards: Windows 11 Light,
+  Windows 11 Dark (default), Retro (green-on-black console look, Cascadia Mono / Consolas, square boxes, bracketed
+  controls). Custom `.moontheme` files can be imported (format: `documentation/THEMES.md`; example:
+  `documentation/themes/example.moontheme`), imported themes can be removed, and the current theme can be exported.
+  Saved as `[App] Theme`. The app no longer follows the Windows light/dark setting.
+- **Verification (lead).** RTX 5060, 1920x1080 at 144 Hz, 60 fps `moonsr_testpattern --motion-pattern 1`, 8 s runs,
+  averages of seconds 3 to 8, V-Sync off unless stated. Table and setup in BENCHMARKS.md ("Frame generation
+  Fixed/Auto modes (2026-11-22)"). `--fg 20` gave 1201.1 fps at ratio 19.93 with 0 skipped; `--fg-auto 120` gave
+  117.4 fps; `--fg-auto 300 --vsync` was capped to 144. Latency (frame-generation agent, same setup): Fixed 2x 8.4 ms,
+  Auto 120 about 10.7 ms, Auto 300 16.0 ms. Displayed FPS is not responsiveness.
+- **Verified by the lead.** The runs in BENCHMARKS.md. Build result for this session: not recorded in this log (not
+  verified here). Theme logic covered by a 36-check self-test
+  (`--test-theme-selftest`). Not verified: saving the theme choice to `settings.ini` and the import, export and
+  remove dialogs were not clicked through live.
+- **Known issues** added to KNOWN_ISSUES.md ("Frame generation Fixed/Auto modes (2026-11-22)" and "Settings page and
+  themes (2026-11-22)").
+- Next: live test of the Auto GPU-limit path; Auto latency at fractional ratios (14-17 ms); wording of the
+  "irregular frame times" note at 300 fps; Retro label truncation; theme save and import/export/remove by hand.
+
+---
+
 ## 2026-11-21/22 - Session 6: NVIDIA NR helper process, learning removed, MoonSR rename, non-topmost output, tray
 
 Owner decisions: the quality floor for MoonSR upscaling is XeSS 2 / FSR 4-class at the current cost; online learning

@@ -7,6 +7,7 @@
 #include "pages.h"
 #include "settings.h"
 #include "ui/gfx.h"
+#include "ui/theme_file.h"
 #include "ui/view.h"
 
 #include <windows.h>
@@ -24,14 +25,19 @@ namespace moonsr::app {
 struct TestOptions {
     bool active = false;             // any --test-* option present
     std::wstring source;             // --test-source: select the window whose title contains this
-    int frameGen = 0;                // --test-fg 1..6 (0 = not given; 1 = off)
+    int frameGen = 0;                // --test-fg 1..20 (0 = not given; 1 = off)
+    int frameGenMode = -1;           // --test-fg-mode fixed|auto (0 / 1)
+    int frameGenTarget = 0;          // --test-fg-target N (turns frame generation on in Auto mode)
+    std::wstring focus;              // --test-focus fgmode|fgmultiplier|fgtarget: keyboard focus on that control at start-up
     int upscaling = -1;              // --test-upscaling on|off
     bool autostart = false;          // --test-autostart
     int seconds = 0;                 // --test-seconds
     std::wstring statusFile;         // --test-status-file
-    int theme = -1;                  // --test-theme light|dark (0 / 1)
+    std::wstring theme;              // --test-theme light|dark|retro|<imported theme key>: overrides the setting for this run
+    std::wstring importTheme;        // --test-import-theme <path>: import a theme file (kept under %LOCALAPPDATA%, override it for tests)
+    std::wstring themeSelfTest;      // --test-theme-selftest <report file>: run the theme parser / catalog tests and exit
     int dpi = 0;                     // --test-dpi
-    std::wstring page;               // --test-page home|upscaling|framegen|neural|loadorder|diagnostics
+    std::wstring page;               // --test-page home|upscaling|framegen|neural|loadorder|settings (diagnostics is an alias)
     bool openDropdown = false;       // --test-open-dropdown
     int clientWidth = 0;             // --test-size W,H (client size in DIPs)
     int clientHeight = 0;
@@ -72,6 +78,13 @@ private:
     void OnCreate();
     void WireHandlers();
     void ApplyTheme();
+    void RefreshThemes();                 // theme cards from the catalog
+    void OnThemeChosen();
+    void ImportThemeFile(const std::wstring& path, ui::ThemeCatalog::ImportMode mode);
+    void OnImportTheme();
+    void OnExportTheme();
+    void ConfirmRemoveTheme(const std::wstring& key);
+    void SetThemeMessage(const std::wstring& text, ui::InfoBar::Severity severity);
     void SetupBackdrop();
     void ApplyDpiAndSize(const RECT* suggested);
     UINT CurrentDpi() const;
@@ -102,7 +115,9 @@ private:
     void OnTimer(UINT_PTR id);
     void OnLiveChange();
     void OnFrameGenToggled();
-    void OnFrameGenMultiplier();
+    void OnFrameGenMode();
+    void OnFrameGenValue();   // multiplier slider or target box changed
+    void UpdateFrameGenUi();  // which controls of the Frame generation card are shown; help line; refresh hint
 
     // Neural rendering (user-supplied model)
     ModelStore& Models();
@@ -206,11 +221,12 @@ private:
     std::mutex doneMutex_;
     std::vector<std::function<void()>> done_;
     int countdown_ = 0;          // seconds remaining; 0 = no countdown running
-    int lastMultiplier_ = 2;     // last non-off frame generation multiplier
     bool hotkeyOk_ = false;
     DWORD hotkeyError_ = 0;
     bool recordHotkeyOk_ = false;
     DWORD recordHotkeyError_ = 0;
+    std::unique_ptr<ui::ThemeCatalog> themes_;
+    std::wstring themeKey_ = L"dark";      // selected theme: light | dark | retro | imported theme key
     bool recording_ = false;               // a diagnostic recording is in progress (or just requested)
     ULONGLONG recordingPendingUntil_ = 0;  // grace period until the engine reports recording=true
     ULONGLONG messageHoldUntil_ = 0;       // tick count until which ShowStats must not overwrite the message

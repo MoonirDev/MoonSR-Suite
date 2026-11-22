@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 
 namespace moonsr::app::ui {
 
@@ -154,7 +155,10 @@ float Page::Layout(const Gfx& g, float width) {
                 std::vector<float> ws;
                 float total = 0.0f;
                 for (const auto& pc : r.ctrls) {
-                    ws.push_back(pc.second > 0.0f ? pc.second : pc.first->PreferredWidth(g));
+                    float cw = pc.second > 0.0f ? pc.second : pc.first->PreferredWidth(g);
+                    // Monospace text is wider: give fixed-width combo boxes and buttons more room in the console theme.
+                    if (g.retro() && pc.second > 0.0f && (dynamic_cast<ComboBox*>(pc.first) || dynamic_cast<Button*>(pc.first))) cw *= 1.12f;
+                    ws.push_back(cw);
                     total += ws.back() + 8.0f;
                 }
                 const float textLeft = kRowPadX + ((icons && r.icon != 0) ? 40.0f : 0.0f);
@@ -248,7 +252,13 @@ void Page::Draw(Canvas& c, const Palette& p, const Gfx& g) {
     for (Item& it : items_) {
         switch (it.kind) {
         case Item::Kind::Section:
-            c.Text(it.text, Rect{0, it.y + 8.0f, it.w, it.y + kSectionHeight - 2.0f}, Font::Section, p.text, HAlign::Left);
+            if (p.promptHeaders) {
+                std::wstring up = it.text;
+                for (wchar_t& ch : up) ch = static_cast<wchar_t>(std::towupper(ch));
+                c.Text(L"[ " + up + L" ]", Rect{0, it.y + 8.0f, it.w, it.y + kSectionHeight - 2.0f}, Font::Section, p.accent, HAlign::Left);
+            } else {
+                c.Text(it.text, Rect{0, it.y + 8.0f, it.w, it.y + kSectionHeight - 2.0f}, Font::Section, p.text, HAlign::Left);
+            }
             break;
         case Item::Kind::Info:
             if (it.info->visible) it.info->Draw(c, p);

@@ -2,6 +2,7 @@
 
 #include "resource.h"
 #include "ui/popup.h"
+#include "ui/theme_file.h"
 
 #include "core/log.h"
 
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <cwchar>
+#include <cwctype>
 #include <format>
 #include <wrl/client.h>
 
@@ -227,12 +229,20 @@ TestOptions ParseTestOptions() {
         if (a.rfind(L"--test-", 0) != 0) continue;
         t.active = true;
         if (a == L"--test-source") t.source = next();
-        else if (a == L"--test-fg") t.frameGen = std::clamp(_wtoi(next().c_str()), 1, 6);
+        else if (a == L"--test-fg") t.frameGen = std::clamp(_wtoi(next().c_str()), 1, 20);
+        else if (a == L"--test-fg-mode") t.frameGenMode = next() == L"auto" ? 1 : 0;
+        else if (a == L"--test-fg-target") t.frameGenTarget = std::clamp(_wtoi(next().c_str()), 1, 100000);
+        else if (a == L"--test-focus") t.focus = next();
         else if (a == L"--test-upscaling") t.upscaling = next() == L"off" ? 0 : 1;
         else if (a == L"--test-autostart") t.autostart = true;
         else if (a == L"--test-seconds") t.seconds = std::max(1, _wtoi(next().c_str()));
         else if (a == L"--test-status-file") t.statusFile = next();
-        else if (a == L"--test-theme") t.theme = next() == L"light" ? 0 : 1;
+        else if (a == L"--test-theme") {
+            t.theme = next();
+            for (wchar_t& ch : t.theme) ch = static_cast<wchar_t>(towlower(ch));
+        }
+        else if (a == L"--test-import-theme") t.importTheme = next();
+        else if (a == L"--test-theme-selftest") t.themeSelfTest = next();
         else if (a == L"--test-dpi") t.dpi = std::clamp(_wtoi(next().c_str()), 96, 384);
         else if (a == L"--test-page") t.page = next();
         else if (a == L"--test-open-dropdown") t.openDropdown = true;
@@ -447,7 +457,13 @@ LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
         ApplyTheme();
         break;
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE) view_.OnWindowDeactivated();
+        if (LOWORD(wp) == WA_INACTIVE) {
+            view_.OnWindowFocusChanged(false);
+            view_.OnWindowDeactivated();
+        }
+        break;
+    case WM_CHAR:
+        if (view_.OnChar(static_cast<wchar_t>(wp))) return 0;
         break;
     case WM_CLOSE:
         if (!exiting_ && CloseToTrayEnabled()) {
@@ -501,20 +517,179 @@ SIZE MainWindow::OuterSizeForClientDips(int w, int h) const {
     return SIZE{r.right - r.left, r.bottom - r.top};
 }
 
+namespace {
+std::wstring ThemesDirectory() {
+    const std::wstring dir = AppDataDirectory();
+    return dir.empty() ? std::wstring() : dir + L"\\themes";
+}
+
+// Standard open / save dialogs for .moontheme files. Both return false when cancelled.
+bool PickThemeFile(HWND owner, std::wstring& path) {
+    Microsoft::WRL::ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(__uuidof(FileOpenDialog), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.GetAddressOf())))) return false;
+    const COMDLG_FILTERSPEC filters[] = {{L"MoonSR themes (*.moontheme)", L"*.moontheme"}, {L"All files", L"*.*"}};
+    dlg->SetFileTypes(2, filters);
+    dlg->SetFileTypeIndex(1);
+    dlg->SetTitle(L"Import a theme");
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+    if (FAILED(dlg->Show(owner))) return false;
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    if (FAILED(dlg->GetResult(item.GetAddressOf()))) return false;
+    PWSTR name = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &name)) || !name) return false;
+    path = name;
+    CoTaskMemFree(name);
+    return true;
+}
+
+bool PickThemeSavePath(HWND owner, const std::wstring& suggested, std::wstring& path) {
+    Microsoft::WRL::ComPtr<IFileSaveDialog> dlg;
+    if (FAILED(CoCreateInstance(__uuidof(FileSaveDialog), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.GetAddressOf())))) return false;
+    const COMDLG_FILTERSPEC filters[] = {{L"MoonSR themes (*.moontheme)", L"*.moontheme"}};
+    dlg->SetFileTypes(1, filters);
+    dlg->SetDefaultExtension(L"moontheme");
+    dlg->SetFileName(suggested.c_str());
+    dlg->SetTitle(L"Export the current theme");
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST);
+    if (FAILED(dlg->Show(owner))) return false;
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    if (FAILED(dlg->GetResult(item.GetAddressOf()))) return false;
+    PWSTR name = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &name)) || !name) return false;
+    path = name;
+    CoTaskMemFree(name);
+    return true;
+}
+}  // namespace
+
 void MainWindow::ApplyTheme() {
-    const bool dark = test_.theme >= 0 ? test_.theme == 1 : ui::SystemUsesDarkApps();
-    view_.SetTheme(dark);
-    const BOOL d = dark ? TRUE : FALSE;
-    DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &d, sizeof(d));
-    // Windows 11: tint the title bar to the brand surface (attributes 34 border, 35 caption, 36 caption text; ignored elsewhere).
+    if (!themes_) themes_ = std::make_unique<ui::ThemeCatalog>(ThemesDirectory());
+    const std::wstring want = !test_.theme.empty() ? test_.theme : themeKey_;
+    const ui::ThemeEntry* entry = themes_->Find(want);
+    if (!entry) {
+        // The selected custom theme is gone (file removed or invalid): fall back to Windows 11 Dark.
+        if (want == themeKey_ && themeKey_ != L"dark") MSR_LOG_WARN(L"Theme '{}' not found; using Windows 11 Dark", themeKey_);
+        if (test_.theme.empty()) themeKey_ = L"dark";
+        entry = themes_->Find(L"dark");
+    }
+    view_.SetTheme(entry->palette);
     const ui::Palette& pal = view_.palette();
+    const BOOL d = pal.dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &d, sizeof(d));
+    // Windows 11: tint the title bar to the theme surface (attributes 34 border, 35 caption, 36 caption text; ignored elsewhere).
     auto bgr = [](const D2D1_COLOR_F& c) {
         return static_cast<COLORREF>(RGB(static_cast<int>(c.r * 255.0f + 0.5f), static_cast<int>(c.g * 255.0f + 0.5f), static_cast<int>(c.b * 255.0f + 0.5f)));
     };
-    const COLORREF cap = bgr(pal.dark ? ui::Mix(pal.bgB, pal.bgA, 0.18f) : pal.bgB), txt = bgr(pal.text), border = bgr(pal.bgB);
+    const COLORREF cap = bgr(pal.opaqueBg ? pal.bg : pal.dark ? ui::Mix(pal.bgB, pal.bgA, 0.18f) : pal.bgB), txt = bgr(pal.text),
+                   border = bgr(pal.opaqueBg ? pal.cardStroke : pal.bgB);
     DwmSetWindowAttribute(hwnd_, 35, &cap, sizeof(cap));
     DwmSetWindowAttribute(hwnd_, 36, &txt, sizeof(txt));
     DwmSetWindowAttribute(hwnd_, 34, &border, sizeof(border));
+}
+
+void MainWindow::RefreshThemes() {
+    if (!themes_) return;
+    themes_->Reload();
+    std::vector<ui::ThemePicker::Card> cards;
+    for (const ui::ThemeEntry& e : themes_->entries()) {
+        ui::ThemePicker::Card c;
+        c.key = e.key;
+        c.name = e.name;
+        c.desc = e.description;
+        c.builtin = e.builtin;
+        c.palette = e.palette;
+        cards.push_back(std::move(c));
+    }
+    ui_.themePicker->SetCards(std::move(cards));
+    const std::wstring shown = !test_.theme.empty() && themes_->Find(test_.theme) ? test_.theme : themeKey_;
+    ui_.themePicker->SetSelected(shown);
+}
+
+void MainWindow::OnThemeChosen() {
+    themeKey_ = ui_.themePicker->selectedKey();
+    test_.theme.clear();  // an explicit choice wins over --test-theme
+    ApplyTheme();
+    SaveNow();
+}
+
+void MainWindow::SetThemeMessage(const std::wstring& text, Severity severity) {
+    ui_.themeMsg->Set(severity, text);
+    ui_.themeMsg->SetVisible(!text.empty());
+}
+
+void MainWindow::OnImportTheme() {
+    if (view_.DialogOpen()) return;
+    std::wstring path;
+    if (!PickThemeFile(hwnd_, path)) return;
+    ImportThemeFile(path, ui::ThemeCatalog::ImportMode::Ask);
+}
+
+void MainWindow::ImportThemeFile(const std::wstring& path, ui::ThemeCatalog::ImportMode mode) {
+    if (!themes_) return;
+    std::wstring err, key;
+    switch (themes_->Import(path, mode, err, key)) {
+    case ui::ThemeCatalog::ImportStatus::Invalid:
+        SetThemeMessage(L"Theme not imported: " + err, Severity::Error);
+        MSR_LOG_WARN(L"Theme import failed: {}", err);
+        break;
+    case ui::ThemeCatalog::ImportStatus::NameExists: {
+        const ui::ThemeEntry* e = themes_->Find(key);
+        ui::ModalDialog::Spec spec;
+        spec.title = L"A theme with this name exists";
+        spec.body = (e ? e->name : key) + L"\\nReplace it with the imported file, or keep both (the new one gets a number added to its name)?";
+        for (size_t i = 0; (i = spec.body.find(L"\\n", i)) != std::wstring::npos;) spec.body.replace(i, 2, L"\n");
+        spec.primary = L"Replace";
+        spec.secondary = L"Keep both";
+        spec.onPrimary = [this, path] { ImportThemeFile(path, ui::ThemeCatalog::ImportMode::Replace); };
+        spec.onSecondary = [this, path] { ImportThemeFile(path, ui::ThemeCatalog::ImportMode::Rename); };
+        view_.ShowDialog(std::move(spec));
+        break;
+    }
+    case ui::ThemeCatalog::ImportStatus::Imported: {
+        RefreshThemes();
+        const ui::ThemeEntry* e = themes_->Find(key);
+        SetThemeMessage(L"Imported " + (e ? e->name : key) + L". Select its card to use it.", Severity::Success);
+        break;
+    }
+    }
+}
+
+void MainWindow::OnExportTheme() {
+    if (!themes_ || view_.DialogOpen()) return;
+    std::wstring path;
+    if (!PickThemeSavePath(hwnd_, themeKey_ + L".moontheme", path)) return;
+    std::wstring err;
+    if (themes_->Export(themeKey_, path, err)) SetThemeMessage(L"Exported the current theme to " + path, Severity::Success);
+    else SetThemeMessage(L"Export failed: " + err, Severity::Error);
+}
+
+void MainWindow::ConfirmRemoveTheme(const std::wstring& key) {
+    if (!themes_ || view_.DialogOpen()) return;
+    const ui::ThemeEntry* e = themes_->Find(key);
+    if (!e || e->builtin) return;
+    ui::ModalDialog::Spec spec;
+    spec.title = L"Remove this theme?";
+    spec.body = e->name + L"\nThe imported copy is deleted. Your original file is not touched.";
+    spec.primary = L"Remove";
+    spec.secondary = L"Cancel";
+    spec.onPrimary = [this, key] {
+        std::wstring err;
+        const bool wasCurrent = themeKey_ == key;
+        if (!themes_->Remove(key, err)) {
+            SetThemeMessage(L"Could not remove the theme: " + err, Severity::Error);
+            return;
+        }
+        if (wasCurrent) {
+            themeKey_ = L"dark";
+            ApplyTheme();
+            SaveNow();
+        }
+        RefreshThemes();
+        SetThemeMessage(L"Theme removed.", Severity::Success);
+    };
+    view_.ShowDialog(std::move(spec));
 }
 
 void MainWindow::SetupBackdrop() {
@@ -577,6 +752,7 @@ void MainWindow::OnDpiChanged(int newDpi, const RECT* suggested) {
 void MainWindow::OnCreate() {
     dpi_ = CurrentDpi();
     view_.Attach(hwnd_, dpi_);
+    themeKey_ = settings_.theme.empty() ? std::wstring(L"dark") : settings_.theme;
     ApplyTheme();
     SetupBackdrop();
 
@@ -585,6 +761,7 @@ void MainWindow::OnCreate() {
     PopulateAdapters();
     PopulateScalers();
     ApplySettingsToUi();
+    RefreshThemes();
     ApplyTestOptionsEarly();
     RefreshModels();
     RefreshOrderUi();
@@ -631,16 +808,23 @@ void MainWindow::OnCreate() {
 
 void MainWindow::WireHandlers() {
     for (ui::ComboBox* gpu : ui_.stageGpu) gpu->onChange = [this] { UpdateNeuralState(); };
-    ui_.monitor->onChange = [this] { UpdateNeuralState(); };
+    ui_.monitor->onChange = [this] {
+        UpdateNeuralState();
+        UpdateFrameGenUi();
+    };
     ui_.window->onChange = [this] { UpdateNeuralState(); };
     view_.onDefaultAction = [this] { ToggleFromButton(); };
     view_.defaultActionPage = PageHome;
     ui_.start->onChange = [this] { ToggleFromButton(); };
     ui_.refresh->onChange = [this] { PopulateWindows(); };
     ui_.record->onChange = [this] { StartRecording(); };
+    ui_.themePicker->onChange = [this] { OnThemeChosen(); };
+    ui_.themePicker->onRemove = [this](const std::wstring& key) { ConfirmRemoveTheme(key); };
+    ui_.importTheme->onChange = [this] { OnImportTheme(); };
+    ui_.exportTheme->onChange = [this] { OnExportTheme(); };
     ui_.openRecordings->onChange = [this] { OpenRecordingsFolder(); };
     ui_.openLog->onChange = [this] { OpenLogFolder(); };
-    ui_.diagnosticsLink->onChange = [this] { view_.Navigate(PageDiagnostics); };
+    ui_.diagnosticsLink->onChange = [this] { view_.Navigate(PageSettings); };
     ui_.addModel->onChange = [this] { OnAddModel(); };
     ui_.addLocalModel->onChange = [this] {
         if (busy_ || view_.DialogOpen()) return;
@@ -711,7 +895,9 @@ void MainWindow::WireHandlers() {
     ui_.fgFlow->onChange = [this] { OnLiveChange(); };
     ui_.fgHud->onChange = [this] { OnLiveChange(); };
     ui_.frameGen->onChange = [this] { OnFrameGenToggled(); };
-    ui_.fgMultiplier->onChange = [this] { OnFrameGenMultiplier(); };
+    ui_.fgMode->onChange = [this] { OnFrameGenMode(); };
+    ui_.fgMultiplier->onChange = [this] { OnFrameGenValue(); };
+    ui_.fgTarget->onChange = [this] { OnFrameGenValue(); };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -859,9 +1045,11 @@ void MainWindow::ApplySettingsToUi() {
     ui_.fit->SetSelected(std::clamp(settings_.fitMode, 0, 2));
     ui_.sharpness->SetValue(settings_.sharpnessPercent);
 
-    lastMultiplier_ = std::clamp(settings_.frameGenLastMultiplier, 2, 6);
-    ui_.frameGen->SetChecked(settings_.frameGenMultiplier > 1);
-    ui_.fgMultiplier->SetSelected(lastMultiplier_ - 2);
+    ui_.frameGen->SetChecked(settings_.frameGenEnabled);
+    ui_.fgMode->SetSelected(std::clamp(settings_.frameGenMode, 0, 1));
+    ui_.fgMultiplier->SetValue(std::clamp(settings_.frameGenLastMultiplier, 2, 20));
+    ui_.fgTarget->SetValue(std::clamp(settings_.frameGenTargetFps, 30, 1000));
+    UpdateFrameGenUi();
     ui_.fgFlow->SetValue(std::clamp(settings_.frameGenFlowPercent, 25, 100));
     ui_.fgHud->SetChecked(settings_.frameGenHudProtection);
 
@@ -895,14 +1083,18 @@ AppSettings MainWindow::CaptureSettings() const {
     s.vsync = ui_.vsync->checked();
     s.showCursor = ui_.cursor->checked();
     s.closeToTray = ui_.closeToTray->checked();
+    s.theme = themeKey_;
     s.showFrameCounter = ui_.counter->checked();
     s.upscaling = ui_.upscaling->checked();
     s.fitMode = std::max(0, ui_.fit->Selected());
     s.sharpnessPercent = ui_.sharpness->value();
     {
         const FrameGenConfig fg = CurrentFrameGen();
-        s.frameGenMultiplier = static_cast<int>(fg.multiplier);
-        s.frameGenLastMultiplier = lastMultiplier_;
+        s.frameGenEnabled = ui_.frameGen->checked();
+        s.frameGenMode = static_cast<int>(fg.mode);
+        s.frameGenMultiplier = ui_.frameGen->checked() && fg.mode == FrameGenMode::Fixed ? ui_.fgMultiplier->value() : 1;
+        s.frameGenLastMultiplier = ui_.fgMultiplier->value();
+        s.frameGenTargetFps = ui_.fgTarget->value();
         s.frameGenFlowPercent = ui_.fgFlow->value();
         s.frameGenHudProtection = fg.settings.hudProtection;
     }
@@ -1000,14 +1192,47 @@ void MainWindow::OnLiveChange() {
 }
 
 void MainWindow::OnFrameGenToggled() {
-    if (ui_.frameGen->checked()) ui_.fgMultiplier->SetSelected(lastMultiplier_ - 2);
+    OnLiveChange();  // the last multiplier / target stay in their controls, so switching back on restores them
+}
+
+void MainWindow::OnFrameGenMode() {
+    UpdateFrameGenUi();
     OnLiveChange();
 }
 
-void MainWindow::OnFrameGenMultiplier() {
-    const long long m = ui_.fgMultiplier->ItemData(ui_.fgMultiplier->Selected());
-    if (m >= 2 && m <= 6) lastMultiplier_ = static_cast<int>(m);
+void MainWindow::OnFrameGenValue() {
+    UpdateFrameGenUi();
     OnLiveChange();
+}
+
+void MainWindow::UpdateFrameGenUi() {
+    const bool autoMode = ui_.fgMode->Selected() == 1;
+    ui_.fgMultiplierRow->visible = !autoMode;
+    ui_.fgMultiplier->SetVisible(!autoMode);
+    ui_.fgTargetRow->visible = autoMode;
+    ui_.fgTarget->SetVisible(autoMode);
+
+    // Refresh rate of the chosen output monitor (Auto = the game monitor, unknown here: use the primary one).
+    double hz = 0.0;
+    const int m = ui_.monitor->Selected();
+    if (m > 0 && static_cast<size_t>(m) <= monitors_.size()) {
+        hz = monitors_[static_cast<size_t>(m) - 1].refreshHz;
+    } else {
+        for (const MonitorInfo& mi : monitors_)
+            if (mi.primary) hz = mi.refreshHz;
+    }
+    std::wstring help =
+        L"MoonSR generates as many frames as needed to reach this frame rate. With V-sync on it is capped at your display refresh rate.";
+    if (hz > 0.0) help += std::format(L" Your display runs at {:.0f} Hz.", hz);
+    if (ui_.fgTarget->clamped())
+        ui_.fgTargetHelp->Set(ui::InfoBar::Severity::Warning,
+                              std::format(L"Enter a frame rate from 30 to 1000. {} was changed to {}.",
+                                          ui_.fgTarget->lastTyped(), ui_.fgTarget->value()));
+    else
+        ui_.fgTargetHelp->Set(ui::InfoBar::Severity::Info, help);
+    ui_.fgTargetHelp->SetVisible(autoMode);
+    view_.RequestLayout();
+    view_.Invalidate();
 }
 
 void MainWindow::OnClose() {
@@ -1277,7 +1502,10 @@ ScaleSettings MainWindow::CurrentScaleSettings() const {
 
 FrameGenConfig MainWindow::CurrentFrameGen() const {
     FrameGenConfig fg;
-    fg.multiplier = ui_.frameGen->checked() ? static_cast<uint32_t>(std::clamp(lastMultiplier_, 2, 6)) : 1u;
+    const bool on = ui_.frameGen->checked();
+    fg.mode = ui_.fgMode->Selected() == 1 ? FrameGenMode::Auto : FrameGenMode::Fixed;
+    fg.multiplier = on && fg.mode == FrameGenMode::Fixed ? static_cast<uint32_t>(std::clamp(ui_.fgMultiplier->value(), 2, 20)) : 1u;
+    fg.targetFps = on && fg.mode == FrameGenMode::Auto ? static_cast<uint32_t>(std::clamp(ui_.fgTarget->value(), 30, 1000)) : 0u;
     fg.settings.quality = FrameGenQuality::Performance;
     fg.settings.flowScale = static_cast<float>(ui_.fgFlow->value()) / 100.0f;
     fg.settings.hudProtection = ui_.fgHud->checked();
@@ -1422,10 +1650,17 @@ void MainWindow::ShowStats(const EngineStats& st) {
     ui_.tInput->SetValue(size(st.inputSize));
     ui_.tOutput->SetValue(size(st.outputSize));
 
-    const uint32_t requested = CurrentFrameGen().multiplier;
+    const FrameGenConfig fgReq = CurrentFrameGen();
+    const uint32_t requested = fgReq.multiplier;
     const uint32_t effective = st.frameGenMultiplier;
     std::wstring fgValue, fgNote;
-    if (st.frameGenLimited && requested > 1) {
+    if (fgReq.mode == FrameGenMode::Auto && fgReq.targetFps > 0) {
+        // Auto: the ratio is measured (displayed frames per real frame) and fractional.
+        const double target = st.frameGenTargetFps > 0.0 ? st.frameGenTargetFps : static_cast<double>(fgReq.targetFps);
+        fgValue = std::format(L"{:.1f}X", std::max(1.0, st.frameGenRatio));
+        fgNote = std::format(L"auto, {:.0f} fps target", target);
+        if (st.frameGenLimited) fgNote += std::format(L", limited from {}", fgReq.targetFps);
+    } else if (st.frameGenLimited && requested > 1) {
         fgValue = effective > 1 ? std::format(L"{}X", effective) : std::wstring(L"Off");
         fgNote = std::format(L"limited from {}X", requested);
     } else {
@@ -1516,7 +1751,9 @@ void MainWindow::UpdateControlStates() {
     ui_.fit->SetEnabled(up);
     ui_.sharpness->SetEnabled(up);
     const bool fg = ui_.frameGen->checked();
+    ui_.fgMode->SetEnabled(fg);
     ui_.fgMultiplier->SetEnabled(fg);
+    ui_.fgTarget->SetEnabled(fg);
     ui_.fgFlow->SetEnabled(fg);
     ui_.fgHud->SetEnabled(fg);
 
@@ -1550,11 +1787,17 @@ void MainWindow::ApplyTestOptionsEarly() {
         if (test_.frameGen == 1) {
             ui_.frameGen->SetChecked(false);
         } else {
-            lastMultiplier_ = test_.frameGen;
-            ui_.fgMultiplier->SetSelected(lastMultiplier_ - 2);
+            ui_.fgMultiplier->SetValue(test_.frameGen);
             ui_.frameGen->SetChecked(true);
         }
     }
+    if (test_.frameGenMode >= 0) ui_.fgMode->SetSelected(test_.frameGenMode);
+    if (test_.frameGenTarget > 0) {
+        ui_.fgMode->SetSelected(1);
+        ui_.fgTarget->SetValue(test_.frameGenTarget);
+        ui_.frameGen->SetChecked(true);
+    }
+    UpdateFrameGenUi();
     if (test_.upscaling >= 0) ui_.upscaling->SetChecked(test_.upscaling == 1);
     if (!test_.scaler.empty()) {
         for (size_t i = 0; i < scalers_.size(); ++i)
@@ -1567,7 +1810,7 @@ void MainWindow::ApplyTestOptionsEarly() {
     if (!test_.page.empty()) {
         static const struct { const wchar_t* name; int page; } kPages[] = {
             {L"home", PageHome}, {L"upscaling", PageUpscaling}, {L"framegen", PageFrameGen},
-            {L"diagnostics", PageDiagnostics}, {L"neural", PageNeural},
+            {L"settings", PageSettings}, {L"diagnostics", PageSettings}, {L"neural", PageNeural},
             {L"loadorder", PageLoadOrder}};
         for (const auto& p : kPages)
             if (EqualNoCase(test_.page, p.name)) view_.Navigate(p.page);
@@ -1586,6 +1829,7 @@ void MainWindow::ApplyTestOptionsLate() {
             MSR_LOG_ERROR(L"Test autostart: no window matching '{}'", test_.source);
         }
     }
+    if (!test_.importTheme.empty()) ImportThemeFile(test_.importTheme, ui::ThemeCatalog::ImportMode::Rename);
     if (!test_.importModel.empty()) BeginImport(test_.importModel);
     if (!test_.inspectModel.empty()) BeginInspect(test_.inspectModel);
     if (test_.seconds > 0) SetTimer(hwnd_, IDT_TESTEXIT, static_cast<UINT>(test_.seconds) * 1000, nullptr);
@@ -1597,16 +1841,28 @@ void MainWindow::ApplyTestOptionsLate() {
     keybd_event(VK_MENU, 0, 0, 0);
     SetForegroundWindow(hwnd_);
     keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+    if (!test_.focus.empty()) {
+        ui::Control* f = EqualNoCase(test_.focus, L"fgmode")         ? static_cast<ui::Control*>(ui_.fgMode)
+                         : EqualNoCase(test_.focus, L"fgmultiplier") ? static_cast<ui::Control*>(ui_.fgMultiplier)
+                         : EqualNoCase(test_.focus, L"fgtarget")     ? static_cast<ui::Control*>(ui_.fgTarget)
+                                                                     : nullptr;
+        if (f) view_.FocusControl(f, true);
+    }
     if (!test_.keys.empty()) {
         static const struct { const wchar_t* name; UINT vk; } kKeys[] = {
             {L"TAB", VK_TAB}, {L"ENTER", VK_RETURN}, {L"SPACE", VK_SPACE}, {L"ESC", VK_ESCAPE}, {L"UP", VK_UP},
             {L"DOWN", VK_DOWN}, {L"LEFT", VK_LEFT}, {L"RIGHT", VK_RIGHT}, {L"HOME", VK_HOME}, {L"END", VK_END},
-            {L"PGDN", VK_NEXT}, {L"PGUP", VK_PRIOR}};
+            {L"PGDN", VK_NEXT}, {L"PGUP", VK_PRIOR}, {L"BACK", VK_BACK}, {L"DELETE", VK_DELETE}};
         size_t pos = 0;
         while (pos <= test_.keys.size()) {
             size_t end = test_.keys.find(L',', pos);
             if (end == std::wstring::npos) end = test_.keys.size();
             const std::wstring name = test_.keys.substr(pos, end - pos);
+            if (name.rfind(L"type:", 0) == 0) {  // type:120 posts one WM_CHAR per character
+                for (size_t i = 5; i < name.size(); ++i) PostMessageW(hwnd_, WM_CHAR, name[i], 0);
+                pos = end + 1;
+                continue;
+            }
             for (const auto& k : kKeys)
                 if (EqualNoCase(name, k.name)) PostMessageW(hwnd_, WM_KEYDOWN, k.vk, 0);
             pos = end + 1;
@@ -1634,11 +1890,13 @@ void MainWindow::WriteTestStatus() {
     const std::wstring text =
         std::format(L"state={}\r\ngameFps={:.1f}\r\ndisplayedFps={:.1f}\r\ngeneratedFps={:.1f}\r\nframeGen={}\r\n"
                     L"addedLatencyMs={:.1f}\r\nscaler={}\r\norder={}\r\nengineOrder={}\r\n"
-                    L"alsrActive={}\r\nalsrStability={}\r\nfgQuality={}\r\nmessage={}\r\n",
+                    L"alsrActive={}\r\nalsrStability={}\r\nfgQuality={}\r\nmessage={}\r\n"
+                    L"fgOn={}\r\nfgMode={}\r\nfgMultiplier={}\r\nfgTargetFps={}\r\nfgRequestedMultiplier={}\r\nfgRequestedTarget={}\r\n",
                     status_.state, status_.game, status_.displayed, status_.generated, status_.frameGen, status_.latencyMs,
                     status_.scaler, OrderToString(CurrentOrder()), status_.engineOrder, status_.alsrActive ? 1 : 0,
                     ui_.alsrHistory->value(), static_cast<unsigned>(CurrentFrameGen().settings.quality),
-                    ui_.message->message());
+                    ui_.message->message(), ui_.frameGen->checked() ? 1 : 0, ui_.fgMode->Selected(), ui_.fgMultiplier->value(),
+                    ui_.fgTarget->value(), CurrentFrameGen().multiplier, CurrentFrameGen().targetFps);
     const int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
     std::string utf8(static_cast<size_t>(std::max(n, 0)), '\0');
     WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), utf8.data(), n, nullptr, nullptr);

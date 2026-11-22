@@ -14,6 +14,10 @@ add_executable(MoonSR WIN32
     ui/gfx.h
     ui/controls.cpp
     ui/controls.h
+    ui/number_box.cpp
+    ui/retro_controls.cpp
+    ui/theme_file.cpp
+    ui/theme_file.h
     ui/page.cpp
     ui/page.h
     ui/popup.cpp

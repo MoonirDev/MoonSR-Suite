@@ -15,7 +15,7 @@ constexpr float kScrollbarZone = 16.0f;
 }  // namespace
 
 View::View(Gfx& gfx) : gfx_(gfx), canvas_(gfx), popup_(gfx) {
-    pal_ = MakePalette(SystemUsesDarkApps());
+    pal_ = MakePalette(ThemeId::Dark);
     popup_.onClosed = [this](int idx) {
         ComboBox* c = popupCombo_;
         popupCombo_ = nullptr;
@@ -50,9 +50,13 @@ Page* View::AddPage(const std::wstring& title, wchar_t navIcon, const std::wstri
     return pages_.back().get();
 }
 
-void View::SetTheme(bool dark) {
-    pal_ = MakePalette(dark);
+void View::SetTheme(const Palette& palette) {
+    pal_ = palette;
+    // Fonts, icon glyphs and the corner / border style follow the theme; the layout depends on text metrics.
+    gfx_.SetStyle(pal_.font, pal_.retro, pal_.radius, pal_.borderWidth);
+    CloseDropdown();
     popup_.SetPalette(pal_);
+    layoutDirty_ = true;
     Invalidate();
 }
 
@@ -169,7 +173,9 @@ void View::OnPaint() {
     if (layoutDirty_) Layout();
     if (canvas_.Begin(hwnd_, dpi_, mica_)) {
         const float w = ClientW(), h = ClientH();
-        if (mica_) {
+        if (pal_.opaqueBg) {
+            canvas_.Clear(pal_.bg);  // themes with their own solid background never show the Mica backdrop
+        } else if (mica_) {
             canvas_.Clear(D2D1_COLOR_F{0, 0, 0, 0});
             canvas_.FillRect(Rect{0, 0, w, h}, pal_.micaTint);  // brand tint over the Mica backdrop
         } else {
@@ -193,13 +199,31 @@ void View::OnPaint() {
 void View::DrawNav(float, float h) {
     // Brand: the logo mark and the wordmark (vector, so it is sharp at every DPI).
     const float lx = compact_ ? (navW_ - 30.0f) * 0.5f : 16.0f;
-    canvas_.LogoMark(Rect{lx, 17.0f, lx + 30.0f, 47.0f}, false, !pal_.dark);
-    if (!compact_) canvas_.Wordmark(lx + 30.0f + 10.0f, 14.0f, 24.0f, pal_.text, pal_.dark ? Rgb(0xCFE9FF) : pal_.text, pal_.brandSR);
+    if (pal_.retro) {
+        // Console look: a text wordmark with a block cursor instead of the logo mark.
+        canvas_.Text(compact_ ? L"M" : L"MoonSR", Rect{compact_ ? 0.0f : 14.0f, 14.0f, navW_, 46.0f}, Font::Title, pal_.accent,
+                     compact_ ? HAlign::Center : HAlign::Left, false);
+        if (!compact_) {
+            const float tw = gfx_.MeasureWidth(L"MoonSR", Font::Title);
+            canvas_.FillRect(Rect{14.0f + tw + 2.0f, 34.0f, 14.0f + tw + 14.0f, 38.0f}, pal_.accent);
+        }
+    } else {
+        canvas_.LogoMark(Rect{lx, 17.0f, lx + 30.0f, 47.0f}, false, !pal_.dark);
+        if (!compact_) canvas_.Wordmark(lx + 30.0f + 10.0f, 14.0f, 24.0f, pal_.text, pal_.dark ? Rgb(0xCFE9FF) : pal_.text, pal_.brandSR);
+    }
+    if (pal_.promptHeaders) canvas_.Line(navW_ - 0.5f, 0.0f, navW_ - 0.5f, ClientH(), pal_.divider, 1.0f);
     for (auto& n : nav_) n->Draw(canvas_, pal_);
     if (!navStatus_.empty()) {
         const float y = h - 40.0f;
         const D2D1_COLOR_F dot = navActive_ ? pal_.success.icon : pal_.strong;
-        if (compact_) {
+        if (pal_.promptHeaders) {
+            const std::wstring prompt = compact_ ? L">" : L"C:\\MoonSR> ";
+            const float pw = gfx_.MeasureWidth(prompt, Font::Caption);
+            canvas_.Text(prompt, Rect{compact_ ? 0.0f : 12.0f, y, navW_, y + 40.0f}, Font::Caption, pal_.textSecondary,
+                         compact_ ? HAlign::Center : HAlign::Left);
+            if (!compact_)
+                canvas_.Text(navStatus_, Rect{12.0f + pw, y, navW_ - 8.0f, y + 40.0f}, Font::Caption, navActive_ ? pal_.accent : pal_.text);
+        } else if (compact_) {
             canvas_.FillCircle(navW_ * 0.5f, y + 20.0f, 4.0f, dot);
         } else {
             canvas_.FillCircle(24.0f, y + 20.0f, 4.0f, dot);
@@ -209,7 +233,16 @@ void View::DrawNav(float, float h) {
 }
 
 void View::DrawHeader(float w) {
-    canvas_.Text(pages_[static_cast<size_t>(cur_)]->title(), Rect{contentLeft_, 14.0f, w - 16.0f, 62.0f}, Font::Title, pal_.text);
+    const std::wstring& title = pages_[static_cast<size_t>(cur_)]->title();
+    if (pal_.promptHeaders) {
+        // "> Title" followed by a block cursor.
+        const std::wstring t = L"> " + title;
+        canvas_.Text(t, Rect{contentLeft_, 14.0f, w - 16.0f, 62.0f}, Font::Title, pal_.accent);
+        const float tw = gfx_.MeasureWidth(t, Font::Title);
+        if (contentLeft_ + tw + 24.0f < w) canvas_.FillRect(Rect{contentLeft_ + tw + 6.0f, 22.0f, contentLeft_ + tw + 18.0f, 46.0f}, pal_.accent);
+        return;
+    }
+    canvas_.Text(title, Rect{contentLeft_, 14.0f, w - 16.0f, 62.0f}, Font::Title, pal_.text);
 }
 
 Rect View::ScrollThumb() const {
@@ -226,7 +259,7 @@ Rect View::ScrollThumb() const {
 void View::DrawScrollbar(float, float) {
     const Rect t = ScrollThumb();
     if (RW(t) <= 0.0f) return;
-    canvas_.FillRound(t, RW(t) * 0.5f, D2D1_COLOR_F{pal_.strong.r, pal_.strong.g, pal_.strong.b, pal_.strong.a * 0.8f});
+    canvas_.FillRound(t, pal_.retro ? 0.0f : RW(t) * 0.5f, D2D1_COLOR_F{pal_.strong.r, pal_.strong.g, pal_.strong.b, pal_.strong.a * 0.8f});
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -421,14 +454,17 @@ void View::FocusControl(Control* c, bool keyboard) {
         return;
     }
     if (focus_) {
-        focus_->focused = false;
-        focus_->focusVisible = false;
+        Control* old = focus_;
+        old->focused = false;
+        old->focusVisible = false;
+        old->OnFocusChanged(false, keyboard);
     }
     focus_ = c;
     if (c) {
         c->focused = true;
         c->focusVisible = keyboard;
         if (keyboard) ScrollIntoView(c);
+        c->OnFocusChanged(true, keyboard);
     }
     Invalidate();
 }
@@ -499,6 +535,15 @@ bool View::OnAltKey(UINT vk) {
         return true;
     }
     return false;
+}
+
+bool View::OnChar(wchar_t ch) {
+    if (dialog_ || popup_.IsOpen() || !focus_ || !focus_->enabled) return false;
+    return focus_->OnChar(ch);
+}
+
+void View::OnWindowFocusChanged(bool active) {
+    if (!active && focus_) focus_->OnFocusChanged(false, false);
 }
 
 bool View::OnKeyDown(UINT vk) {

@@ -346,8 +346,24 @@ struct Engine::Impl {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> fgOut;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> fgOutRtv;
     Size fgOutSize;
-    std::array<Pending, 8> pending{};
+    // Fixed mode needs up to kMaxFrameGenMultiplier entries; Auto needs (real frame time / slot) + 1, e.g. 37 for a
+    // 4 fps game at 144 fps (UpdatePeriod rejects frame times above 250 ms). 128 * 16 bytes, no allocation.
+    static constexpr uint32_t kMaxPending = 128;
+    std::array<Pending, kMaxPending> pending{};
     uint32_t pendingCount = 0, pendingIndex = 0;
+    // Auto mode (FrameGenMode::Auto): presents on a grid at the target rate, see AutoPhaseScheduler.
+    AutoPhaseScheduler autoSched;
+    std::array<AutoSlot, kMaxPending> autoSlots{};
+    int64_t autoOriginQpc = 0;      // origin of the scheduler's millisecond clock
+    bool autoMode = false;          // the current request is Auto
+    uint32_t autoRequestedFps = 0;
+    double autoTargetFps = 0.0;     // target after caps
+    int autoLimitReason = 0;        // 0 none, 1 display refresh (V-Sync on), 2 GPU cannot keep up
+    bool autoEngaged = false;       // the target is above the game's frame rate: frames are being generated
+    double autoGpuCapFps = 0.0;     // 0 = none; lowered while presents run late
+    uint32_t autoSlotsWin = 0, autoSkippedWin = 0; // generated slots / skipped ones in the stats window
+    AutoLoadController autoLoad;
+    bool pendingAuto = false;       // the schedule in `pending` is an Auto schedule
     double pendingSlotMs = 0.0;
     int64_t pendingRealArrivalQpc = 0;
     int64_t lastRealQpc = 0;
@@ -630,7 +646,67 @@ struct Engine::Impl {
         fgFailStreak = 0;
         fgHasHistory = false;
         scheduledMultiplier = 1;
+        ResetAuto();
         if (scale) scale->ResetSourceCache();
+    }
+
+    void ResetAuto() {
+        autoSched.Reset();
+        autoEngaged = false;
+        autoGpuCapFps = 0.0;
+        autoSlotsWin = autoSkippedWin = 0;
+        autoLoad.Reset();
+        pendingAuto = false;
+    }
+
+    double AutoMs(int64_t qpc) const { return QpcToMs(qpc - autoOriginQpc); }
+    int64_t AutoQpc(double ms) const {
+        return autoOriginQpc + static_cast<int64_t>(ms * static_cast<double>(QpcFrequency()) / 1000.0);
+    }
+
+    // Auto: the presented rate to aim for after caps, and whether frames are generated at all. Once per real frame.
+    bool DecideAuto(bool vsync) {
+        double target = static_cast<double>(autoRequestedFps);
+        autoLimitReason = 0;
+        // With V-Sync on every present waits for a refresh: never aim above the refresh rate. With V-Sync off frames
+        // are presented at the requested rate even above it (owner's decision); only the GPU limits it.
+        if (vsync && outputRefreshHz > 1.0 && target > outputRefreshHz) {
+            target = outputRefreshHz;
+            autoLimitReason = 1;
+        }
+        if (autoGpuCapFps > 0.0 && autoGpuCapFps < target) {
+            target = autoGpuCapFps;
+            autoLimitReason = 2;
+        }
+        if (autoTargetFps > 0.0 && std::abs(target - autoTargetFps) > target * 0.005) autoSched.Reset(); // new grid
+        autoTargetFps = target;
+        const double gameFps = rateFps > 0.0 ? rateFps : (periodMs > 0.0 ? 1000.0 / periodMs : 0.0);
+        if (gameFps <= 0.0) {
+            autoEngaged = false;
+        } else {
+            // Hysteresis so that a target close to the game's rate does not switch generation on and off.
+            const double ratio = target / gameFps;
+            autoEngaged = autoEngaged ? ratio > 1.03 : ratio > 1.08;
+        }
+        return autoEngaged;
+    }
+
+    // Auto: lowers the target while presents keep running late (the GPU cannot generate that many frames) and tries
+    // the full target again after a quiet stretch. Called once per stats window.
+    void EvaluateAutoLoad(double gameFps) {
+        if (autoMode && autoEngaged) {
+            bool changed = false;
+            const double before = autoGpuCapFps;
+            autoGpuCapFps = autoLoad.Evaluate(autoSlotsWin, autoSkippedWin, autoTargetFps, gameFps, autoRequestedFps,
+                                              autoGpuCapFps, changed);
+            if (changed) {
+                if (autoGpuCapFps > 0.0 && (before == 0.0 || autoGpuCapFps < before))
+                    MSR_LOG_WARN(L"Frame generation (Auto): {} of {} generated frames skipped at {:.0f} fps; aiming for {:.0f} fps",
+                                 autoSkippedWin, autoSlotsWin, autoTargetFps, autoGpuCapFps);
+                autoSched.Reset();
+            }
+        }
+        autoSlotsWin = autoSkippedWin = 0;
     }
 
     // Updates the smoothed real frame time from a new capture frame. Returns true if this frame fits the current
@@ -697,11 +773,15 @@ struct Engine::Impl {
             overrunCount = overrunTotal = 0;
         }
 
-        // Only the display's refresh rate limits the multiplier. Cost never does.
+        // Only the display's refresh rate limits the multiplier, and only with V-Sync on (with V-Sync off frames are
+        // presented above the refresh rate; owner's decision). Cost never does.
         const uint32_t target = fgRequested;
         uint32_t m = std::clamp<uint32_t>(fgEffective, 1, target);
         bool waitingToRaise = false;
-        if (periodSlowMs > 0.0 && outputRefreshHz > 1.0) {
+        if (!vsync) {
+            m = target;
+            raiseStreak = 0;
+        } else if (periodSlowMs > 0.0 && outputRefreshHz > 1.0) {
             const double fps = 1000.0 / periodSlowMs;
             // With V-Sync every present waits for a refresh, so there is almost no headroom above the refresh rate.
             const double keep = vsync ? 1.02 : 1.05;
@@ -1001,6 +1081,7 @@ struct Engine::Impl {
         int64_t windowStart = QpcNow();
         uint32_t windowCaptured = 0, windowPresented = 0, windowGenerated = 0;
         uint32_t windowReal = 0, windowRealWithGen = 0; // real frames seen while generation is requested / given generated frames
+        uint32_t windowAcquired = 0; // real frames taken from capture (frameGenRatio = presented / acquired)
         int64_t lastStatsLogQpc = QpcNow();
         uint32_t activeMultiplier = 1;
         double latencyAvg = 0.0, cpuAvg = 0.0;
@@ -1061,9 +1142,23 @@ struct Engine::Impl {
 
             // The generator's lifetime follows the REQUESTED multiplier. The effective multiplier is decided once
             // per real frame, when it is scheduled.
-            const uint32_t requested = std::clamp<uint32_t>(fgCfg.multiplier, 1, 6);
+            // Fixed: `requested` is the multiplier (1 = off). Auto: the target rate drives the schedule and
+            // `requested` stays 1; `fgWanted` says whether frame generation is on in either mode.
+            const bool wantAuto = fgCfg.mode == FrameGenMode::Auto;
+            const uint32_t requested = wantAuto ? 1u : std::clamp<uint32_t>(fgCfg.multiplier, 1, kMaxFrameGenMultiplier);
+            const uint32_t requestedFps = wantAuto ? std::min<uint32_t>(fgCfg.targetFps, 1000) : 0u;
+            const bool fgWanted = requested > 1 || requestedFps > 0;
+            if (wantAuto != autoMode || requestedFps != autoRequestedFps) {
+                // A new Auto request starts a new grid once the presents still owed have been shown.
+                if (pendingIndex >= pendingCount) {
+                    autoMode = wantAuto;
+                    autoRequestedFps = requestedFps;
+                    ResetAuto();
+                }
+            }
             FrameGenSettings runtimeFgSettings = fgCfg.settings;
-            runtimeFgSettings.preciseMotion = runtimeFgSettings.preciseMotion || requested >= 3;
+            // Auto synthesises arbitrary phases, typically several per real frame: refine subpixel motion as for >= 3X.
+            runtimeFgSettings.preciseMotion = runtimeFgSettings.preciseMotion || requested >= 3 || requestedFps > 0;
             if (requested != fgRequested) {
                 fgRequested = requested;
                 fgEffective = StartingFrameMultiplier(requested, fgEffective);
@@ -1076,15 +1171,15 @@ struct Engine::Impl {
             alsrSettings.sharpness = settings.sharpness;
             // Frame generation on another GPU: the generator moves when it starts or stops generating frames (see
             // CreateGenerator), once the presents still owed have been shown.
-            if (fg && fgDevice && fgIsRemote != (requested > 1) && pendingIndex >= pendingCount) ResetFrameGen();
-            if ((requested > 1 || wantAlsr) && !fg && !fgCreateFailed) {
+            if (fg && fgDevice && fgIsRemote != (fgWanted) && pendingIndex >= pendingCount) ResetFrameGen();
+            if ((fgWanted || wantAlsr) && !fg && !fgCreateFailed) {
                 std::wstring fgError;
-                fg = CreateGenerator(requested > 1, fgError);
+                fg = CreateGenerator(fgWanted, fgError);
                 if (!fg) {
                     fgCreateFailed = true;
                     MSR_LOG_ERROR(L"Frame generation unavailable: {}", fgError);
                 }
-            } else if (requested <= 1 && !wantAlsr && fg && pendingIndex >= pendingCount) {
+            } else if (!fgWanted && !wantAlsr && fg && pendingIndex >= pendingCount) {
                 // Only once the presents still owed have been shown, so the last real frame is not lost.
                 ResetFrameGen();
             }
@@ -1169,8 +1264,14 @@ struct Engine::Impl {
                 const Pending p = pending[pendingIndex++];
                 const double activeCatchup = catchupSlots >= 0.0 ? catchupSlots :
                     (fgRunningLate ? 1.5 : 0.0);
-                if (activeCatchup > 0.0 &&
-                    ShouldSkipStaleGenerated(vsync, p.real, pendingSlotMs, QpcToMs(QpcNow() - p.dueQpc), activeCatchup)) {
+                // Auto: a late generated frame is presented late, not dropped (owner's request). It is omitted only
+                // when the slot after the next one is already due as well, i.e. presentation is more than one slot
+                // behind and would otherwise never catch up. Real frames are never omitted.
+                const bool autoStale = pendingAuto && !p.real && pendingIndex + 1 < pendingCount &&
+                                       QpcNow() > pending[pendingIndex + 1].dueQpc;
+                if (autoStale || (!pendingAuto && activeCatchup > 0.0 &&
+                    ShouldSkipStaleGenerated(vsync, p.real, pendingSlotMs, QpcToMs(QpcNow() - p.dueQpc), activeCatchup))) {
+                    if (pendingAuto) { ++autoSlotsWin; ++autoSkippedWin; }
                     std::lock_guard lock(mutex);
                     ++stats.generatedSkipped;
                     continue;
@@ -1266,7 +1367,8 @@ struct Engine::Impl {
                     pendingSlotMs > 0.0 && QpcToMs(late) > pendingSlotMs * 0.5) {
                     // VSync already spaces presents by at least one refresh. Shifting the next slot by the full
                     // capture delay as well can force an extra refresh between every pair and throttle the output.
-                    if (!vsync)
+                    // Auto keeps its grid (the scheduler places the next real frame's slots on it).
+                    if (!vsync && !pendingAuto)
                         for (uint32_t i = pendingIndex; i < pendingCount; ++i) pending[i].dueQpc += late;
                     if (!p.real) {
                         std::lock_guard lock(mutex);
@@ -1276,6 +1378,9 @@ struct Engine::Impl {
                 // Submit each frame at its scheduled time. Subtracting a whole refresh caused generated and
                 // real frames to be submitted back-to-back on 60 -> 120 FPS / 144 Hz, despite a correct FPS count.
                 WaitUntil(p.dueQpc);
+                if (pendingAuto && !p.real) {
+                    ++autoSlotsWin; // presented, possibly late: late presents do not count as GPU overload
+                }
                 recInfo.kind = p.real ? RecordedKind::Real : RecordedKind::Generated;
                 recInfo.phase = p.t;
                 recInfo.dueQpc = p.dueQpc;
@@ -1405,7 +1510,9 @@ struct Engine::Impl {
                 }
                 // Real frame time estimate; maintained with and without generation.
                 const bool stable = UpdatePeriod(frame);
-                const uint32_t effective = fg ? DecideMultiplier(vsync) : 1;
+                ++windowAcquired;
+                // Auto uses effective = 2 to mean "generating" (the per-frame count follows from the schedule).
+                const uint32_t effective = !fg ? 1u : autoMode ? (DecideAuto(vsync) ? 2u : 1u) : DecideMultiplier(vsync);
                 activeMultiplier = effective;
                 const bool willGenerate = fg && effective > 1;
                 bool capturePreScaled = false;
@@ -1551,8 +1658,42 @@ struct Engine::Impl {
                         pendingRealArrivalQpc = frame.captureQpc;
                         pendingBaseQpc = frame.captureQpc;
                         pendingStable = stable;
+                        pendingAuto = false;
                         windowReal++;
-                        if (validSchedule) {
+                        uint32_t autoCount = 0;
+                        if (autoMode) {
+                            if (autoOriginQpc == 0) autoOriginQpc = frame.captureQpc;
+                            uint32_t missed = 0;
+                            const double slotMs = 1000.0 / autoTargetFps;
+                            autoCount = autoSched.OnRealFrame(AutoMs(frame.captureQpc), AutoMs(QpcNow()),
+                                                              validSchedule, periodMs, slotMs, vsync ? scheduleDelayMs : 0.0,
+                                                              autoSlots.data(), kMaxPending, missed);
+                            if (missed) {
+                                autoSlotsWin += missed;
+                                autoSkippedWin += missed;
+                                std::lock_guard lock(mutex);
+                                stats.generatedSkipped += missed;
+                            }
+                            if (autoCount > 0) {
+                                bool anyGenerated = false;
+                                for (uint32_t k = 0; k < autoCount; ++k) {
+                                    pending[pendingCount++] = {AutoQpc(autoSlots[k].displayMs), autoSlots[k].t, autoSlots[k].real};
+                                    anyGenerated = anyGenerated || !autoSlots[k].real;
+                                }
+                                if (anyGenerated) windowRealWithGen++;
+                                pendingAuto = true;
+                                scheduledMultiplier = 1; // the Fixed overrun accounting does not apply
+                                pendingSlotMs = slotMs;
+                            }
+                        }
+                        if (autoMode) {
+                            if (autoCount == 0) {
+                                // First frame, hitch, pause, resync: show the real frame immediately.
+                                scheduledMultiplier = 1;
+                                pendingSlotMs = 0.0;
+                                pending[pendingCount++] = {base, 1.0f, true};
+                            }
+                        } else if (validSchedule) {
                             windowRealWithGen++;
                             scheduledMultiplier = effective;
                             pendingSlotMs = periodMs / effective;
@@ -1653,9 +1794,23 @@ struct Engine::Impl {
                 stats.capturedFps = windowCaptured * 1000.0 / elapsed;
                 stats.presentedFps = windowPresented * 1000.0 / elapsed;
                 stats.generatedFps = windowGenerated * 1000.0 / elapsed;
-                stats.frameGenMultiplier = activeMultiplier;
-                stats.frameGenLimited = fg && activeMultiplier < fgRequested;
-                stats.frameGenDelayMs = scheduledMultiplier > 1 ? pendingSlotMs * (scheduledMultiplier - 1) : 0.0;
+                const double gameFpsNow = rateFps > 0.0 ? rateFps : periodSlowMs > 0.0 ? 1000.0 / periodSlowMs : stats.capturedFps;
+                EvaluateAutoLoad(gameFpsNow);
+                stats.frameGenMode = autoMode ? FrameGenMode::Auto : FrameGenMode::Fixed;
+                stats.frameGenRatio = windowAcquired ? static_cast<double>(windowPresented) / windowAcquired : 1.0;
+                if (autoMode) {
+                    const bool autoOn = fg && autoRequestedFps > 0;
+                    stats.frameGenTargetFps = autoOn ? autoTargetFps : 0.0;
+                    stats.frameGenMultiplier = autoOn && autoEngaged
+                        ? std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(stats.frameGenRatio))) : 1;
+                    stats.frameGenLimited = autoOn && autoLimitReason != 0;
+                    stats.frameGenDelayMs = autoOn && autoEngaged ? autoSched.HoldBackMs() : 0.0;
+                } else {
+                    stats.frameGenTargetFps = 0.0;
+                    stats.frameGenMultiplier = activeMultiplier;
+                    stats.frameGenLimited = fg && activeMultiplier < fgRequested;
+                    stats.frameGenDelayMs = scheduledMultiplier > 1 ? pendingSlotMs * (scheduledMultiplier - 1) : 0.0;
+                }
                 stats.latencyMs = latencyAvg;
                 overlayRendered = static_cast<uint32_t>(stats.capturedFps + 0.5);
                 overlayTotal = static_cast<uint32_t>(stats.presentedFps + 0.5);
@@ -1678,7 +1833,7 @@ struct Engine::Impl {
                 {
                     std::wstring text;
                     PipelineOrder actual = order;
-                    if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && requested > 1) {
+                    if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && fgWanted) {
                         auto scalePos = std::find(actual.stages.begin(), actual.stages.end(), PipelineStage::Upscaling);
                         actual.stages.erase(scalePos);
                         actual.stages.push_back(PipelineStage::Upscaling);
@@ -1693,7 +1848,7 @@ struct Engine::Impl {
                     }
                     stats.pipelineOrderText = text.empty() ? L"(no processing: frames shown as captured)" : text;
                     stats.pipelineOrderNote.clear();
-                    if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && requested > 1) {
+                    if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && fgWanted) {
                         if (!stats.pipelineOrderNote.empty()) stats.pipelineOrderNote += L" ";
                         stats.pipelineOrderNote += L"Upscaling could not run before frame generation; using frame generation first.";
                     } else if (upscaleFirst && settings.enabled && activeMultiplier > 1) {
@@ -1708,7 +1863,35 @@ struct Engine::Impl {
                     stats.alsrNote = L"MoonSR could not start on this GPU (see the log). Lanczos-3 is used instead.";
                 stats.frameGenCoverage = windowReal ? static_cast<double>(windowRealWithGen) / windowReal : 0.0;
                 stats.frameGenNote.clear();
-                if (fgRequested > 1) {
+                if (autoMode && autoRequestedFps > 0) {
+                    const double gameFps = gameFpsNow;
+                    std::wstring capNote;
+                    if (autoLimitReason == 1 || (autoGpuCapFps > 0.0 && vsync && outputRefreshHz > 1.0 &&
+                                                 autoRequestedFps > outputRefreshHz))
+                        capNote = std::format(L"Target {} fps is above the display's {:.0f} Hz with V-Sync on; presenting at "
+                                              L"{:.0f} fps.", autoRequestedFps, outputRefreshHz,
+                                              std::min<double>(autoRequestedFps, outputRefreshHz));
+                    std::wstring note;
+                    if (!fg) {
+                        note = L"Frame generation is unavailable on this GPU or failed to start (see the log).";
+                    } else if (gameFps <= 0.0) {
+                        note = L"Measuring the game frame rate before generating frames.";
+                    } else if (autoLimitReason == 2) {
+                        note = std::format(L"The GPU cannot generate frames fast enough for {:.0f} fps; aiming for {:.0f} fps "
+                                           L"(about {:.0f} fps presented). Lower the target, quality or resolution.",
+                                           std::min<double>(autoRequestedFps, vsync && outputRefreshHz > 1.0 ? outputRefreshHz : 1e9),
+                                           autoTargetFps, stats.presentedFps);
+                    } else if (!autoEngaged) {
+                        note = std::format(L"The game already runs at {:.0f} fps, at or above the {:.0f} fps target: real "
+                                           L"frames are shown as they arrive and none are generated.", gameFps, autoTargetFps);
+                    } else if (windowReal >= 5 && stats.frameGenCoverage < 0.7) {
+                        note = std::format(
+                            L"Frame generation is active on only {:.0f}% of frames: the game's frame times are irregular. "
+                            L"A steady frame cap in the game helps.", stats.frameGenCoverage * 100.0);
+                    }
+                    stats.frameGenNote = capNote;
+                    if (!note.empty()) stats.frameGenNote += (capNote.empty() ? L"" : L" ") + note;
+                } else if (fgRequested > 1) {
                     const double gameFps = periodSlowMs > 0.0 ? 1000.0 / periodSlowMs : stats.capturedFps;
                     if (!fg) {
                         stats.frameGenNote = L"Frame generation is unavailable on this GPU or failed to start (see the log).";
@@ -1717,7 +1900,7 @@ struct Engine::Impl {
                     } else if (activeMultiplier < fgRequested && fgLimitReason == 1) {
                         stats.frameGenNote = std::format(
                             L"Frame generation limited to {}X: the game runs at {:.0f} fps and {}X would exceed the {:.0f} Hz "
-                            L"display. Cap the game at {:.0f} fps or lower to get {}X.",
+                            L"display with V-Sync on. Cap the game at {:.0f} fps or lower, or turn V-Sync off, to get {}X.",
                             activeMultiplier, gameFps, fgRequested, outputRefreshHz, outputRefreshHz / fgRequested, fgRequested);
                     } else if (activeMultiplier < fgRequested && GetModuleHandleW(L"RTSSHooks64.dll")) {
                         // RivaTuner Statistics Server injects into every Direct3D process. A frame limit set in
@@ -1727,7 +1910,15 @@ struct Engine::Impl {
                             L"caps MoonSR's output. In RTSS click Add, choose MoonSR.exe and set 'Application detection "
                             L"level' to None - or set the limit in the game's own RTSS profile instead of Global.",
                             activeMultiplier);
-                    } else if (fgRunningLate) {
+                    } else if (!vsync && fg && windowReal >= 5 && stats.frameGenCoverage >= 0.7 &&
+                               stats.presentedFps < 0.9 * gameFps * activeMultiplier) {
+                        // V-Sync off: nothing but throughput limits the presented rate.
+                        stats.frameGenNote = std::format(
+                            L"{}X would present {:.0f} fps, but the GPU delivers about {:.0f} fps. Lower the multiplier, "
+                            L"quality or resolution.", activeMultiplier, gameFps * activeMultiplier, stats.presentedFps);
+                    } else if (fgRunningLate && vsync) {
+                        // With V-Sync off the measured rate above is the honest signal: real frames shown a little
+                        // after one frame time at high multipliers are not a problem while the full rate is delivered.
                         stats.frameGenNote = std::format(
                             L"{}X presentation is falling behind the capture pace. Processing, display synchronization "
                             L"or other system load may contribute. Try lower quality or resolution if the output stutters.",
@@ -1742,15 +1933,17 @@ struct Engine::Impl {
                     lastStatsLogQpc = QpcNow();
                     MSR_LOG_INFO(L"Stats: in {}x{} captured {:.1f} fps, displayed {:.1f} fps, generated {:.1f} fps, FG requested x{} "
                                  L"effective x{} (limit reason {}, coverage {:.0f}%, frame time {:.2f} ms fast / {:.2f} ms slow, "
-                                 L"refresh {:.1f} Hz), latency {:.2f} ms, late {}, dropped {}{}{}",
+                                 L"refresh {:.1f} Hz, auto target {:.1f} ratio {:.2f}), latency {:.2f} ms, late {}, dropped {}{}{}",
                                  stats.inputSize.width, stats.inputSize.height, stats.capturedFps, stats.presentedFps,
                                  stats.generatedFps, fgRequested, activeMultiplier, fgLimitReason, stats.frameGenCoverage * 100.0,
-                                 periodMs, periodSlowMs, outputRefreshHz, stats.latencyMs, stats.generatedLate,
+                                 periodMs, periodSlowMs, outputRefreshHz, stats.frameGenTargetFps, stats.frameGenRatio,
+                                 stats.latencyMs, stats.generatedLate,
                                  stats.framesDropped, stats.frameGenNote.empty() ? L"" : L" | ", stats.frameGenNote);
                 }
                 windowStart = QpcNow();
                 windowCaptured = windowPresented = windowGenerated = 0;
                 windowReal = windowRealWithGen = 0;
+                windowAcquired = 0;
             }
         }
     }

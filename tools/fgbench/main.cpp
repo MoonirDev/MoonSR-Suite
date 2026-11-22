@@ -317,6 +317,124 @@ int SelfTest(Runner* gpu) {
           !moonsr::ShouldSkipStaleGenerated(true, false, 7.0, 10.5, 1.5) &&
           !moonsr::ShouldSkipStaleGenerated(true, false, 7.0, 100.0, 0.0),
           "catch-up skips only stale generated V-Sync frames");
+    check(moonsr::kMaxFrameGenMultiplier == 20 && moonsr::StartingFrameMultiplier(20, 1) == 2 &&
+          moonsr::StartingFrameMultiplier(20, 7) == 7, "Fixed multipliers up to 20X");
+    {
+        // Auto scheduler: a simulated game at `gameFps` whose arrivals are quantised to a 144 Hz compositor
+        // (or exact), presented at `targetFps`.
+        struct AutoResult {
+            double ratio = 0, minInterval = 1e9, maxInterval = 0, realShare = 0;
+            bool phasesOk = true, causal = true, locked = false;
+            double earlyShare = 0;
+            double holdBackMs = 0;
+            int lockChanges = 0, firstLockFrame = -1;
+        };
+        auto simulate = [](double gameFps, double targetFps, bool quantise) {
+            moonsr::AutoPhaseScheduler sched;
+            std::array<moonsr::AutoSlot, 128> out{};
+            AutoResult r;
+            const double period = 1000.0 / gameFps, slot = 1000.0 / targetFps, tick = 1000.0 / 144.0;
+            double lastDisplay = -1.0;
+            uint32_t slots = 0, reals = 0, frames = 0;
+            for (int i = 0; i < 1200; ++i) {
+                const double exact = 100.3 + i * period; // off the compositor ticks: no rounding ties
+                const double arrival = quantise ? std::ceil(exact / tick) * tick : exact;
+                uint32_t skipped = 0;
+                const uint32_t n = sched.OnRealFrame(arrival, arrival + 0.3, i > 0, period, slot, 1.0, out.data(),
+                                                     static_cast<uint32_t>(out.size()), skipped);
+                if (sched.Locked() != r.locked) {
+                    r.locked = sched.Locked();
+                    if (i >= 300) ++r.lockChanges;
+                    if (r.locked && r.firstLockFrame < 0) r.firstLockFrame = i;
+                }
+                if (i < 300) { lastDisplay = n ? out[n - 1].displayMs : -1.0; continue; } // settle
+                ++frames;
+                for (uint32_t k = 0; k < n; ++k) {
+                    if (lastDisplay >= 0) {
+                        r.minInterval = std::min(r.minInterval, out[k].displayMs - lastDisplay);
+                        r.maxInterval = std::max(r.maxInterval, out[k].displayMs - lastDisplay);
+                    }
+                    lastDisplay = out[k].displayMs;
+                    if (out[k].displayMs < arrival) r.earlyShare += 1.0;
+                    if (out[k].real) ++reals;
+                    else if (!(out[k].t > 0.0f && out[k].t < 1.0f)) r.phasesOk = false;
+                    ++slots;
+                }
+                if (skipped) r.causal = false;
+            }
+            r.holdBackMs = sched.HoldBackMs();
+            r.ratio = static_cast<double>(slots) / frames;
+            r.earlyShare = slots ? r.earlyShare / slots : 0.0;
+            r.realShare = static_cast<double>(reals) / frames;
+            return r;
+        };
+        const auto steady = [](const AutoResult& r, double targetFps) {
+            const double slot = 1000.0 / targetFps;
+            return r.minInterval > slot * 0.97 && r.maxInterval < slot * 1.03;
+        };
+        const AutoResult a2 = simulate(60.0, 120.0, false);
+        check(std::abs(a2.ratio - 2.0) < 0.01 && a2.realShare > 0.99 && a2.phasesOk && a2.causal && steady(a2, 120.0) &&
+              a2.locked,
+              "Auto 60 -> 120 fps: 2 per real frame, every real frame shown, grid locked, steady (ratio " + Num(a2.ratio, 3) +
+              ", real " + Num(a2.realShare, 2) + ", interval " + Num(a2.minInterval, 2) + ".." + Num(a2.maxInterval, 2) +
+              " ms, hold-back " + Num(a2.holdBackMs, 2) + " ms)");
+        const AutoResult a2q = simulate(60.0, 120.0, true);
+        check(std::abs(a2q.ratio - 2.0) < 0.01 && a2q.realShare > 0.99 && a2q.phasesOk && a2q.causal && steady(a2q, 120.0) &&
+              a2q.locked, "Auto 60 -> 120 fps (144 Hz arrivals): locked, every real frame shown (real " +
+              Num(a2q.realShare, 2) + ", interval " + Num(a2q.minInterval, 2) + ".." + Num(a2q.maxInterval, 2) +
+              " ms, hold-back " + Num(a2q.holdBackMs, 2) + " ms, locked at frame " + std::to_string(a2q.firstLockFrame) +
+              ", lock changes " + std::to_string(a2q.lockChanges) + ")");
+        const AutoResult a3 = simulate(40.0, 120.0, true);
+        check(std::abs(a3.ratio - 3.0) < 0.02 && a3.phasesOk && a3.causal && steady(a3, 120.0),
+              "Auto 40 -> 120 fps (144 Hz arrivals): ratio 3 (" + Num(a3.ratio, 3) + ", interval " + Num(a3.minInterval, 2) +
+              ".." + Num(a3.maxInterval, 2) + " ms)");
+        const AutoResult a24 = simulate(50.0, 120.0, true);
+        check(std::abs(a24.ratio - 2.4) < 0.02 && a24.phasesOk && a24.causal && steady(a24, 120.0),
+              "Auto 50 -> 120 fps (144 Hz arrivals): fractional ratio 2.4 (" + Num(a24.ratio, 3) + ", real shown " +
+              Num(a24.realShare, 2) + ", interval " + Num(a24.minInterval, 2) + ".." + Num(a24.maxInterval, 2) +
+              " ms, hold-back " + Num(a24.holdBackMs, 2) + " ms)");
+        const AutoResult a15 = simulate(60.0, 90.0, true);
+        check(std::abs(a15.ratio - 1.5) < 0.02 && a15.phasesOk && a15.causal && steady(a15, 90.0),
+              "Auto 60 -> 90 fps (144 Hz arrivals): ratio 1.5 (" + Num(a15.ratio, 3) + ")");
+        const AutoResult a5 = simulate(60.0, 300.0, true);
+        check(std::abs(a5.ratio - 5.0) < 0.03 && a5.phasesOk && a5.causal && steady(a5, 300.0),
+              "Auto 60 -> 300 fps (144 Hz arrivals): ratio 5 (" + Num(a5.ratio, 3) + ", interval " + Num(a5.minInterval, 2) +
+              ".." + Num(a5.maxInterval, 2) + " ms, causal " + std::to_string(a5.causal) + ", locked at frame " +
+              std::to_string(a5.firstLockFrame) + ", lock changes " + std::to_string(a5.lockChanges) + ")");
+        // Low-latency hold-back (owner's choice): some slots may fall due before their real frame has arrived and are
+        // then shown late. Keep that occasional.
+        check(a2q.earlyShare < 0.1 && a3.earlyShare < 0.2 && a24.earlyShare < 0.2 && a15.earlyShare < 0.2 && a5.earlyShare < 0.2,
+              "Auto: slots due before their real frame arrived (shown late): 60->120 " + Num(a2q.earlyShare * 100, 1) +
+              "%, 40->120 " + Num(a3.earlyShare * 100, 1) + "%, 50->120 " + Num(a24.earlyShare * 100, 1) + "%, 60->90 " +
+              Num(a15.earlyShare * 100, 1) + "%, 60->300 " + Num(a5.earlyShare * 100, 1) + "%; hold-back 60->120 " +
+              Num(a2q.holdBackMs, 2) + " ms, 50->120 " + Num(a24.holdBackMs, 2) + " ms");
+        {
+            // GPU-limit controller: late presents are not counted, only skips. 30 windows of 240 presented slots
+            // (many of them late, which the caller does not even report) and no skips keep the full target;
+            // sustained skips lower it.
+            moonsr::AutoLoadController lc;
+            double cap = 0.0;
+            bool changed = false, everChanged = false;
+            for (int w = 0; w < 30; ++w) {
+                cap = lc.Evaluate(240, 0, 120.0, 60.0, 120.0, cap, changed);
+                everChanged = everChanged || changed;
+            }
+            const bool routineOk = cap == 0.0 && !everChanged;
+            lc.Reset();
+            double cap2 = 0.0;
+            for (int w = 0; w < 2; ++w) cap2 = lc.Evaluate(240, 60, 120.0, 60.0, 120.0, cap2, changed);
+            check(routineOk && cap2 > 60.0 && cap2 < 120.0,
+                  "Auto GPU limit: routine late presents keep the target; sustained skips lower it (to " + Num(cap2, 1) + " fps)");
+        }
+        moonsr::AutoPhaseScheduler s;
+        std::array<moonsr::AutoSlot, 8> o{};
+        uint32_t sk = 0;
+        s.OnRealFrame(0.0, 0.0, false, 16.7, 8.3, 1.0, o.data(), 8, sk);
+        const uint32_t n1 = s.OnRealFrame(16.7, 16.7, true, 16.7, 8.3, 1.0, o.data(), 8, sk);
+        const uint32_t n2 = s.OnRealFrame(150.0, 150.0, false, 16.7, 8.3, 1.0, o.data(), 8, sk); // pause
+        const uint32_t n3 = s.OnRealFrame(166.7, 166.7, true, 16.7, 8.3, 1.0, o.data(), 8, sk);
+        check(n1 == 1 && o[0].real && n2 == 0 && n3 == 1, "Auto: first pair anchors on the real frame; a pause shows the frame at once and re-anchors");
+    }
     const Image n1 = NoiseImage(320, 180, 5);
     const Quality qi = Compare(n1, n1, 0, nullptr);
     check(std::isinf(qi.psnr) && std::abs(qi.ssim - 1.0) < 1e-9, "identical images: PSNR inf, SSIM 1");

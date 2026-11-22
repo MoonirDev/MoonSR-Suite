@@ -47,6 +47,8 @@ public:
     virtual bool OnAltKey(UINT vk) { (void)vk; return false; }  // Alt+arrow while focused; true = consumed
     virtual bool OnEscape() { return false; }                   // Esc cancels a drag in progress; true = consumed
     virtual void OnHoverMove(float x, float y) { (void)x; (void)y; }  // mouse moved over the control (no button down)
+    virtual bool OnChar(wchar_t ch) { (void)ch; return false; }        // typed character (text entry); true = consumed
+    virtual void OnFocusChanged(bool gained, bool byKeyboard) { (void)gained; (void)byKeyboard; }
 
     void SetEnabled(bool e);
     void SetVisible(bool v);
@@ -59,6 +61,7 @@ protected:
 class ToggleSwitch : public Control {
 public:
     bool checked() const { return checked_; }
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
     void SetChecked(bool v, bool animate = false);
     void Draw(Canvas& c, const Palette& p) override;
     void OnRelease(float x, float y, bool inside) override;
@@ -76,6 +79,8 @@ public:
     std::wstring text;
     bool accent = false;
     float height = metric::kControlHeight;
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
+    float RetroPreferredWidth(const Gfx& g) const;
     float PreferredHeight() const override { return height; }
     void SetText(const std::wstring& t);
     void Draw(Canvas& c, const Palette& p) override;
@@ -111,6 +116,7 @@ public:
     long long ItemData(int index) const;
     const std::vector<Item>& items() const { return items_; }
     void SetOpen(bool o) { open_ = o; Invalidate(); }
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
 
     void Draw(Canvas& c, const Palette& p) override;
     void OnRelease(float x, float y, bool inside) override;
@@ -130,6 +136,7 @@ public:
     void Setup(int minV, int maxV, int step, const wchar_t* suffix);
     // Optional fixed-point label; values and steps remain integers.
     void SetDisplayDivisor(int divisor) { displayDivisor_ = divisor > 1 ? divisor : 1; }
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
     int value() const { return value_; }
     void SetValue(int v, bool notify = false);
     void Draw(Canvas& c, const Palette& p) override;
@@ -146,12 +153,50 @@ private:
     std::wstring suffix_;
 };
 
+// Single-line integer entry. Digits, Backspace / Delete, Left / Right / Home / End (Shift extends the selection), Ctrl+A / C /
+// X / V (pasted text is reduced to its digits), Up / Down step by one. The value is committed on Enter and when focus
+// leaves; out-of-range input is clamped and flagged (clamped()), empty input reverts. Threading: UI thread only.
+class NumberBox : public Control {
+public:
+    void Setup(int minV, int maxV, const wchar_t* suffix);
+    int value() const { return value_; }
+    void SetValue(int v, bool notify = false);
+    bool clamped() const { return clamped_; }  // the last commit clamped the typed number (cleared by the next edit)
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
+    int lastTyped() const { return typed_; }
+    const std::wstring& text() const { return text_; }
+
+    void Draw(Canvas& c, const Palette& p) override;
+    void OnPress(float x, float y) override;
+    void OnDrag(float x, float y) override;
+    bool OnKey(UINT vk) override;
+    bool OnChar(wchar_t ch) override;
+    void OnFocusChanged(bool gained, bool byKeyboard) override;
+    void Activate() override { Commit(true); }
+    bool UsesEnter() const override { return true; }
+    float PreferredWidth(const Gfx&) const override { return 160.0f; }
+
+private:
+    void Commit(bool notify);
+    void Replace(const std::wstring& s);  // replaces the selection
+    int CaretFromX(float x) const;
+    float XOf(int index) const;
+    bool HasSelection() const { return caret_ != anchor_; }
+    int min_ = 0, max_ = 100, value_ = 0, typed_ = 0;
+    std::wstring suffix_, text_ = L"0";
+    int caret_ = 0, anchor_ = 0;
+    bool clamped_ = false;
+    const Gfx* gfx_ = nullptr;  // for text measurement while handling mouse input
+};
+
 class InfoBar : public Control {
 public:
     enum class Severity { Info, Success, Warning, Error };
     InfoBar() { focusable = false; interactive = false; }
     void Set(Severity s, const std::wstring& message);
     const std::wstring& message() const { return message_; }
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
+    float RetroMeasure(const Gfx& g, float width) const;
     float Measure(const Gfx& g, float width) const;
     void Draw(Canvas& c, const Palette& p) override;
 
@@ -166,6 +211,7 @@ public:
     Tile() { focusable = false; interactive = false; }
     std::wstring label;
     void SetValue(const std::wstring& value, const std::wstring& note = L"");
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
     void Draw(Canvas& c, const Palette& p) override;
 
 private:
@@ -257,6 +303,8 @@ private:
 class HeroBanner : public Control {
 public:
     HeroBanner() { focusable = false; interactive = false; }
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
+    static float RetroHeight();
     void Draw(Canvas& c, const Palette& p) override;
     float HeightForWidth(const Gfx& g, float width) const override;
 
@@ -271,11 +319,48 @@ public:
     bool selected = false;
     bool compact = false;
     int index = 0;
+    void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
     void Draw(Canvas& c, const Palette& p) override;
     void OnRelease(float x, float y, bool inside) override;
     void Activate() override;
     bool OnKey(UINT vk) override;
     bool UsesEnter() const override { return true; }
+};
+
+// Theme picker: one card per theme (included and imported) with a live miniature drawn from that theme's own palette (nav, a
+// card with a toggle and a slider), the selected one marked. Click or Up / Down selects and fires onChange. Imported themes
+// show a Remove action (onRemove; Delete key too); included ones have none. Threading: UI thread only.
+class ThemePicker : public Control {
+public:
+    struct Card {
+        std::wstring key, name, desc;
+        bool builtin = true;
+        Palette palette;
+    };
+    std::function<void(const std::wstring&)> onRemove;
+    void SetCards(std::vector<Card> cards);  // relayouts
+    const std::wstring& selectedKey() const { return sel_; }
+    void SetSelected(const std::wstring& key);  // no notification
+    void Draw(Canvas& c, const Palette& p) override;
+    void OnPress(float x, float y) override;
+    void OnRelease(float x, float y, bool inside) override;
+    void OnHoverMove(float x, float y) override;
+    bool OnKey(UINT vk) override;
+    void Activate() override;
+    float PreferredHeight() const override { return 340.0f; }
+    float HeightForWidth(const Gfx& g, float width) const override;
+
+private:
+    Rect CardRect(int i) const;
+    Rect RemoveRect(int i) const;
+    int CardAt(float x, float y) const;
+    int SelectedIndex() const;
+    void Select(int i, bool notify);
+    static void DrawMiniature(Canvas& c, const Rect& r, const Palette& pal);
+    std::vector<Card> cards_;
+    std::wstring sel_ = L"dark";
+    int hoverCard_ = -1, pressCard_ = -1;
+    bool hoverRemove_ = false, pressRemove_ = false;
 };
 
 }  // namespace moonsr::app::ui

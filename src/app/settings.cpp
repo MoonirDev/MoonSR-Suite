@@ -99,6 +99,8 @@ AppSettings LoadSettings() {
     s.vsync = ReadInt(path, L"Scaling", L"VSync", 0) != 0;
     s.showCursor = ReadInt(path, L"Scaling", L"ShowCursor", 1) != 0;
     s.closeToTray = ReadInt(path, L"App", L"CloseToTray", 0) != 0;
+    s.theme = ReadString(path, L"App", L"Theme");
+    if (s.theme.empty()) s.theme = L"dark";
     s.showFrameCounter = ReadInt(path, L"Scaling", L"ShowFrameCounter", 0) != 0;
     s.neuralRendering = ReadInt(path, L"Neural", L"Enabled", 0) != 0;
     s.neuralModelId = ReadString(path, L"Neural", L"ModelId");
@@ -133,9 +135,13 @@ AppSettings LoadSettings() {
     s.windowY = ReadSignedInt(path, L"Window", L"Y", 0);
     s.windowWidth = std::clamp(ReadSignedInt(path, L"Window", L"Width", 0), 0, 10000);
     s.windowHeight = std::clamp(ReadSignedInt(path, L"Window", L"Height", 0), 0, 10000);
-    s.frameGenMultiplier = std::clamp(ReadSignedInt(path, L"FrameGen", L"Multiplier", 1), 1, 6);
+    // Older files: Multiplier 1 = off, 2..6 = on (no Enabled / Mode / TargetFps keys); they map over unchanged.
+    s.frameGenMultiplier = std::clamp(ReadSignedInt(path, L"FrameGen", L"Multiplier", 1), 1, 20);
     s.frameGenLastMultiplier =
-        std::clamp(ReadSignedInt(path, L"FrameGen", L"LastMultiplier", s.frameGenMultiplier > 1 ? s.frameGenMultiplier : 2), 2, 6);
+        std::clamp(ReadSignedInt(path, L"FrameGen", L"LastMultiplier", s.frameGenMultiplier > 1 ? s.frameGenMultiplier : 2), 2, 20);
+    s.frameGenEnabled = ReadSignedInt(path, L"FrameGen", L"Enabled", s.frameGenMultiplier > 1 ? 1 : 0) != 0;
+    s.frameGenMode = std::clamp(ReadSignedInt(path, L"FrameGen", L"Mode", 0), 0, 1);
+    s.frameGenTargetFps = std::clamp(ReadSignedInt(path, L"FrameGen", L"TargetFps", 120), 30, 1000);
     const int flow = std::clamp(ReadSignedInt(path, L"FrameGen", L"FlowScalePercent", 50), 25, 100);
     s.frameGenFlowPercent = std::clamp(((flow + 2) / 5) * 5, 25, 100);
     s.frameGenHudProtection = ReadSignedInt(path, L"FrameGen", L"HudProtection", 1) != 0;
@@ -167,8 +173,12 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Scaling", L"VSync", s.vsync ? 1 : 0);
     ok &= WriteInt(path, L"Scaling", L"ShowCursor", s.showCursor ? 1 : 0);
     ok &= WriteInt(path, L"App", L"CloseToTray", s.closeToTray ? 1 : 0);
+    ok &= WriteString(path, L"App", L"Theme", s.theme);
     ok &= WriteInt(path, L"Scaling", L"ShowFrameCounter", s.showFrameCounter ? 1 : 0);
+    ok &= WriteInt(path, L"FrameGen", L"Enabled", s.frameGenEnabled ? 1 : 0);
+    ok &= WriteInt(path, L"FrameGen", L"Mode", s.frameGenMode);
     ok &= WriteInt(path, L"FrameGen", L"Multiplier", s.frameGenMultiplier);
+    ok &= WriteInt(path, L"FrameGen", L"TargetFps", s.frameGenTargetFps);
     ok &= WriteInt(path, L"FrameGen", L"LastMultiplier", s.frameGenLastMultiplier);
     ok &= WriteInt(path, L"FrameGen", L"FlowScalePercent", s.frameGenFlowPercent);
     ok &= WriteInt(path, L"FrameGen", L"HudProtection", s.frameGenHudProtection ? 1 : 0);

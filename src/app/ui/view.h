@@ -29,7 +29,7 @@ public:
     void Attach(HWND hwnd, UINT dpi);
     Page* AddPage(const std::wstring& title, wchar_t navIcon, const std::wstring& navLabel);
 
-    void SetTheme(bool dark);
+    void SetTheme(const Palette& palette);
     void SetDpi(UINT dpi);
     void SetMica(bool on);
     const Palette& palette() const { return pal_; }
@@ -47,6 +47,8 @@ public:
     void OnMouseLeave();
     void OnMouseWheel(int delta, int px, int py);
     bool OnKeyDown(UINT vk);
+    bool OnChar(wchar_t ch);                 // WM_CHAR: forwarded to the focused text entry control
+    void OnWindowFocusChanged(bool active);  // text entry commits when the window loses the keyboard
     void OnAnimTimer();
     void OnWindowDeactivated();
     bool WantsHandCursor() const { return dialog_ ? dialog_->WantsHand() : (hover_ && hover_->IsLink()); }

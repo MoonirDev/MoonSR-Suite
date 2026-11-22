@@ -17,6 +17,7 @@ Status: Phase 2 (functional foundation). Sections marked *planned* describe agre
 | A9 | Processing in gamma-encoded SDR for now | Matches what the capture delivers; HDR/linear path is planned work |
 | A10 | Custom algorithms are clean-room. Third-party code only after a recorded licence check | See `RESEARCH.md` licence table |
 | A11 | Multi-frame generation computes every intermediate frame from the original pair; never recursive | Avoids accumulated error (*planned*, Phase 4-5) |
+| A12 | Auto frame generation: presents on a steady grid at 1/target; each generated slot is computed at its true phase between the two real frames; V-Sync-only refresh cap. Latency is preferred over even pacing: the hold-back uses a 75th-percentile arrival-lateness margin, late generated frames are presented late (not skipped), a slot is skipped only when presentation is more than one slot behind, real frames are never skipped | Owner's choice (2026-11-22): lower latency over perfectly even pacing. Implemented as `AutoPhaseScheduler` in `src/engine/frame_pacing.h`. Fixed mode keeps the integer-multiplier scheduler. Measured figures and known limits: BENCHMARKS.md "Frame generation Fixed/Auto modes (2026-11-22)" |
 
 ## 2. Modules
 

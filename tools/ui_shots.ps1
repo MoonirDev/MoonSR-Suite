@@ -2,11 +2,12 @@
 # screen (DWM frame bounds, including the title bar) and closes it. The test options never change the persisted settings.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\ui_shots.ps1 [-BuildDir build\main] [-OutDir <dir>]
-#                [-Pages home,upscaling,loadorder] [-Themes dark,light] [-Dpi 0] [-Size 1120,740] [-NoMica]
+#                [-Pages home,upscaling,loadorder,framegen] [-Extra "--test-fg-mode auto --test-fg-target 144"] [-Tag _auto]
+#                [-Keys ...] [-Themes dark,light] [-Dpi 0] [-Size 1120,740] [-NoMica]
 # The window is placed at (40,20) by the test mode, so keep other windows away from that area while it runs.
 param([string]$BuildDir = "build\main", [string]$OutDir = "", [string[]]$Pages = @("home", "upscaling", "loadorder"),
       [string[]]$Themes = @("dark", "light"), [int]$Dpi = 0, [string]$Size = "1120,740", [switch]$NoMica,
-      [string]$Keys = "")
+      [string]$Keys = "", [string]$Extra = "", [string]$Tag = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "$BuildDir\bin\MoonSR.exe"
@@ -31,6 +32,7 @@ foreach ($theme in $Themes) {
         if ($Dpi -gt 0) { $a += " --test-dpi $Dpi" }
         if ($NoMica) { $a += " --test-no-mica" }
         if ($Keys) { $a += " --test-keys $Keys" }
+        if ($Extra) { $a += " $Extra" }
         $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru
         try {
             $h = [IntPtr]::Zero
@@ -45,7 +47,7 @@ foreach ($theme in $Themes) {
             $g = [System.Drawing.Graphics]::FromImage($bm)
             $g.CopyFromScreen($r.L, $r.T, 0, 0, (New-Object System.Drawing.Size $w, $hh))
             $g.Dispose()
-            $file = Join-Path $OutDir ("{0}_{1}.png" -f $page, $theme)
+            $file = Join-Path $OutDir ("{0}{1}_{2}.png" -f $page, $Tag, $theme)
             $bm.Save($file, [System.Drawing.Imaging.ImageFormat]::Png); $bm.Dispose()
             "$file ($w x $hh)"
         } finally { if (-not $p.HasExited) { $p.Kill() } }

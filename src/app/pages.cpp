@@ -7,7 +7,7 @@ namespace {
 constexpr wchar_t kIconHome = 0xE80F;
 constexpr wchar_t kIconUpscale = 0xE740;
 constexpr wchar_t kIconFrames = 0xE786;
-constexpr wchar_t kIconDiag = 0xE9D9;
+constexpr wchar_t kIconDiag = 0xE713;  // Settings gear
 constexpr wchar_t kIconWindow = 0xE8A7;
 constexpr wchar_t kIconForeground = 0xE73F;
 constexpr wchar_t kIconPlay = 0xE768;
@@ -75,7 +75,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.start->height = 40.0f;
         u.message = p->Make<ui::InfoBar>();
         u.diagnosticsLink = p->Make<ui::LinkButton>();
-        u.diagnosticsLink->text = L"Open Diagnostics";
+        u.diagnosticsLink->text = L"Open Settings";
 
         p->AddFree(p->Make<ui::HeroBanner>(), -1.0f, -1.0f);
 
@@ -168,11 +168,19 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.vsync = p->Make<ToggleSwitch>();
         u.counter = p->Make<ToggleSwitch>();
         u.frameGen = p->Make<ToggleSwitch>();
-        u.fgMultiplier = p->Make<ComboBox>();
+        u.fgMode = p->Make<ComboBox>();
+        u.fgMultiplier = p->Make<Slider>();
+        u.fgMultiplier->Setup(2, 20, 1, L"x");
+        u.fgTarget = p->Make<ui::NumberBox>();
+        u.fgTarget->Setup(30, 1000, L"fps");
+        u.fgTarget->SetValue(120);
+        u.fgTargetHelp = p->Make<ui::InfoBar>();
+        u.fgMode->AddItem(L"Fixed", 0);
+        u.fgMode->AddItem(L"Auto (target frame rate)", 1);
+        u.fgMode->SetSelected(0);
         u.fgFlow = p->Make<Slider>();
         u.fgFlow->Setup(25, 100, 5, L"%");
         u.fgHud = p->Make<ToggleSwitch>();
-        for (int m = 2; m <= 6; ++m) u.fgMultiplier->AddItem(std::to_wstring(m) + L"X", m);
         ui::InfoBar* note = p->Make<ui::InfoBar>();
         note->Set(ui::InfoBar::Severity::Info,
                   L"Generated frames make motion look smoother. They add latency and do not make the game more responsive.");
@@ -180,10 +188,16 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Card& c = p->AddCard();
         p->AddRow(c, kIconFrames, L"Frame generation", L"Inserts generated frames between the game's real frames",
                   {{u.frameGen, kToggleW}});
-        p->AddRow(c, kIconMult, L"Multiplier", L"Displayed frames per real frame", {{u.fgMultiplier, 160.0f}});
+        p->AddRow(c, kIconFrames, L"Mode", L"Fixed uses a set multiplier. Auto aims for a frame rate you choose",
+                  {{u.fgMode, 200.0f}});
+        u.fgMultiplierRow = &p->AddRow(c, kIconMult, L"Multiplier", L"Displayed frames per real frame",
+                                       {{u.fgMultiplier, 300.0f}});
+        u.fgTargetRow = &p->AddRow(c, kIconMult, L"Target frame rate", L"Displayed frames per second to aim for",
+                                   {{u.fgTarget, 160.0f}});
         p->AddRow(c, kIconFlow, L"Flow scale", L"Resolution of the motion analysis", {{u.fgFlow, 300.0f}});
         p->AddRow(c, kIconShield, L"Protect HUD and static overlays", L"Keeps fixed on-screen elements from warping",
                   {{u.fgHud, kToggleW}});
+        p->AddInfo(u.fgTargetHelp);
         p->AddInfo(note);
         p->AddSection(L"Presentation");
         ui::Card& presentation = p->AddCard();
@@ -364,9 +378,9 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddFree(u.addonsEmpty, -1.0f, -1.0f);
     }
 
-    // ---------------------------------------------------------------- Diagnostics
+    // ---------------------------------------------------------------- Settings (formerly Diagnostics)
     {
-        ui::Page* p = view.AddPage(L"Diagnostics", kIconDiag, L"Diagnostics");
+        ui::Page* p = view.AddPage(L"Settings", kIconDiag, L"Settings");
         u.record = p->Make<ui::Button>();
         u.record->text = L"Record 120 frames for diagnostics";
         u.openRecordings = p->Make<ui::Button>();
@@ -389,6 +403,20 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Card& app = p->AddCard();
         p->AddRow(app, kIconWindow, L"Close to system tray",
                   L"Closing the window keeps MoonSR running in the notification area.", {{u.closeToTray, kToggleW}});
+
+        p->AddSection(L"Themes");
+        u.themePicker = p->Make<ui::ThemePicker>();
+        u.themeMsg = p->Make<ui::InfoBar>();
+        u.themeMsg->visible = false;
+        u.importTheme = p->Make<ui::Button>();
+        u.importTheme->text = L"Import theme...";
+        u.exportTheme = p->Make<ui::Button>();
+        u.exportTheme->text = L"Export current theme";
+        p->AddFree(u.themePicker, -1.0f, -1.0f);
+        p->AddInfo(u.themeMsg);
+        ui::Card& thm = p->AddCard();
+        p->AddRow(thm, kIconFolder, L"Import a theme", L"Adds a .moontheme file; imported themes appear above.", {{u.importTheme, 0.0f}});
+        p->AddRow(thm, kIconSharp, L"Export the current theme", L"Saves a .moontheme template to start your own from.", {{u.exportTheme, 0.0f}});
 
         p->AddSection(L"Recording");
         ui::Card& rec = p->AddCard();

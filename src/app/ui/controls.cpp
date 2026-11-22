@@ -40,6 +40,10 @@ void Control::SetVisible(bool v) {
 
 void Control::DrawFocus(Canvas& c, const Palette& p, const Rect& r, float radius, float outset) const {
     if (!focused || !focusVisible) return;
+    if (p.retro) {
+        c.DashedRect(Inflate(r, outset > 2.0f ? 2.0f : outset), p.focus, 1.0f);
+        return;
+    }
     c.StrokeRound(Inflate(r, outset), radius + outset, p.focus, 2.0f);
 }
 
@@ -79,6 +83,10 @@ bool ToggleSwitch::Tick(float dt) {
 }
 
 void ToggleSwitch::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const float cy = (bounds.top + bounds.bottom) * 0.5f;
     const Rect sw{bounds.right - 40.0f, cy - 10.0f, bounds.right, cy + 10.0f};
     const std::wstring label = checked_ ? L"On" : L"Off";
@@ -108,9 +116,16 @@ void Button::SetText(const std::wstring& t) {
     Invalidate();
 }
 
-float Button::PreferredWidth(const Gfx& g) const { return std::max(88.0f, g.MeasureWidth(text, Font::Body) + 36.0f); }
+float Button::PreferredWidth(const Gfx& g) const {
+    if (g.retro()) return RetroPreferredWidth(g);
+    return std::max(88.0f, g.MeasureWidth(text, Font::Body) + 36.0f);
+}
 
 void Button::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     D2D1_COLOR_F fill, textColor;
     if (accent) {
         fill = !enabled ? p.accentDisabled : pressed ? p.accentPressed : hover ? p.accentHover : p.accent;
@@ -218,6 +233,10 @@ bool ComboBox::OnKey(UINT vk) {
 }
 
 void ComboBox::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const D2D1_COLOR_F fill = !enabled ? p.ctrlDisabled : (pressed || open_) ? p.ctrlPressed : hover ? p.ctrlHover : p.ctrlFill;
     c.FillRound(bounds, metric::kControlRadius, fill);
     c.StrokeRound(bounds, metric::kControlRadius, p.ctrlStroke);
@@ -286,6 +305,10 @@ bool Slider::OnKey(UINT vk) {
 }
 
 void Slider::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const float cy = (bounds.top + bounds.bottom) * 0.5f;
     const float l = TrackLeft(), r = TrackRight();
     const float t = max_ > min_ ? static_cast<float>(value_ - min_) / static_cast<float>(max_ - min_) : 0.0f;
@@ -317,11 +340,16 @@ void InfoBar::Set(Severity s, const std::wstring& message) {
 }
 
 float InfoBar::Measure(const Gfx& g, float width) const {
+    if (g.retro()) return RetroMeasure(g, width);
     const float textH = g.MeasureHeight(message_, Font::Body, width - 16.0f - 20.0f - 16.0f - 16.0f);
     return std::max(48.0f, textH + 24.0f);
 }
 
 void InfoBar::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const InfoColors& col = severity_ == Severity::Success   ? p.success
                             : severity_ == Severity::Warning ? p.warning
                             : severity_ == Severity::Error   ? p.error
@@ -351,6 +379,10 @@ void Tile::SetValue(const std::wstring& value, const std::wstring& note) {
 }
 
 void Tile::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     c.FillRound(bounds, metric::kCardRadius, p.cardFill);
     c.StrokeRound(bounds, metric::kCardRadius, p.cardStroke);
     const float x = bounds.left + 16.0f;
@@ -399,9 +431,13 @@ void TextLabel::Draw(Canvas& c, const Palette& p) {
 
 float HeroBanner::ScaleFor(float width) { return std::clamp(width / 600.0f, 0.62f, 1.0f); }
 
-float HeroBanner::HeightForWidth(const Gfx&, float width) const { return 176.0f * ScaleFor(width); }
+float HeroBanner::HeightForWidth(const Gfx& g, float width) const { return g.retro() ? RetroHeight() : 176.0f * ScaleFor(width); }
 
 void HeroBanner::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const float w = RW(bounds), h = RH(bounds), s = ScaleFor(w);
     const float radius = 16.0f;
     // Brand navy gradient (the same in both themes), diagonal like the mockup.
@@ -450,6 +486,10 @@ bool NavItem::OnKey(UINT vk) {
 }
 
 void NavItem::Draw(Canvas& c, const Palette& p) {
+    if (p.retro) {
+        DrawRetro(c, p);
+        return;
+    }
     const D2D1_COLOR_F fill = selected ? (pressed ? p.subtlePressed : p.subtleSelected)
                               : pressed ? p.subtlePressed
                               : hover   ? p.subtleHover

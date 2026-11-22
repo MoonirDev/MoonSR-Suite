@@ -1,6 +1,10 @@
 // MoonSR application entry point: single instance, log setup, common controls, message loop.
 #include "main_window.h"
 #include "settings.h"
+#include "ui/theme_file.h"
+
+#include <cstdio>
+#include <string>
 
 #include "core/log.h"
 
@@ -31,6 +35,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         ActivateExistingInstance();
         CloseHandle(mutex);
         return 0;
+    }
+
+    if (!test.themeSelfTest.empty()) {
+        // Parser / catalog tests: scratch folder under %TEMP%, report written to the given file, exit code = failed checks.
+        wchar_t tmp[MAX_PATH] = {};
+        const DWORD n = GetTempPathW(MAX_PATH, tmp);
+        const std::wstring scratch = (n > 0 && n < MAX_PATH ? std::wstring(tmp) : std::wstring(L".\\")) + L"MoonSR-theme-selftest";
+        std::wstring report;
+        const int failed = moonsr::app::ui::RunThemeSelfTest(scratch, report);
+        report += failed == 0 ? L"\nALL CHECKS PASSED\n" : L"\nFAILED CHECKS: " + std::to_wstring(failed) + L"\n";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, test.themeSelfTest.c_str(), L"wb") == 0 && f) {
+            const unsigned char bom[2] = {0xFF, 0xFE};
+            fwrite(bom, 1, 2, f);
+            fwrite(report.data(), sizeof(wchar_t), report.size(), f);
+            fclose(f);
+        }
+        return failed == 0 ? 0 : 1;
     }
 
     const std::wstring dir = moonsr::app::AppDataDirectory();

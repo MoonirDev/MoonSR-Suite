@@ -97,7 +97,7 @@ bool DropdownPopup::Open(HWND owner, const std::vector<std::wstring>& items, int
         MSR_LOG_ERROR(L"Dropdown window creation failed ({})", GetLastError());
         return false;
     }
-    const DWORD round = 2;  // DWMWCP_ROUND
+    const DWORD round = pal_.radius == 0.0f ? 1 : 2;  // DWMWCP_DONOTROUND for square themes, else DWMWCP_ROUND
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &round, sizeof(round));
     scroll_ = 0.0f;
     ScrollTo(selected_ >= 0 ? selected_ : 0);
@@ -260,12 +260,14 @@ void DropdownPopup::Paint() {
         const float top = kPad + static_cast<float>(i) * kItemHeight - scroll_;
         if (top + kItemHeight < 0 || top > heightDip_) continue;
         const Rect r{kPad, top + 1.0f, widthDip_ - kPad - (MaxScroll() > 0 ? 6.0f : 0.0f), top + kItemHeight - 1.0f};
-        if (i == hover_) canvas_.FillRound(r, 4.0f, i == selected_ ? pal_.subtleSelected : pal_.subtleHover);
+        const bool inv = pal_.retro && (i == hover_ || i == selected_);  // console look: inverted current item
+        if (inv) canvas_.FillRect(r, pal_.accent);
+        else if (i == hover_) canvas_.FillRound(r, 4.0f, i == selected_ ? pal_.subtleSelected : pal_.subtleHover);
         else if (i == selected_) canvas_.FillRound(r, 4.0f, pal_.subtleHover);
-        if (i == selected_) canvas_.FillRound(Rect{r.left, (r.top + r.bottom) * 0.5f - 8.0f, r.left + 3.0f, (r.top + r.bottom) * 0.5f + 8.0f},
+        if (i == selected_ && !pal_.retro) canvas_.FillRound(Rect{r.left, (r.top + r.bottom) * 0.5f - 8.0f, r.left + 3.0f, (r.top + r.bottom) * 0.5f + 8.0f},
                                               1.5f, pal_.accent);
         canvas_.Text(items_[static_cast<size_t>(i)], Rect{r.left + 12.0f, r.top, r.right - 8.0f, r.bottom}, Font::Body,
-                     pal_.text, HAlign::Left);
+                     inv ? pal_.textOnAccent : pal_.text, HAlign::Left);
     }
     canvas_.PopClip();
     if (MaxScroll() > 0.0f) {

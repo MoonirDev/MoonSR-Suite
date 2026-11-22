@@ -1029,3 +1029,54 @@ about long-run learning; learning is not part of the baseline above and the lear
   present), and see the timing caveat above. Quality runs score one frame at a time with a blocking readback.
 - Learning is off in the baseline; the learned-filter path was measured only for 64 frames.
 - No reference third-party upscaler (DLSS, FSR, XeSS) was measured: not measurable on captures, see the reference table above.
+
+## Frame generation Fixed/Auto modes (2026-11-22)
+
+Owner session 7. Figures are from the lead's verification run, as recorded in the session brief. Not verified here:
+the raw output files, the exact command lines and the application commit (the working tree was uncommitted).
+
+**Setup.**
+- Machine: as in "Test machine". Output: RTX 5060 on the 1920x1080 @ 144 Hz display.
+- Source: `moonsr_testpattern --motion-pattern 1` at 60 fps (test pattern resolution not recorded in the brief).
+- Run length: 8 s per run. Values are averages of seconds 3 to 8 (the first seconds are excluded).
+- V-Sync off unless the row says `--vsync`.
+- Frame generation flags: `--fg 2`, `--fg 20`, `--fg 20 --vsync`, `--fg-auto 120`, `--fg-auto 300`,
+  `--fg-auto 300 --vsync`, and `--scaler moonsr --fg-auto 144` (the last one with the MoonSR scaler).
+- "Interval" is the presented frame interval (median / p95, ms). "Ratio" is the value printed by the CLI Summary line.
+  "Late" and "skipped" are the counts from the same run. Displayed fps is presented frames per second; it is not game
+  fps and not responsiveness.
+
+**Results.**
+
+| Run | Displayed fps | Ratio | Interval median / p95 (ms) | Late | Skipped |
+|---|---|---|---|---|---|
+| `--fg 2` | 119.7 | 2.01 | 8.10 / 12.98 | not recorded | 0 |
+| `--fg 20` | 1201.1 | 19.93 | 0.83 / 0.86 | not recorded | 0 |
+| `--fg 20 --vsync` | 119.9 (limited to 2X, note shown) | not recorded | 8.32 / 12.72 | not recorded | not recorded |
+| `--fg-auto 120` | 117.4 | 1.97 | 8.33 / 8.95 | 7 | 0 |
+| `--fg-auto 300` | 286.5 | 4.82 | 3.33 / 4.15 | 50 | 2 |
+| `--fg-auto 300 --vsync` (target capped to 144) | 137.4 | not recorded | 6.94 / 9.18 | 24 | 0 |
+| `--scaler moonsr --fg-auto 144` | 141.0 | 2.35 | 6.94 / 8.07 | 35 | 0 |
+
+"Not recorded" means the value is not in the session brief; it is not an estimate.
+
+**Latency** (arrival-to-present, MoonSR's own processing; excludes game render, DWM and display scan-out). From the
+frame-generation agent's runs, same setup per the brief; the command lines for these runs are not recorded here.
+
+| Mode | Latency |
+|---|---|
+| Fixed 2x | 8.4 ms |
+| Auto 90 | 14.6 ms |
+| Auto 120 | about 10.7 ms |
+| Auto 144 | 15.8 ms |
+| Auto 300 | 16.0 ms |
+| 40 fps input, Auto 120 | 22.5 ms |
+
+**Reading the results.**
+- Auto presents a few percent below target (117.4 of 120; 286.5 of 300).
+- Auto at fractional ratios (for example 1.97 and 4.82) keeps the 14-17 ms latency band; Fixed 2x is lower. The Auto
+  mode accepts this to keep the grid steady (ARCHITECTURE.md A12).
+- With V-Sync on, the target is capped to the refresh rate (144 Hz here).
+- The GPU-limit controller (skipping above 10% of generated slots in two windows) did not trigger on this machine. Its
+  lowering path was exercised only in the fgbench simulation.
+- Limits: one GPU, one display, one test pattern at 60 fps, one 8 s length per row. No real game, no other GPU.

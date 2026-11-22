@@ -1,4 +1,4 @@
-// The MoonSR pages (Home, Upscaling, Frame generation, Neural rendering, Load order, Diagnostics) and the handles to their controls.
+// The MoonSR pages (Home, Upscaling, Frame generation, Neural rendering, Load order, Settings) and the handles to their controls.
 // Pages only build the visual structure; MainWindow wires behaviour (change handlers, engine calls) to the handles.
 // Threading: UI thread only.
 #pragma once
@@ -9,7 +9,7 @@
 
 namespace moonsr::app {
 
-enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageLoadOrder, PageDiagnostics };
+enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageLoadOrder, PageSettings };
 
 struct AppUi {
     // Home
@@ -29,14 +29,18 @@ struct AppUi {
     ui::ComboBox *scaler = nullptr, *fit = nullptr;
     ui::Slider* sharpness = nullptr;
     ui::ToggleSwitch *vsync = nullptr, *cursor = nullptr, *counter = nullptr;
-    ui::ToggleSwitch* closeToTray = nullptr;  // Diagnostics page, "Application" section
+    ui::ToggleSwitch* closeToTray = nullptr;  // Settings page, "Application" section
     // MoonSR temporal upscaler (Upscaling page; shown while the scaler is MoonSR)
     ui::InfoBar *alsrInfo = nullptr, *alsrNote = nullptr;
     ui::Slider* alsrHistory = nullptr;
     ui::Row* alsrHistoryRow = nullptr;
     // Frame generation
     ui::ToggleSwitch *frameGen = nullptr, *fgHud = nullptr;
-    ui::ComboBox* fgMultiplier = nullptr;
+    ui::ComboBox* fgMode = nullptr;      // Fixed / Auto
+    ui::Slider* fgMultiplier = nullptr;  // Fixed: 2x..20x
+    ui::NumberBox* fgTarget = nullptr;   // Auto: desired frames per second
+    ui::InfoBar* fgTargetHelp = nullptr; // Auto: help line + display refresh hint
+    ui::Row *fgMultiplierRow = nullptr, *fgTargetRow = nullptr;
     ui::Slider* fgFlow = nullptr;
     // Neural rendering
     static constexpr int kModelRows = 8;  // installed models shown (newest first)
@@ -69,7 +73,11 @@ struct AppUi {
     ui::InfoBar *gpuHelp = nullptr, *gpuNote = nullptr;  // "GPU choices apply when scaling starts" while running
     ui::Button* orderReset = nullptr;
     ui::TextBlock *orderExplain = nullptr, *addonsEmpty = nullptr;
-    // Diagnostics
+    // Settings: Themes section
+    ui::ThemePicker* themePicker = nullptr;
+    ui::Button *importTheme = nullptr, *exportTheme = nullptr;
+    ui::InfoBar* themeMsg = nullptr;
+    // Settings: recording, hotkeys
     ui::Button *record = nullptr, *openRecordings = nullptr, *openLog = nullptr;
     ui::InfoBar* hotkeyNote = nullptr;
     ui::Row *hotkeyToggleRow = nullptr, *hotkeyRecordRow = nullptr;

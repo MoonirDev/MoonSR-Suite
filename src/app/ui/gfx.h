@@ -35,6 +35,13 @@ public:
     ID2D1StrokeStyle* roundStroke() const { return roundStroke_.Get(); }
     bool hasIcons() const { return icons_; }
     bool hasFluentIcons() const { return fluentIcons_; }
+    // Theme style. `font`: family override (used when installed; empty = the theme's default family). `retro`: console look
+    // (monospace fallback chain, smaller sizes, no icon glyphs). `radiusCap`: maximum corner radius in DIPs (< 0 = none).
+    // `borderWidth`: width of 1 px borders in DIPs. Rebuilds the text formats when needed (callers re-layout afterwards).
+    void SetStyle(const std::wstring& font, bool retro, float radiusCap, float borderWidth);
+    bool retro() const { return retro_; }
+    float radiusCap() const { return radiusCap_; }
+    float borderWidth() const { return borderWidth_; }
     // A text format in the display family (Segoe UI Variable Display when installed) at an arbitrary size, for the brand
     // wordmark and tag line.
     Microsoft::WRL::ComPtr<IDWriteTextFormat> MakeDisplayFormat(float size, DWRITE_FONT_WEIGHT weight) const;
@@ -47,6 +54,10 @@ public:
 
 private:
     void BuildLogoGeometry();
+    bool BuildFormats();
+    bool retro_ = false;
+    std::wstring font_;
+    float radiusCap_ = -1.0f, borderWidth_ = 1.0f;
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dw_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> fmt_[static_cast<size_t>(Font::Count)];
@@ -77,6 +88,17 @@ public:
     void StrokeRound(const Rect& r, float radius, const D2D1_COLOR_F& c, float width = 1.0f);
     void FillCircle(float cx, float cy, float radius, const D2D1_COLOR_F& c);
     void StrokeCircle(float cx, float cy, float radius, const D2D1_COLOR_F& c, float width = 1.0f);
+    // Dashed outline inside `r` (keyboard focus ring in the console theme).
+    void DashedRect(const Rect& r, const D2D1_COLOR_F& c, float width = 1.0f);
+    // Corner radius cap (< 0 = none; 0 = square, aliased geometry) and 1 px border width. Follows the Gfx style at Begin();
+    // the theme picker flips it temporarily to draw a miniature of another theme.
+    void SetStyle(float radiusCap, float borderWidth) {
+        radiusCap_ = radiusCap;
+        borderW_ = borderWidth;
+        if (rt_) rt_->SetAntialiasMode(radiusCap == 0.0f ? D2D1_ANTIALIAS_MODE_ALIASED : D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    }
+    float radiusCap() const { return radiusCap_; }
+    float borderW() const { return borderW_; }
     void Line(float x1, float y1, float x2, float y2, const D2D1_COLOR_F& c, float width = 1.0f);
     void Chevron(float cx, float cy, float halfWidth, const D2D1_COLOR_F& c, bool up = false);
     void Check(float cx, float cy, float size, const D2D1_COLOR_F& c);
@@ -106,6 +128,8 @@ private:
     Gfx& gfx_;
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> rt_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> dashStroke_;
+    float radiusCap_ = -1.0f, borderW_ = 1.0f;
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
     bool alpha_ = false;

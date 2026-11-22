@@ -1,6 +1,6 @@
 # MoonSR Suite — Known Issues
 
-Updated: 2026-11-13
+Updated: 2026-11-22 (Session 7 sections appended at the end; older sections unchanged)
 
 ## Frame generation (iteration 1)
 - Nobody has looked at live generated frames yet: the output window is excluded from capture, so live image
@@ -164,3 +164,29 @@ Still open:
 - The taskbar is hidden by Windows itself while the game is foreground (observed shell behaviour, not guaranteed).
 - Not tested: elevated games, a real game.
 - Close to system tray: a scripted test passed. A real mouse click on the icon and an Explorer restart were not tested.
+
+## Frame generation Fixed/Auto modes (2026-11-22)
+- Auto presents a few percent below its target: 117.4 of 120 fps (`--fg-auto 120`), 286.5 of 300 (`--fg-auto 300`).
+  Source: BENCHMARKS.md, "Frame generation Fixed/Auto modes (2026-11-22)".
+- Auto latency with fractional ratios stays at about 14-17 ms (Auto 144: 15.8 ms; Auto 300: 16.0 ms; Auto 90: 14.6 ms),
+  against 8.4 ms for Fixed 2x and about 10.7 ms for Auto 120. Figures are MoonSR arrival-to-present
+  from the frame-generation agent's runs; they exclude game render, DWM and display scan-out.
+- Auto needs about one second for the grid to lock. The first second runs at higher latency.
+- Auto GPU-limit controller (lowering the target when more than 10% of generated slots are skipped in two consecutive
+  windows): tested only in the fgbench simulation. Not triggered live on the RTX 5060, so the live lowering path is
+  unverified.
+- At 300 fps the note "active on only 68% of frames: irregular frame times" can appear on a steady test pattern. The
+  wording is misleading in that case; the cause is not diagnosed.
+- With V-Sync on, the Fixed-mode note suggests capping the game at very low frame rates (e.g. 7 fps) for 20X. The suggestion
+  has not been verified as useful advice and needs review.
+- `--fg-auto 300` on V-Sync-off shows 50 late and 2 skipped presents over the 8 s run; `--fg-auto 120` shows 7 late and 0
+  skipped. Late generated frames are presented late by design (not skipped).
+- With V-Sync on, Auto 300 is capped to the 144 Hz refresh (137.4 fps measured, 24 late). Live V-Sync toggling
+  re-evaluates the cap; no measurement of that is recorded in BENCHMARKS.md.
+- Only the RTX 5060 at 1920x1080 / 144 Hz was measured for these modes. No other GPU, no real game.
+
+## Settings page and themes (2026-11-22)
+- Retro theme: some long descriptions and the "Auto (target frame rate)" combo label are truncated with an ellipsis.
+- Saving the theme choice to `settings.ini`, and the import, export and remove dialogs for themes, were not clicked
+  through live. The theme logic is covered by a 36-check self-test (`--test-theme-selftest`) only.
+- The app no longer follows the Windows light/dark setting. The default theme is Windows 11 Dark.

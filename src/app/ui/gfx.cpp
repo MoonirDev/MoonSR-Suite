@@ -20,6 +20,80 @@ bool HasFamily(IDWriteFontCollection* coll, const wchar_t* name) {
 
 }  // namespace
 
+bool Gfx::BuildFormats() {
+    ComPtr<IDWriteFontCollection> sys;
+    dw_->GetSystemFontCollection(sys.GetAddressOf(), FALSE);
+    const wchar_t* text = HasFamily(sys.Get(), L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
+    const wchar_t* display =
+        HasFamily(sys.Get(), L"Segoe UI Variable Display") ? L"Segoe UI Variable Display" : L"Segoe UI";
+    const wchar_t* icon = nullptr;
+    fluentIcons_ = HasFamily(sys.Get(), L"Segoe Fluent Icons");
+    if (fluentIcons_) icon = L"Segoe Fluent Icons";
+    else if (HasFamily(sys.Get(), L"Segoe MDL2 Assets")) icon = L"Segoe MDL2 Assets";
+    icons_ = icon != nullptr;
+    if (retro_) {
+        // Console look: Cascadia Mono (Windows Terminal's font), then Consolas, then Courier New. No icon glyphs.
+        text = HasFamily(sys.Get(), L"Cascadia Mono") ? L"Cascadia Mono"
+               : HasFamily(sys.Get(), L"Consolas")    ? L"Consolas"
+                                                      : L"Courier New";
+        display = text;
+        icon = nullptr;
+        icons_ = false;
+        fluentIcons_ = false;
+    }
+    if (!font_.empty() && HasFamily(sys.Get(), font_.c_str())) {  // theme font override, only when installed
+        text = display = font_.c_str();
+    }
+    MSR_LOG_INFO(L"UI fonts: text '{}', display '{}', icons '{}'", text, display, icon ? icon : L"(none)");
+
+    struct Spec {
+        const wchar_t* family;
+        float size;
+        DWRITE_FONT_WEIGHT weight;
+    };
+    const bool r = retro_;
+    const DWRITE_FONT_WEIGHT strong = r ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_SEMI_BOLD;
+    const Spec specs[static_cast<size_t>(Font::Count)] = {
+        {text, r ? 13.0f : 14.0f, DWRITE_FONT_WEIGHT_NORMAL},      // Body
+        {text, r ? 13.0f : 14.0f, strong},                          // BodyStrong
+        {text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL},                  // Caption
+        {display, r ? 14.0f : 18.0f, strong},                       // Section
+        {display, r ? 24.0f : 28.0f, strong},                       // Title
+        {display, r ? 22.0f : 26.0f, strong},                       // Value
+        {display, r ? 15.0f : 18.0f, strong},                       // ValueSmall
+        {icon ? icon : text, 18.0f, DWRITE_FONT_WEIGHT_NORMAL},    // Icon
+        {icon ? icon : text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL},    // IconSmall
+        {text, r ? 14.0f : 16.0f, strong},                          // NavTitle
+        {text, 12.0f, DWRITE_FONT_WEIGHT_BOLD},                    // Glyph
+    };
+    for (size_t i = 0; i < static_cast<size_t>(Font::Count); ++i) {
+        fmt_[i].Reset();
+        ellipsis_[i].Reset();
+        const HRESULT hr = dw_->CreateTextFormat(specs[i].family, nullptr, specs[i].weight, DWRITE_FONT_STYLE_NORMAL,
+                                                 DWRITE_FONT_STRETCH_NORMAL, specs[i].size, L"en-us", fmt_[i].GetAddressOf());
+        if (FAILED(hr)) {
+            MSR_LOG_ERROR(L"CreateTextFormat failed (0x{:08X})", static_cast<unsigned>(hr));
+            return false;
+        }
+        fmt_[i]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (SUCCEEDED(dw_->CreateEllipsisTrimmingSign(fmt_[i].Get(), ellipsis_[i].GetAddressOf()))) {
+            const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            fmt_[i]->SetTrimming(&trim, ellipsis_[i].Get());
+        }
+    }
+    displayFamily_ = display;
+    return true;
+}
+
+void Gfx::SetStyle(const std::wstring& font, bool retro, float radiusCap, float borderWidth) {
+    radiusCap_ = radiusCap;
+    borderWidth_ = borderWidth;
+    if (retro_ == retro && font_ == font) return;
+    retro_ = retro;
+    font_ = font;
+    if (dw_) BuildFormats();
+}
+
 bool Gfx::Init() {
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d_.GetAddressOf());
     if (FAILED(hr)) {
@@ -33,54 +107,11 @@ bool Gfx::Init() {
         return false;
     }
 
-    ComPtr<IDWriteFontCollection> sys;
-    dw_->GetSystemFontCollection(sys.GetAddressOf(), FALSE);
-    const wchar_t* text = HasFamily(sys.Get(), L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
-    const wchar_t* display =
-        HasFamily(sys.Get(), L"Segoe UI Variable Display") ? L"Segoe UI Variable Display" : L"Segoe UI";
-    const wchar_t* icon = nullptr;
-    fluentIcons_ = HasFamily(sys.Get(), L"Segoe Fluent Icons");
-    if (fluentIcons_) icon = L"Segoe Fluent Icons";
-    else if (HasFamily(sys.Get(), L"Segoe MDL2 Assets")) icon = L"Segoe MDL2 Assets";
-    icons_ = icon != nullptr;
-    MSR_LOG_INFO(L"UI fonts: text '{}', display '{}', icons '{}'", text, display, icon ? icon : L"(none)");
-
-    struct Spec {
-        const wchar_t* family;
-        float size;
-        DWRITE_FONT_WEIGHT weight;
-    };
-    const Spec specs[static_cast<size_t>(Font::Count)] = {
-        {text, 14.0f, DWRITE_FONT_WEIGHT_NORMAL},          // Body
-        {text, 14.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},       // BodyStrong
-        {text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL},          // Caption
-        {display, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},    // Section
-        {display, 28.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},    // Title
-        {display, 26.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},    // Value
-        {display, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},    // ValueSmall
-        {icon ? icon : text, 18.0f, DWRITE_FONT_WEIGHT_NORMAL},  // Icon
-        {icon ? icon : text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL},  // IconSmall
-        {text, 16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},       // NavTitle
-        {text, 12.0f, DWRITE_FONT_WEIGHT_BOLD},            // Glyph
-    };
-    for (size_t i = 0; i < static_cast<size_t>(Font::Count); ++i) {
-        hr = dw_->CreateTextFormat(specs[i].family, nullptr, specs[i].weight, DWRITE_FONT_STYLE_NORMAL,
-                                   DWRITE_FONT_STRETCH_NORMAL, specs[i].size, L"en-us", fmt_[i].GetAddressOf());
-        if (FAILED(hr)) {
-            MSR_LOG_ERROR(L"CreateTextFormat failed (0x{:08X})", static_cast<unsigned>(hr));
-            return false;
-        }
-        fmt_[i]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        if (SUCCEEDED(dw_->CreateEllipsisTrimmingSign(fmt_[i].Get(), ellipsis_[i].GetAddressOf()))) {
-            const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-            fmt_[i]->SetTrimming(&trim, ellipsis_[i].Get());
-        }
-    }
+    if (!BuildFormats()) return false;
 
     const D2D1_STROKE_STYLE_PROPERTIES sp = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
                                                                          D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND);
     d2d_->CreateStrokeStyle(sp, nullptr, 0, roundStroke_.GetAddressOf());
-    displayFamily_ = display;
     BuildLogoGeometry();
     return true;
 }
@@ -198,6 +229,7 @@ bool Canvas::Begin(HWND hwnd, UINT dpi, bool alpha) {
         if (sz.width != w || sz.height != h) rt_->Resize(D2D1::SizeU(w, h));
     }
     clipDepth_ = 0;
+    SetStyle(gfx_.radiusCap(), gfx_.borderWidth());
     rt_->BeginDraw();
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     return true;
@@ -222,6 +254,7 @@ bool Canvas::End() {
 
 void Canvas::Release() {
     brush_.Reset();
+    dashStroke_.Reset();
     rt_.Reset();
     hwnd_ = nullptr;
 }
@@ -239,13 +272,24 @@ void Canvas::FillRect(const Rect& r, const D2D1_COLOR_F& c) {
 void Canvas::FillRound(const Rect& r, float radius, const D2D1_COLOR_F& c) {
     if (!rt_) return;
     brush_->SetColor(c);
+    if (radiusCap_ >= 0.0f) radius = std::min(radius, radiusCap_);
+    if (radius <= 0.0f) {
+        rt_->FillRectangle(r, brush_.Get());  // square corners (console theme, or a theme with radius 0)
+        return;
+    }
     rt_->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), brush_.Get());
 }
 
 void Canvas::StrokeRound(const Rect& r, float radius, const D2D1_COLOR_F& c, float width) {
     if (!rt_) return;
     brush_->SetColor(c);
+    if (width <= 1.0f) width = borderW_;
+    if (radiusCap_ >= 0.0f) radius = std::min(radius, radiusCap_);
     const Rect in = Inflate(r, -width * 0.5f);
+    if (radius <= 0.0f) {
+        rt_->DrawRectangle(in, brush_.Get(), width);
+        return;
+    }
     rt_->DrawRoundedRectangle(D2D1::RoundedRect(in, std::max(0.0f, radius - width * 0.5f), std::max(0.0f, radius - width * 0.5f)),
                               brush_.Get(), width);
 }
@@ -260,6 +304,17 @@ void Canvas::StrokeCircle(float cx, float cy, float radius, const D2D1_COLOR_F& 
     if (!rt_) return;
     brush_->SetColor(c);
     rt_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius - width * 0.5f, radius - width * 0.5f), brush_.Get(), width);
+}
+
+void Canvas::DashedRect(const Rect& r, const D2D1_COLOR_F& c, float width) {
+    if (!rt_) return;
+    brush_->SetColor(c);
+    if (!dashStroke_) {
+        D2D1_STROKE_STYLE_PROPERTIES sp = D2D1::StrokeStyleProperties();
+        sp.dashStyle = D2D1_DASH_STYLE_DASH;
+        gfx_.d2d()->CreateStrokeStyle(sp, nullptr, 0, dashStroke_.GetAddressOf());
+    }
+    rt_->DrawRectangle(Inflate(r, -width * 0.5f), brush_.Get(), width, dashStroke_.Get());
 }
 
 void Canvas::Line(float x1, float y1, float x2, float y2, const D2D1_COLOR_F& c, float width) {

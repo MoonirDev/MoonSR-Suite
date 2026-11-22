@@ -256,7 +256,8 @@ void OrderList::Draw(Canvas& c, const Palette& p) {
             for (int dy = -1; dy <= 1; ++dy) c.FillCircle(hx + static_cast<float>(dx) * 3.5f, cy + static_cast<float>(dy) * 7.0f, 1.6f, p.textSecondary);
         // Position number.
         const float nx = bounds.left + 62.0f;
-        c.FillCircle(nx, cy, 13.0f, p.accent);
+        if (p.radius == 0.0f) c.FillRect(Rect{nx - 12.0f, cy - 12.0f, nx + 12.0f, cy + 12.0f}, p.accent);
+        else c.FillCircle(nx, cy, 13.0f, p.accent);
         c.Text(std::to_wstring(i + 1), Rect{nx - 13.0f, cy - 13.0f, nx + 13.0f, cy + 13.0f}, Font::BodyStrong, p.textOnAccent,
                HAlign::Center);
         float tx = bounds.left + 92.0f;

@@ -84,7 +84,8 @@ void ModalDialog::Draw(Canvas& c, const Palette& p, float w, float h) {
     const Gfx& g = c.gfx();
     Layout(g, w, h);
     c.FillRect(Rect{0, 0, w, h}, p.dark ? D2D1_COLOR_F{0, 0, 0, 0.55f} : D2D1_COLOR_F{0, 0, 0, 0.32f});
-    for (int i = 6; i >= 1; --i)
+    if (!p.retro)
+      for (int i = 6; i >= 1; --i)
         c.FillRound(Inflate(panel_, static_cast<float>(i) * 2.0f), 8.0f + static_cast<float>(i) * 2.0f,
                     D2D1_COLOR_F{0, 0, 0, 0.035f});
     c.FillRound(panel_, 8.0f, p.popupFill);

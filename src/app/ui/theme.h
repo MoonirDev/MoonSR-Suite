@@ -1,4 +1,4 @@
-// Fluent-style theme with the MoonSR brand: navy surfaces and a cyan accent in dark, a matching light variant with the
+// Three themes: "Windows 11 Light", "Windows 11 Dark" (Fluent-style) and "Retro" (console). Fluent-style theme with the MoonSR brand: navy surfaces and a cyan accent in dark, a matching light variant with the
 // same accent hue darkened for contrast, brand gradient colours and layout metrics (all in DIPs). The accent is fixed to
 // the brand; the Windows accent colour is not used (SystemAccentColor() is kept for a future opt-in setting).
 // Threading: UI thread only.
@@ -7,6 +7,7 @@
 #include <d2d1.h>
 
 #include <cstdint>
+#include <string>
 
 namespace moonsr::app::ui {
 
@@ -21,8 +22,20 @@ struct InfoColors {
     D2D1_COLOR_F iconText;  // glyph drawn on the disc
 };
 
+enum class ThemeId { Light = 0, Dark = 1, Retro = 2 };  // "Windows 11 Light", "Windows 11 Dark", console look
+const wchar_t* ThemeKey(ThemeId t);          // settings.ini value: "dark" / "retro"
+ThemeId ThemeFromKey(const std::wstring& key);  // unknown -> Dark
+
 struct Palette {
     bool dark = true;
+    // Style switches (the built-in Retro theme sets all of them; custom themes choose, see theme_file.h).
+    bool retro = false;           // bracketed controls: [ON ], [ Start ], block slider, inverted selection, console hero (retro_controls.cpp)
+    bool promptHeaders = false;   // section titles as "[ TITLE ]", page title as "> Title_", status line as a prompt
+    bool opaqueBg = false;        // solid window background even when Mica is available
+    float radius = -1.0f;         // maximum corner radius in DIPs; < 0 = the theme's natural radii, 0 = square
+    float borderWidth = 1.0f;     // width of 1 px borders in DIPs (1..3)
+    std::wstring font;            // font family override (empty = default; used when installed)
+    std::wstring name;
     D2D1_COLOR_F bg;  // solid colour behind everything when Mica is not available
     D2D1_COLOR_F cardFill, cardStroke, divider;
     D2D1_COLOR_F text, textSecondary, textDisabled, textOnAccent;
@@ -38,7 +51,7 @@ struct Palette {
     InfoColors info, success, warning, error;
 };
 
-Palette MakePalette(bool dark);
+Palette MakePalette(ThemeId theme);
 bool SystemUsesDarkApps();
 D2D1_COLOR_F SystemAccentColor();
 

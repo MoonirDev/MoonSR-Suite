@@ -31,11 +31,15 @@ struct AppSettings {
     int sharpnessPercent = 0; // 0..100
     bool vsync = false;
     bool showCursor = true;
+    std::wstring theme = L"dark";   // [App] Theme: light | dark | retro or the file stem of an imported theme
     bool closeToTray = false;       // window close hides to the notification area instead of exiting
     bool showFrameCounter = false; // "<game fps>/<displayed fps>" in the top-left corner of the output
     // Frame generation
-    int frameGenMultiplier = 1;   // 1 = off, 2..6
-    int frameGenLastMultiplier = 2;  // last non-off multiplier, restored when frame generation is switched back on
+    bool frameGenEnabled = false;
+    int frameGenMode = 0;         // 0 = Fixed (multiplier), 1 = Auto (target fps); moonsr::FrameGenMode
+    int frameGenMultiplier = 1;   // Fixed multiplier in effect: 1 = off, 2..20 (kept for older readers)
+    int frameGenLastMultiplier = 2;  // Fixed multiplier 2..20, restored when frame generation is switched back on
+    int frameGenTargetFps = 120;  // Auto: desired frames per second, 30..1000
     int frameGenFlowPercent = 50; // 25..100 in steps of 5
     bool frameGenHudProtection = true;
     // Neural rendering (user-supplied model; see ModelStore)

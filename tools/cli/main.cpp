@@ -3,9 +3,11 @@
 //   moonsr_cli --list
 //   moonsr_cli --window <title substring> [--seconds N] [--scaler <name>] [--sharpness 0..1]
 //              [--fit fit|stretch|integer] [--vsync] [--monitor <index>] [--adapter <name substring>] [--cycle]
-//              [--cursor none|captured|software] [--fg <multiplier 1..6>] [--fgquality performance|balanced|quality]
+//              [--cursor none|captured|software] [--fg <multiplier 1..20>] [--fgquality performance|balanced|quality]
 //              [--flowscale 0.25..1] [--record <frames> <directory>] (starts recording 2 s into the run)
+//              [--fg-auto <fps>] (Auto frame generation: present at this rate; overrides --fg)
 //              [--fg-diag] (prints presentation timing diagnostics every second)
+//              [--vsync-switch-at <second>] (toggles V-Sync live at that second of the run)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
 //              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
 //
@@ -88,7 +90,9 @@ int wmain(int argc, wchar_t** argv) {
     int monitorIndex = -1;
     bool vsync = false, list = false, cycle = false, counter = false, noscale = false, upscaleFirst = false, fgDiag = false;
     int fgMultiplier = 1;
+    int fgAutoFps = 0;
     int orderSwitchAt = 0;
+    int vsyncSwitchAt = 0;
     float flowScale = 0.5f;
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
@@ -111,12 +115,14 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--noscale") noscale = true;
         else if (a == L"--upscale-first") upscaleFirst = true;
         else if (a == L"--order-switch-at") orderSwitchAt = _wtoi(next().c_str());
+        else if (a == L"--vsync-switch-at") vsyncSwitchAt = _wtoi(next().c_str());
         else if (a == L"--neural") neuralModel = next();
         else if (a == L"--gpu-nr") gpuNr = next();
         else if (a == L"--gpu-fg") gpuFg = next();
         else if (a == L"--gpu-up") gpuUp = next();
         else if (a == L"--cursor") cursorMode = Lower(next());
         else if (a == L"--fg") fgMultiplier = _wtoi(next().c_str());
+        else if (a == L"--fg-auto") fgAutoFps = _wtoi(next().c_str());
         else if (a == L"--fg-diag") fgDiag = true;
         else if (a == L"--record") {
             recordFrames = _wtoi(next().c_str());
@@ -170,7 +176,14 @@ int wmain(int argc, wchar_t** argv) {
     cfg.scale.enabled = !noscale;
     if (upscaleFirst)
         cfg.order.stages = {PipelineStage::NeuralRendering, PipelineStage::Upscaling, PipelineStage::FrameGeneration};
-    cfg.frameGen.multiplier = static_cast<uint32_t>(std::clamp(fgMultiplier, 1, 6));
+    cfg.frameGen.multiplier = static_cast<uint32_t>(std::clamp(fgMultiplier, 1, 20));
+    if (fgAutoFps > 0) {
+        cfg.frameGen.mode = FrameGenMode::Auto;
+        cfg.frameGen.targetFps = static_cast<uint32_t>(std::min(fgAutoFps, 1000));
+    }
+    const bool fgOn = cfg.frameGen.mode == FrameGenMode::Auto ? cfg.frameGen.targetFps > 0 : cfg.frameGen.multiplier > 1;
+    double sumPresented = 0.0, sumRatio = 0.0, sumMedian = 0.0, sumP95 = 0.0;
+    int samples = 0;
     if (!neuralModel.empty()) {
         // Neural rendering with an installed model id (see %LOCALAPPDATA%\MoonSR\models\catalogue.txt), one pass.
         cfg.neuralRendering = true;
@@ -235,10 +248,19 @@ int wmain(int argc, wchar_t** argv) {
                 ++tick, StateName(s.state), s.inputSize.width, s.inputSize.height, s.outputSize.width, s.outputSize.height,
                 s.destRect.left, s.destRect.top, s.destRect.Width(), s.destRect.Height(), s.capturedFps, s.presentedFps,
                 s.latencyMs, s.cpuFrameMs, s.framesDropped, s.scalerName.c_str(), s.adapterName.c_str());
-        if (cfg.frameGen.multiplier > 1)
-            wprintf(L"     frame gen x%u%s: generated %.1f fps, hold-back %.2f ms, generated presented %llu, scheduler late %llu\n",
-                    s.frameGenMultiplier, s.frameGenLimited ? L" (limited by the engine)" : L"", s.generatedFps,
-                    s.frameGenDelayMs, s.generatedPresented, s.generatedLate);
+        if (fgOn) {
+            wprintf(L"     frame gen %s x%u target %.1f ratio %.2f%s: generated %.1f fps, hold-back %.2f ms, generated presented %llu, "
+                    L"scheduler late %llu, skipped %llu; present intervals median %.2f ms p95 %.2f ms\n",
+                    s.frameGenMode == FrameGenMode::Auto ? L"auto" : L"fixed", s.frameGenMultiplier, s.frameGenTargetFps,
+                    s.frameGenRatio, s.frameGenLimited ? L" (limited by the engine)" : L"", s.generatedFps,
+                    s.frameGenDelayMs, s.generatedPresented, s.generatedLate, s.generatedSkipped,
+                    s.presentIntervalMedianMs, s.presentIntervalP95Ms);
+        }
+        if (tick >= 3 && s.state == EngineState::Running) { // skip start-up seconds in the averages
+            sumPresented += s.presentedFps; sumRatio += s.frameGenRatio;
+            sumMedian += s.presentIntervalMedianMs; sumP95 += s.presentIntervalP95Ms;
+            ++samples;
+        }
         if (fgDiag && s.generatedSkipped) wprintf(L"     catch-up: generated frames skipped %llu\n", s.generatedSkipped);
         if (!s.frameGenNote.empty()) wprintf(L"     note: %s\n", s.frameGenNote.c_str());
         if (fgDiag) wprintf(L"     present call %.2f ms, swapchain wait %.2f ms; present intervals median %.2f ms p95 %.2f ms\n",
@@ -255,6 +277,11 @@ int wmain(int argc, wchar_t** argv) {
             engine.SetPipelineOrder(cfg.order);
             wprintf(L"     changed load order\n");
         }
+        if (tick == vsyncSwitchAt) {
+            cfg.vsync = !cfg.vsync;
+            engine.SetVsync(cfg.vsync);
+            wprintf(L"     V-Sync switched %s\n", cfg.vsync ? L"on" : L"off");
+        }
         if (cycle && !available.empty()) {
             ScaleSettings ss = cfg.scale;
             ss.scaler = available[++cycleIndex % available.size()];
@@ -268,8 +295,16 @@ int wmain(int argc, wchar_t** argv) {
         wprintf(L"Neural rendering: %s, processed %llu frames%s%s\n", n.neuralRenderingActive ? L"active" : L"inactive",
                 n.neuralProcessedFrames, n.neuralRenderingNote.empty() ? L"" : L" | ", n.neuralRenderingNote.c_str());
     }
+    const EngineStats last = engine.GetStats();
     engine.Stop();
     const EngineStats s = engine.GetStats();
+    if (samples > 0)
+        wprintf(L"Summary (seconds 3..%d): mode %s, target %.1f fps, presented %.1f fps, ratio %.2f, present interval "
+                L"median %.2f ms p95 %.2f ms, generated late %llu, skipped %llu, dropped %llu%s%s\n", tick,
+                last.frameGenMode == FrameGenMode::Auto ? L"auto" : L"fixed", last.frameGenTargetFps,
+                sumPresented / samples, sumRatio / samples, sumMedian / samples, sumP95 / samples, last.generatedLate,
+                last.generatedSkipped, last.framesDropped, last.frameGenNote.empty() ? L"" : L" | note: ",
+                last.frameGenNote.c_str());
     wprintf(L"Final: state %s, captured %llu, presented %llu, dropped %llu, recoveries %u%s%s\n", StateName(s.state),
             s.framesCaptured, s.framesPresented, s.framesDropped, s.recoveries, s.error.empty() ? L"" : L", error: ",
             s.error.c_str());
