@@ -79,7 +79,7 @@ add_dependencies(MoonSR_NrBridge MoonSR_NrForwarder)
 
 # Helper process for NVIDIA neural rendering on a GPU other than the main one (see src/engine/remote_stages.h).
 if(TARGET moonsr_engine)
-    add_executable(MoonSR_NrHost nr_host.cpp)
+    add_executable(MoonSR_NrHost nr_host.cpp nr_host.rc)
     target_compile_features(MoonSR_NrHost PRIVATE cxx_std_20)
     target_include_directories(MoonSR_NrHost PRIVATE "${MOONSR_ROOT}/src")
     target_link_libraries(MoonSR_NrHost PRIVATE moonsr_engine)
