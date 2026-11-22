@@ -1,4 +1,4 @@
-// Moon ALSR (Adaptive Learning Super Resolution) - temporal reconstruction + per-game learned single-frame filters.
+// MoonSR temporal upscaler (internal name Moon ALSR) - image-based temporal reconstruction with a MoonSR Spatial seed.
 // Owner: upscaling-engineer. Contract: alsr_upscaler.h (lead). Direct3D 11 FL 11_0, Shader Model 5.0 only.
 //
 // Per Render (one real frame), all on the GPU, no CPU readback, no allocation in steady state:
@@ -9,7 +9,7 @@
 //   3. alsr_reproject  (output res)  history reprojection (Catmull-Rom), YCoCg box clip, confidence / disocclusion gate;
 //                                  writes trust x history and a depth mask "trust < 1"
 //   3b. alsr_seedblend (output res)  ONLY where trust < 1 (early depth test): adds (1 - trust) x the single-frame
-//                                  reconstruction ("seed" = MoonSR Spatial + learned filter bank, alsr_seed.hlsli)
+//                                  reconstruction ("seed" = MoonSR Spatial, alsr_seed.hlsli)
 //   4. alsr_residual   (source res)  residual of each new sample against its prediction from the reprojected history
 //   5. alsr_update     (output res)  history += gain * interpolated residual (recursive back-projection); gain 0 on fresh
 //                                  pixels (restart = single-frame reconstruction) and on zero-motion pixels unless the
@@ -19,30 +19,18 @@
 //   7. alsr_refy + alsr_refluma (source res)  registration reference (blurred history luma) for the next frame
 // Passes 1-2 are skipped / trivial when there is no valid history. The shader headers document each pass exactly.
 // RenderSingle: alsr_seed (seed of every pixel) + alsr_final.
-//
-// Per-game learning (alsr_learn.h has the design; scale factors in (1.01, 1.75] per axis only):
-//   The learned bank is applied inside the seed (alsr_seed.hlsli); with useLearned false or no bucket in use the seed
-//   is the generic reconstruction.
-//   8.  collection                 one 240x240 tile of the current frame copied into a staging texture of a 3-slot ring
-//                                  with an event query; a later Render maps it only when the query has signalled
-//                                  (GetData DONOTFLUSH + Map DO_NOT_WAIT, never waits) and the worker is idle, copies it
-//                                  into the learner's preallocated job buffer and submits it. No copy is issued while
-//                                  the worker is busy, so the GPU cost is bounded by the worker's rate.
-//   The worker publishes new filter tables; Render takes them with a try_lock and uploads them (UpdateSubresource,
-//   only when changed).
-// There is no time-based fallback of any kind: the work per frame never depends on how long earlier frames took.
+// There is no CPU readback and no state on disk. There is no time-based fallback of any kind: the work per frame
+// never depends on how long earlier frames took.
 //
 // Memory (output W x H, source w x h): history RGBA16F + prediction RGBA16F (16 B/px), history gamma copy RGBA8, seed
 // mask D16, trust R8, seed RGBA8 (RenderSingle / debug), LastOutput BGRA8 = 31 B per output pixel; per-pixel motion
 // RGBA16F (8), two working copies RGBA16F (16), residual RGBA16F (8), reference R16F + R32F (6), overlay evidence 2 x R8,
 // layer RG8 (4) = 42 B per source pixel; two refined cell fields RGBA32F (negligible).
-// 1280x720 -> 1920x1080: 98 MiB; 1920x1080 -> 2560x1440: 192 MiB; 1920x1080 -> 3840x2160: 328 MiB. Learning adds the
-// staging ring (3 x 240 x 240 x 4 B) and the filter table (< 0.2 MB).
+// 1280x720 -> 1920x1080: 98 MiB; 1920x1080 -> 2560x1440: 192 MiB; 1920x1080 -> 3840x2160: 328 MiB.
 //
 // Development tuning (never needed in normal use): environment variable MOONSR_ALSR_TUNE, a comma-separated list
 // of name=value pairs read once in Create (names: see Tune below). Logged when present.
 #include "upscale/alsr_upscaler.h"
-#include "upscale/alsr_learn.h"
 
 #include "core/log.h"
 
@@ -51,7 +39,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <string>
 
 #include "g_vs_fullscreen.h"
@@ -95,10 +82,8 @@ static_assert(sizeof(AlsrConstants) == 192);
 struct SeedConstants {
     float src[4];
     float dst[4];
-    uint32_t phase[4];
-    uint32_t misc[4];
 };
-static_assert(sizeof(SeedConstants) == 64);
+static_assert(sizeof(SeedConstants) == 32);
 
 // Algorithm parameters. Defaults are the values chosen by measurement (see the report / BENCHMARKS.md).
 struct Tune {
@@ -117,7 +102,6 @@ struct Tune {
     float margin = 0.25f;      // hull margin (fraction of the 3x3 range) for the clip and the anti-ringing clamp
     uint32_t lkIters = 2; // Gauss-Newton steps of the cell refinement (alsr_cellrefine_cs); 4 measured equal within +-0.11 dB
     uint32_t linear = 1; // accumulate in linear light (measured better than gamma on both input kinds)
-    uint32_t applyLearned = 1; // additional development override; the user setting remains the opt-in
     uint32_t variant = 0; // development flags (bits), see the shaders: 1, 4, 8, 16, 32, 64, 128, 256, 1024
 };
 
@@ -158,7 +142,6 @@ Tune ReadTune() {
         else if (k == "margin") t.margin = v;
         else if (k == "lkIters") t.lkIters = static_cast<uint32_t>(v);
         else if (k == "linear") t.linear = v != 0.0f ? 1u : 0u;
-        else if (k == "applyLearned") t.applyLearned = static_cast<uint32_t>(v);
         else if (k == "variant") t.variant = static_cast<uint32_t>(v);
     }
     MSR_LOG_INFO(L"AlsrUpscaler: development tuning MOONSR_ALSR_TUNE={}", std::wstring(s.begin(), s.end()));
@@ -225,12 +208,6 @@ public:
         bd.ByteWidth = sizeof(SeedConstants);
         hr = dev_->CreateBuffer(&bd, nullptr, &cbSeed_);
         if (FAILED(hr)) return Fail(error, L"CreateBuffer(seed constants)", hr);
-        for (auto& slot : ring_) {
-            D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
-            hr = dev_->CreateQuery(&qd, &slot.done);
-            if (FAILED(hr)) return Fail(error, L"CreateQuery(event)", hr);
-        }
-        learner_ = std::make_unique<alsr::Learner>();
 
         D3D11_SAMPLER_DESC sd{};
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -290,11 +267,6 @@ public:
         if (!EnsureResources(frame, outputSize)) return false;
         ID3D11ShaderResourceView* currSrv = SourceView(curr);
         if (!currSrv) return false;
-        const bool learnScale = PrepareLearning(frame, outputSize);
-        learningScaleSupported_ = alsr::ScaleSupported(static_cast<float>(outputSize.width) / frame.width,
-                                                       static_cast<float>(outputSize.height) / frame.height);
-        const bool useLearned = tune_.applyLearned && settings.useLearned && learnScale && tableActive_;
-        learnedFiltersActive_ = useLearned;
 
         const MotionFieldView mv = motion.MotionField();
         // The previous frame itself is not read: its blurred luma is kept from the last Render (work_[prev]).
@@ -307,7 +279,7 @@ public:
         if (historyValid) cellCur_ = cc;
 
         if (!WriteConstants(settings, &mv, historyValid, false, frame, outputSize)) return false;
-        if (!WriteSeedConstants(frame, outputSize, useLearned, false)) return false;
+        if (!WriteSeedConstants(frame, outputSize)) return false;
         BeginPasses();
 
         // 0. working copy + blurred luma (source res)
@@ -347,12 +319,11 @@ public:
         // 3b. single-frame reconstruction where trust < 1, added into Hw (output res)
         {
             ID3D11RenderTargetView* rt[1] = {hw_.rtv.Get()};
-            ID3D11ShaderResourceView* s[5] = {trust_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get(), currSrv,
-                                              useLearned ? tableSrv_.Get() : nullptr};
+            ID3D11ShaderResourceView* s[4] = {trust_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get(), currSrv};
             ctx_->OMSetBlendState(blendAdd_.Get(), nullptr, 0xFFFFFFFF);
             ctx_->OMSetDepthStencilState(dsTest_.Get(), 0);
             dsv_ = seedMaskDsv_.Get();
-            Draw(psSeedBlend_.Get(), cb_.Get(), rt, 1, s, 5, outputSize);
+            Draw(psSeedBlend_.Get(), cb_.Get(), rt, 1, s, 4, outputSize);
             ctx_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx_->OMSetDepthStencilState(nullptr, 0);
         }
@@ -386,21 +357,7 @@ public:
             s[0] = refY_.srv.Get();
             Draw(psRef_.Get(), cb_.Get(), rt, 1, s, 1, frame);
         }
-        // 9. sample collection for the learner (non-blocking)
-        learningActive_ = settings.learning && learnScale && Collect(curr);
         EndPasses();
-        if (debugView_ == AlsrDebugView::LearnedBlend) {
-            // Debug: the learned-blend visualisation of this frame replaces the output (alpha in red over grey).
-            if (!(learnScale && tableActive_)) return true;
-            if (!WriteConstants(settings, nullptr, false, true, frame, outputSize)) return false;
-            if (!WriteSeedConstants(frame, outputSize, true, true)) return false;
-            BeginPasses();
-            SeedPass(currSrv, seed_.rtv.Get(), outputSize);
-            ID3D11RenderTargetView* rt[2] = {dst, last_.rtv.Get()};
-            ID3D11ShaderResourceView* s[1] = {seed_.srv.Get()};
-            Draw(psFinal_.Get(), cb_.Get(), rt, 2, s, 1, outputSize);
-            EndPasses();
-        }
         prevWorkValid_ = true;
         prevCellsValid_ = historyValid;
         histValid_ = true;
@@ -427,19 +384,12 @@ public:
             }
             target = &single_;
         }
-        // The learned bank belongs to the scale of the last Render; used here only for the same ratio. An instance
-        // that has not rendered yet selects the bank for this scale.
-        if (!tableBuf_) PrepareLearning(fs, outputSize);
-        UploadFilters();
-        const float rsx = static_cast<float>(outputSize.width) / fs.width, rsy = static_cast<float>(outputSize.height) / fs.height;
-        const bool useLearned = tune_.applyLearned && settings.useLearned && tableActive_ && tableBuckets_ > 0 && std::abs(rsx - tableSx_) < 1e-3f &&
-                                std::abs(rsy - tableSy_) < 1e-3f;
         ID3D11ShaderResourceView* srv = SourceView(frame);
         if (!srv) return false;
         if (!WriteConstants(settings, nullptr, false, true, fs, outputSize)) return false;
-        if (!WriteSeedConstants(fs, outputSize, useLearned, useLearned && debugView_ == AlsrDebugView::LearnedBlend)) return false;
+        if (!WriteSeedConstants(fs, outputSize)) return false;
         BeginPasses();
-        SeedPass(srv, target->rtv.Get(), outputSize, useLearned);
+        SeedPass(srv, target->rtv.Get(), outputSize);
         {
             ID3D11RenderTargetView* rt[1] = {dst};
             ID3D11ShaderResourceView* s[1] = {target->srv.Get()};
@@ -456,118 +406,9 @@ public:
 
     void SetDebugView(AlsrDebugView view) override { debugView_ = view; }
 
-    bool SetProfile(const std::wstring& directory, const std::wstring& gameKey) override {
-        DropReadbacks();
-        profilePath_.clear();
-        bool ok = true;
-        if (!gameKey.empty()) {
-            std::error_code ec;
-            if (!directory.empty()) std::filesystem::create_directories(directory, ec);
-            if (ec) {
-                MSR_LOG_WARN(L"AlsrUpscaler: profile directory {} cannot be created; persistence off", directory);
-                ok = false;
-            } else {
-                std::wstring dir = directory;
-                if (!dir.empty() && dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
-                profilePath_ = dir + gameKey + L".alsr";
-            }
-        }
-        learner_->SetProfilePath(profilePath_);
-        tableVersionDirty_ = true;
-        return ok;
-    }
-    bool SaveProfile() override { return learner_->Save(); }
-    void ResetLearning() override {
-        DropReadbacks();
-        learner_->Reset();
-    }
-    AlsrLearningStatus LearningStatus() const override {
-        const alsr::Status st = learner_->GetStatus();
-        AlsrLearningStatus s;
-        s.profileLoaded = st.profileLoaded;
-        s.learningActive = learningActive_;
-        s.learningScaleSupported = learningScaleSupported_;
-        s.learnedFiltersActive = learnedFiltersActive_;
-        s.samples = st.samples;
-        s.solves = st.solves;
-        s.coverage = st.coverage;
-        s.genericError = st.genericError;
-        s.learnedError = st.learnedError;
-        s.profilePath = profilePath_;
-        return s;
-    }
-
-
 private:
-    struct Slot {
-        ComPtr<ID3D11Texture2D> staging;
-        ComPtr<ID3D11Query> done;
-        bool pending = false;
-        uint64_t frame = 0;
-        uint32_t w = 0, h = 0;
-    };
-
-    // Selects the learner section for this scale and keeps the GPU filter table current. Allocates only when the
-    // scale changes. Returns true when learning applies to this scale.
-    bool PrepareLearning(Size frame, Size out) {
-        const float sx = static_cast<float>(out.width) / frame.width, sy = static_cast<float>(out.height) / frame.height;
-        if (!alsr::ScaleSupported(sx, sy)) return false;
-        if (!tableBuf_ || std::abs(sx - tableSx_) > 1e-4f || std::abs(sy - tableSy_) > 1e-4f) {
-            DropReadbacks();
-            learner_->Configure(sx, sy);
-            tableBuf_.Reset();
-            tableSrv_.Reset();
-            tableActive_ = false;
-            tableBuckets_ = learner_->BucketCount();
-            tableCpu_.assign(static_cast<size_t>(tableBuckets_) * alsr::kFilterStride, 0.0f);
-            D3D11_BUFFER_DESC bd{};
-            bd.ByteWidth = static_cast<UINT>(tableCpu_.size() * sizeof(float));
-            bd.Usage = D3D11_USAGE_DEFAULT;
-            bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            HRESULT hr = dev_->CreateBuffer(&bd, nullptr, &tableBuf_);
-            if (SUCCEEDED(hr)) {
-                D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
-                sv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-                sv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-                sv.Buffer.FirstElement = 0;
-                sv.Buffer.NumElements = static_cast<UINT>(tableCpu_.size() / 4);
-                hr = dev_->CreateShaderResourceView(tableBuf_.Get(), &sv, &tableSrv_);
-            }
-            if (FAILED(hr)) {
-                MSR_LOG_ERROR(L"AlsrUpscaler: filter table buffer failed: {}", HrToString(hr));
-                tableBuf_.Reset();
-                tableSrv_.Reset();
-                tableBuckets_ = 0;
-                return false;
-            }
-            const alsr::Axis ax = learner_->AxisX(), ay = learner_->AxisY();
-            phase_[0] = ax.q;
-            phase_[1] = ay.q;
-            phase_[2] = ax.periodic ? 1u : 0u;
-            phase_[3] = ay.periodic ? 1u : 0u;
-            tableSx_ = sx;
-            tableSy_ = sy;
-            tableVersionDirty_ = true;
-        }
-        if (tableVersionDirty_) {
-            learner_->Configure(sx, sy); // re-selects after SetProfile (no-op otherwise)
-            tableVersionDirty_ = false;
-        }
-        UploadFilters();
-        return true;
-    }
-
-    // Takes a newly published filter table, if any (try_lock, never waits) and uploads it.
-    void UploadFilters() {
-        if (!tableBuf_ || !learner_->TakeFilters(tableCpu_)) return;
-        ctx_->UpdateSubresource(tableBuf_.Get(), 0, nullptr, tableCpu_.data(), 0, 0);
-        bool any = false;
-        for (uint32_t b = 0; b < tableBuckets_ && !any; ++b) any = tableCpu_[static_cast<size_t>(b) * alsr::kFilterStride + alsr::kFeat] > 0.0f;
-        tableActive_ = any;
-    }
-
-    // Seed constants (b1, alsr_seed.hlsli): source / destination size, phase structure of the bank, flags.
-    bool WriteSeedConstants(Size in, Size outSize, bool useLearned, bool debug) {
+    // Seed constants (b1, alsr_seed.hlsli): source / destination size.
+    bool WriteSeedConstants(Size in, Size outSize) {
         D3D11_MAPPED_SUBRESOURCE map;
         const HRESULT hr = ctx_->Map(cbSeed_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
         if (FAILED(hr)) {
@@ -582,119 +423,17 @@ private:
         c.dst[0] = static_cast<float>(outSize.width);
         c.dst[1] = static_cast<float>(outSize.height);
         c.dst[2] = std::min(c.dst[0] / c.src[0], c.dst[1] / c.src[1]);
-        memcpy(c.phase, phase_, sizeof(phase_));
-        c.misc[0] = debug ? 1u : 0u;
-        c.misc[1] = useLearned ? 1u : 0u;
+        c.dst[3] = 0.0f; // must be 0: exact compiler barrier in AlsrSeed (alsr_seed.hlsli)
         memcpy(map.pData, &c, sizeof(c));
         ctx_->Unmap(cbSeed_.Get(), 0);
         return true;
     }
 
     // Single-frame reconstruction of every pixel (alsr_seed_ps) into `out` (gamma RGBA8). Constants: WriteSeedConstants.
-    void SeedPass(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* out, Size outSize, bool useTable = true) {
+    void SeedPass(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* out, Size outSize) {
         ID3D11RenderTargetView* rt[1] = {out};
-        ID3D11ShaderResourceView* s[2] = {src, useTable ? tableSrv_.Get() : nullptr};
-        Draw(psSeed_.Get(), cb_.Get(), rt, 1, s, 2, outSize);
-    }
-
-    // Collection: hands finished readbacks to the worker and issues at most one new tile copy. Never waits.
-    bool Collect(ID3D11Texture2D* curr) {
-        D3D11_TEXTURE2D_DESC td;
-        curr->GetDesc(&td);
-        bool bgra;
-        switch (td.Format) {
-        case DXGI_FORMAT_B8G8R8A8_UNORM:
-        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-        case DXGI_FORMAT_B8G8R8X8_UNORM: bgra = true; break;
-        case DXGI_FORMAT_R8G8B8A8_UNORM:
-        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS: bgra = false; break;
-        default:
-            if (!warnedFormat_) MSR_LOG_WARN(L"AlsrUpscaler: learning needs an 8-bit frame (format {}); not collecting", static_cast<int>(td.Format));
-            warnedFormat_ = true;
-            return false;
-        }
-        const uint32_t tw = std::min(alsr::kTile, td.Width), th = std::min(alsr::kTile, td.Height);
-        if (tw < 48 || th < 48) return false;
-        if (!(ringFormat_ == td.Format) || ringBgra_ != bgra || ringW_ != tw || ringH_ != th || !ring_[0].staging) {
-            DropReadbacks();
-            for (auto& sl : ring_) {
-                sl.staging.Reset();
-                D3D11_TEXTURE2D_DESC sd{};
-                sd.Width = tw;
-                sd.Height = th;
-                sd.MipLevels = 1;
-                sd.ArraySize = 1;
-                sd.Format = td.Format;
-                sd.SampleDesc.Count = 1;
-                sd.Usage = D3D11_USAGE_STAGING;
-                sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                const HRESULT hr = dev_->CreateTexture2D(&sd, nullptr, &sl.staging);
-                if (FAILED(hr)) {
-                    MSR_LOG_ERROR(L"AlsrUpscaler: learning staging texture failed: {}", HrToString(hr));
-                    for (auto& x : ring_) x.staging.Reset();
-                    return false;
-                }
-            }
-            ringFormat_ = td.Format;
-            ringBgra_ = bgra;
-            ringW_ = tw;
-            ringH_ = th;
-        }
-        // 1. finished copies -> worker (oldest first; one per frame at most since the worker takes one job at a time)
-        Slot* oldest = nullptr;
-        for (auto& sl : ring_)
-            if (sl.pending && (!oldest || sl.frame < oldest->frame)) oldest = &sl;
-        if (oldest && learner_->CanSubmit() &&
-            ctx_->GetData(oldest->done.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
-            SubmitSlot(*oldest);
-        // 2. a new copy only when the worker is idle and a slot is free (bounded cost; no backlog)
-        if (!learner_->CanSubmit()) return true;
-        Slot* free = nullptr;
-        for (auto& sl : ring_)
-            if (!sl.pending) {
-                free = &sl;
-                break;
-            }
-        if (!free) return true;
-        // sparse, time-varying position (hash of the frame counter), anywhere in the frame
-        const uint64_t h = (++learnFrame_ + 0x51ED27ull) * 0x9E3779B97F4A7C15ull;
-        const uint32_t x0 = td.Width > tw ? static_cast<uint32_t>((h >> 17) % (td.Width - tw + 1)) : 0u;
-        const uint32_t y0 = td.Height > th ? static_cast<uint32_t>((h >> 41) % (td.Height - th + 1)) : 0u;
-        const D3D11_BOX box{x0, y0, 0, x0 + tw, y0 + th, 1};
-        ctx_->CopySubresourceRegion(free->staging.Get(), 0, 0, 0, 0, curr, 0, &box);
-        ctx_->End(free->done.Get());
-        free->pending = true;
-        free->frame = learnFrame_;
-        free->w = tw;
-        free->h = th;
-        return true;
-    }
-
-    void SubmitSlot(Slot& sl) {
-        D3D11_MAPPED_SUBRESOURCE map{};
-        const HRESULT hr = ctx_->Map(sl.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &map);
-        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return; // try again next frame
-        sl.pending = false;
-        if (FAILED(hr)) {
-            MSR_LOG_WARN(L"AlsrUpscaler: Map(learning staging) failed: {}", HrToString(hr));
-            return;
-        }
-        alsr::Job& j = learner_->JobBuffer();
-        j.w = sl.w;
-        j.h = sl.h;
-        j.pitch = static_cast<size_t>(sl.w) * 4;
-        j.bgra = ringBgra_;
-        j.frame = sl.frame;
-        for (uint32_t y = 0; y < sl.h; ++y)
-            memcpy(j.px.data() + y * j.pitch, static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch, j.pitch);
-        ctx_->Unmap(sl.staging.Get(), 0);
-        learner_->Submit();
-    }
-
-    void DropReadbacks() {
-        for (auto& sl : ring_) sl.pending = false;
+        ID3D11ShaderResourceView* s[1] = {src};
+        Draw(psSeed_.Get(), cb_.Get(), rt, 1, s, 1, outSize);
     }
 
     static bool Fail(std::wstring& error, const std::wstring& what, HRESULT hr) {
@@ -969,34 +708,20 @@ private:
     bool prevCellsValid_ = false;
     Size cellSize_{};
     uint32_t workCur_ = 0;
-    RtTex hist_, histGamma_, hw_, trust_, seed_, last_; // output resolution (seed_: RenderSingle / debug only)
+    RtTex hist_, histGamma_, hw_, trust_, seed_, last_; // output resolution (seed_: RenderSingle only)
     RtTex single_;                                // RenderSingle target when its output size differs
     Size inSize_{}, outSize_{}, singleSize_{};
     std::array<SrcEntry, 6> srcCache_{};
     size_t srcNext_ = 0;
 
-    std::wstring profilePath_;
-    // learning
-    std::unique_ptr<alsr::Learner> learner_;
+    // single-frame reconstruction (seed) and the depth-masked seed blend
     ComPtr<ID3D11PixelShader> psSeed_, psSeedBlend_;
     ComPtr<ID3D11BlendState> blendAdd_;
     ComPtr<ID3D11DepthStencilState> dsWrite_, dsTest_;
     ComPtr<ID3D11Texture2D> seedMask_;              // D16 output res: 1 = trust < 1 (alsr_seedblend runs), 0 = not
     ComPtr<ID3D11DepthStencilView> seedMaskDsv_;
     ID3D11DepthStencilView* dsv_ = nullptr;         // depth target for the next Draw only
-    ComPtr<ID3D11Buffer> cbSeed_, tableBuf_;
-    ComPtr<ID3D11ShaderResourceView> tableSrv_;
-    std::vector<float> tableCpu_;
-    uint32_t tableBuckets_ = 0;
-    float tableSx_ = 0.0f, tableSy_ = 0.0f;
-    uint32_t phase_[4] = {};
-    bool tableActive_ = false, tableVersionDirty_ = false, learningActive_ = false, learningScaleSupported_ = false;
-    bool learnedFiltersActive_ = false, warnedFormat_ = false;
-    std::array<Slot, 3> ring_;
-    DXGI_FORMAT ringFormat_ = DXGI_FORMAT_UNKNOWN;
-    bool ringBgra_ = true;
-    uint32_t ringW_ = 0, ringH_ = 0;
-    uint64_t learnFrame_ = 0;
+    ComPtr<ID3D11Buffer> cbSeed_;
     Tune tune_{};
     AlsrDebugView debugView_ = AlsrDebugView::None;
     bool histValid_ = false;

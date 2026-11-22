@@ -24,6 +24,19 @@ in `DEVELOPMENT_LOG.md` or `BENCHMARKS.md`.
 - [ ] DXGI Desktop Duplication fallback
 - [ ] Game profiles and persisted configuration
 
+## Next work (2026-11-22)
+Plans are in `research/alsr_v2.md` and `research/fg_quality.md`. Milestone thresholds there are proposals, not
+decisions. Owner targets: XeSS 2 / FSR 4-class quality at the current cost, no online learning.
+- [ ] MoonSR v2 (upscaler), `research/alsr_v2.md` section 4.6: M0 harness reference (XeSS SR / FSR 3.1 runs, per-pass
+  timing, per-class tables); M1 seed upgrade and budget-neutral restructuring; M2 locks, soft robustness, fused
+  anti-flicker; M3 evidence-weighted accumulation and input-class detector; M4 heavier static-mode single-frame
+  reconstruction; M5 affine cells and long-term HUD statistic; M6 per-pixel refinement; M7 tiers (A400, iGPU, Lite).
+  The capture-only path has no jitter, so parity with XeSS 2 / FSR 4 on static content is not reachable there.
+- [ ] Frame generation quality, `research/fg_quality.md` section 3.2: M0 baseline and harness; M1 correctness fixes
+  (scene-cut temporal reset, exact luma pre-filter, duplicate-frame detection); M2 sharp phase-stable synthesis;
+  M3 HUD independent of flow resolution; M4 occlusion-ordered splatting and non-ghosting fallback; M5 per-pair
+  decisions for multi-frame; M6 thin features, small objects, large motion; M7 cost and tiers.
+
 ## Phase 3 — Upscaling engine
 - [x] MoonSR Spatial v0.1 (edge-directed adaptive reconstruction) — measured; see BENCHMARKS.md
 - [ ] MoonSR Spatial v0.2: cost reduction, natural-content quality, iGPU tier

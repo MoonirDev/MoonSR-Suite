@@ -19,8 +19,8 @@ enum class ScalerKind : uint32_t {
     Bicubic,       // Catmull-Rom
     Lanczos,       // Lanczos-3
     MoonSRSpatial, // MoonSR custom spatial upscaler
-    MoonALSR,      // Moon ALSR: temporal reconstruction + per-game learning. Not a ScalePass shader: the engine
-                   // runs AlsrUpscaler for it; ScalePass itself falls back to Lanczos-3 for this kind.
+    MoonALSR,      // "MoonSR" in the UI: image-based temporal reconstruction (internal name Moon ALSR). Not a
+                   // ScalePass shader: the engine runs AlsrUpscaler for it; ScalePass itself falls back to Lanczos-3.
     Count
 };
 

@@ -103,10 +103,42 @@ The **Load order** page sets a GPU per stage. Neural rendering can run on a GPU 
 that captures and presents); each frame and its optical-flow guide are then copied to that GPU and the result copied
 back (`src/engine/remote_stages.cpp`).
 
-**NVIDIA:** not possible. Measured 2026-11-22 on an RTX 5060 + RTX A400 (driver 621.14): NVIDIA's runtime creates its
-model on the GPU that captures and presents (all stages on the 5060, or all on the A400), but feature creation fails
-with NGX `FAIL_PlatformError` (`0xBAD00002`) on the other NVIDIA GPU, in both directions. Running the bridge alone on
-either GPU, also with cross-GPU copies and a second NVIDIA D3D12 device in the process, works. The engine therefore
-refuses NVIDIA neural rendering on a GPU other than the Upscaling GPU with a clear message, and the Neural rendering
-page shows the same hint. AMD and Intel runtimes are allowed on another GPU; that path is not verified (no supported
-AMD GPU or Intel GPU here).
+**NVIDIA (any GPU, verified 2026-11-21/22 on an RTX 5060 + RTX A400, driver 621.14, Windows 11 build 26300).**
+NVIDIA's NGX only creates features on the GPU of the process's oldest live D3D11/D3D12 device. On another NVIDIA GPU
+`CreateFeature` returns `0xBAD00002` (`FAIL_PlatformError`). Windows Graphics Capture, the swapchain, RTSS, GPU priority
+and the cross-adapter links were ruled out as causes. In `MoonSR.exe` the Direct2D UI device is the oldest device.
+
+When NVIDIA neural rendering runs on a GPU other than the output monitor's GPU, it therefore runs in a helper
+process, `MoonSR_NrHost.exe` (built with the bridge, shipped beside `MoonSR.exe`), whose first device is on the
+neural rendering GPU:
+
+- Frames reach the neural rendering GPU through `CrossAdapterLink` if needed, then through shared NT-handle textures
+  and two shared D3D11 fences. Each frame costs one named-pipe round trip (protocol v2). The call returns when the
+  helper has submitted the work, not when it has finished.
+- The pipe DACL is limited to the current user, the client PID is checked and the pipe uses SQOS identification.
+- The helper runs in a kill-on-close job object. Timeouts are 30 s for creation and the first frame, 2 s afterwards.
+  If the helper dies or hangs, MoonSR releases GPU waits by signalling the shared fence from a D3D12 fence
+  (`UINT64_MAX`) and reports an error that starts with "Neural rendering helper:".
+- In-process NVIDIA neural rendering that is refused with `0xBAD00002` on its first frame falls back to the helper
+  automatically (logged once).
+- Helper log: `%LOCALAPPDATA%\MoonSR\moonsr_nrhost_<pid>.log`, one file per run. Nothing prunes them yet (see
+  KNOWN_ISSUES.md).
+- AMD and Intel neural rendering on another GPU stay in-process (`RemoteNeuralBridge`). That path is not verified on
+  hardware (no supported AMD or Intel GPU here).
+
+Smoke test: `MoonSR_NrBridgeSmoke --first-device <adapter> <model> <adapter>` creates a D3D11 device on the first
+adapter, keeps it alive, and then processes one frame on the test adapter (last argument). Exit code 0 means the
+driver refused as expected (or both adapters are the same and the frame succeeded); 3 means the driver no longer
+refuses, so the helper may no longer be needed.
+
+CLI results (6 s, 1280x720 test pattern, Lanczos), from the 2026-11-22 session:
+
+| Run | Result |
+|---|---|
+| `--gpu-nr A400` | NR active, 87 frames processed, 0 errors |
+| `--adapter A400` | 91 frames processed |
+| `--gpu-up A400 --gpu-nr 5060` | 339 frames processed |
+| everything on the 5060 | unchanged |
+
+The A400 shows about 16 fps presented because of its own throughput. The per-frame cost of the helper path is not
+measured. The helper path has not been tested in the GUI yet.

@@ -3,6 +3,7 @@
 #include "gpu_runner.h"
 #include "imageops.h"
 #include "metrics.h"
+#include "temporal.h"
 
 #include <windows.h>
 
@@ -199,6 +200,8 @@ int RunSelfTest(GpuRunner* gpu) {
     } else {
         printf("-- GPU checks skipped (no adapter selected)\n");
     }
+
+    g_fail += RunTemporalSelfTest(gpu);
 
     printf("== %s (%d failure%s) ==\n", g_fail ? "SELF-TEST FAILED" : "self-test passed", g_fail, g_fail == 1 ? "" : "s");
     return g_fail;

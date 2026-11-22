@@ -55,7 +55,7 @@ const std::array<ScalerEntry, static_cast<size_t>(ScalerKind::Count)> kScalers =
     {ScalerKind::Bicubic, L"Bicubic (Catmull-Rom)", MSR_BLOB(g_ps_bicubic)},
     {ScalerKind::Lanczos, L"Lanczos-3", MSR_BLOB(g_ps_lanczos)},
     {ScalerKind::MoonSRSpatial, L"MoonSR Spatial", MSR_BLOB(g_ps_moonsr_spatial)},
-    {ScalerKind::MoonALSR, L"Moon ALSR (experimental)", {}},
+    {ScalerKind::MoonALSR, L"MoonSR (experimental)", {}},
 }};
 
 const ScalerEntry& Entry(ScalerKind kind) {
@@ -137,7 +137,7 @@ public:
 
         size_t scaler = static_cast<size_t>(settings.scaler);
         if (scaler >= ps_.size() || !ps_[scaler]) {
-            // No shader for this kind (Moon ALSR runs outside ScalePass, or an unknown value): best plain scaler.
+            // No shader for this kind (MoonSR temporal runs outside ScalePass, or an unknown value): best plain scaler.
             scaler = static_cast<size_t>(ScalerKind::Lanczos);
             if (!ps_[scaler]) scaler = static_cast<size_t>(ScalerKind::Bilinear);
         }

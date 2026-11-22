@@ -5,6 +5,7 @@
 #include "imageops.h"
 #include "metrics.h"
 #include "report.h"
+#include "temporal.h"
 
 #include <windows.h>
 
@@ -27,7 +28,8 @@ namespace {
 
 struct Options {
     bool gen = false, selftest = false, quality = false, time = false, listAdapters = false, saveImages = false, verbose = false;
-    bool allAdapters = false, help = false;
+    bool allAdapters = false, help = false, temporal = false, scalesGiven = false;
+    TemporalOptions tmp;
     uint32_t genW = 1920, genH = 1080;
     std::vector<std::string> adapters;
     std::vector<double> scales{2.0};
@@ -79,6 +81,8 @@ Modes (combine freely):
   --gen                  (re)generate the synthetic ground truth into <out>/gt (8-bit sRGB PNG)
   --quality              downsample GT, upscale on the GPU with every available scaler, compute PSNR/SSIM
   --time                 GPU timestamp timing of ScalePass::Render per scaler
+  --temporal             temporal sequences (moving content, exact ground truth): luma PSNR, SSIM, error flicker,
+                         HUD and scene-cut scores and GPU time per frame for the spatial scalers and MoonSR
   --list-adapters        list adapters and exit
 
 Selection:
@@ -96,6 +100,14 @@ Selection:
   --save-images          write upscaled PNGs to <out>/images/<adapter>/<scale>x/
   --verbose              print the per-image quality table
   --out-dir <dir>        default <repo>/benchmarks/output     --gt-dir <dir>  default <out>/gt
+Temporal mode (--temporal; uses --adapter, --scales (default 1.5,2), --sharpness, --out-dir, --tag, --save-images):
+  --seqs a,b             pan_slow, pan_fast, rot_zoom, hud_pan, scene_cut, thin_pan, still (default all)
+  --frames N             frames per sequence (default 64)      --seq-warmup N  frames excluded from averages (default 8)
+  --seq-size WxH         ground-truth / output size (default 1920x1080)    --seq-ss N  GT supersampling per axis (default 3)
+  --input-modes a,b      aliased (point sampled), area (box filtered); default both
+  --methods a,b          substrings of: Nearest, Bilinear, Bicubic, Lanczos-3, MoonSR Spatial, MoonSR (temporal; "alsr" also
+                         selects it) (default Lanczos-3, MoonSR Spatial, MoonSR)
+  --save-frame N         with --save-images: frame index written as PNG (default 40)
   --tag <name>           result file tag (default: timestamp)
 )");
 }
@@ -113,6 +125,20 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--quality") o.quality = true;
         else if (a == "--time") o.time = true;
         else if (a == "--list-adapters") o.listAdapters = true;
+        else if (a == "--temporal") { o.temporal = true; }
+        else if (a == "--seqs") { if (!(v = need(i))) return false; o.tmp.seqs = Split(v, ','); }
+        else if (a == "--input-modes") { if (!(v = need(i))) return false; o.tmp.modes = Split(v, ','); for (auto& s : o.tmp.modes) if (s != "aliased" && s != "area") { err = "bad --input-modes"; return false; } }
+        else if (a == "--methods") { if (!(v = need(i))) return false; for (auto& s : Split(v, ',')) o.tmp.methods.push_back(Lower(s)); }
+        else if (a == "--frames") { if (!(v = need(i))) return false; o.tmp.frames = atoi(v); }
+        else if (a == "--seq-warmup") { if (!(v = need(i))) return false; o.tmp.warmup = std::max(0, atoi(v)); }
+        else if (a == "--seq-ss") { if (!(v = need(i))) return false; o.tmp.ss = std::clamp(atoi(v), 1, 8); }
+        else if (a == "--save-frame") { if (!(v = need(i))) return false; o.tmp.saveFrame = std::max(0, atoi(v)); }
+        else if (a == "--seq-size") {
+            if (!(v = need(i))) return false;
+            moonsr::Size s;
+            if (!ParseSize(v, s)) { err = "bad --seq-size (expected WxH)"; return false; }
+            o.tmp.gtW = s.width; o.tmp.gtH = s.height;
+        }
         else if (a == "--save-images") o.saveImages = true;
         else if (a == "--verbose") o.verbose = true;
         else if (a == "--all-adapters") o.allAdapters = true;
@@ -123,6 +149,7 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--scales") {
             if (!(v = need(i))) return false;
             o.scales.clear();
+            o.scalesGiven = true;
             for (auto& s : Split(v, ',')) o.scales.push_back(atof(s.c_str()));
             for (double s : o.scales) if (!(s >= 1.0 && s <= 16.0)) { err = "bad --scales value"; return false; }
         } else if (a == "--sharpness") {
@@ -515,7 +542,7 @@ int main(int argc, char** argv) {
         PrintHelp();
         return 2;
     }
-    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.listAdapters)) {
+    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.listAdapters)) {
         PrintHelp();
         return o.help ? 0 : 2;
     }
@@ -536,7 +563,7 @@ int main(int argc, char** argv) {
         for (auto& a : moonsr::GpuDevice::EnumerateAdapters())
             printf("%s%s | driver UMD %s | VEN_%04X DEV_%04X | VRAM %llu MiB\n", Narrow(a.name).c_str(), a.isSoftware ? " [software]" : "",
                    DriverVersionString(a.driverVersion).c_str(), a.vendorId, a.deviceId, static_cast<unsigned long long>(a.dedicatedVideoMemory >> 20));
-        if (!o.gen && !o.selftest && !o.quality && !o.time) return 0;
+        if (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal) return 0;
     }
     if (o.gen) {
         std::vector<GtImage> gts;
@@ -546,7 +573,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<AdapterInfo> adapters;
-    if (o.selftest || o.quality || o.time) {
+    if (o.selftest || o.quality || o.time || o.temporal) {
         adapters = PickAdapters(o, err);
         if (adapters.empty()) {
             if (o.selftest && !o.quality && !o.time) printf("warning: %s; GPU self-checks skipped\n", err.c_str());
@@ -563,6 +590,20 @@ int main(int argc, char** argv) {
     }
     if (o.quality && !adapters.empty()) rc |= RunQuality(o, adapters, si);
     if (o.time && !adapters.empty()) rc |= RunTiming(o, adapters, si);
+    if (o.temporal && !adapters.empty()) {
+        std::vector<std::unique_ptr<GpuRunner>> runners;
+        for (auto& a : adapters) {
+            auto r = GpuRunner::Open(a, err);
+            if (!r) { printf("error: adapter '%s': %s\n", Narrow(a.name).c_str(), err.c_str()); return 1; }
+            runners.push_back(std::move(r));
+        }
+        TemporalOptions t = o.tmp;
+        t.scales = o.scalesGiven ? o.scales : std::vector<double>{1.5, 2.0};
+        t.sharpness = o.sharpness;
+        t.saveImages = o.saveImages;
+        t.outDir = o.outDir;
+        rc |= RunTemporalBench(t, runners, si, "t_" + FileTag(o, si));
+    }
     CoUninitialize();
     return rc;
 }

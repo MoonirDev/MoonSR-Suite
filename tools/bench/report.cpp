@@ -68,7 +68,7 @@ std::string RunCapture(const std::string& cmd) {
 // executable if the executable was rebuilt after the last edit.
 std::string HashSources(const fs::path& root) {
     std::vector<fs::path> files;
-    for (const char* d : {"shaders", "src/core", "src/gpu", "src/upscale"}) {
+    for (const char* d : {"shaders", "src/core", "src/gpu", "src/upscale", "src/framegen"}) {
         std::error_code ec;
         for (fs::recursive_directory_iterator it(root / d, ec), end; !ec && it != end; it.increment(ec)) {
             if (!it->is_regular_file()) continue;

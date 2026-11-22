@@ -309,6 +309,11 @@ public:
         if (!ClientToScreen(target, &origin)) return s;
         const LONG x = ci.ptScreenPos.x - origin.x, y = ci.ptScreenPos.y - origin.y;
         if (x < 0 || y < 0 || x >= rc.right || y >= rc.bottom) return s;
+        // The output window is not topmost, so another application's window may lie over the game at this point.
+        // Then the pointer belongs to that window: keep the system cursor and draw no software copy. Hit testing
+        // skips the click-through output window (layered + transparent), so the hit is the game when nothing covers it.
+        const HWND hit = WindowFromPoint(ci.ptScreenPos);
+        if (!hit || GetAncestor(hit, GA_ROOT) != GetAncestor(target, GA_ROOT)) return s;
         // Only a visible state carries position and shape, so equality stays stable while the cursor is elsewhere.
         s.visible = true;
         s.screenPos = ci.ptScreenPos;

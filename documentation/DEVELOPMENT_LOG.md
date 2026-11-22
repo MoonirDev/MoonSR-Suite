@@ -4,6 +4,54 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-21/22 - Session 6: NVIDIA NR helper process, learning removed, MoonSR rename, non-topmost output, tray
+
+Owner decisions: the quality floor for MoonSR upscaling is XeSS 2 / FSR 4-class at the current cost; online learning
+is scrapped; "Moon ALSR" is renamed MoonSR in the product. Hardware: RTX 5060 + RTX A400 + Radeon 610M, driver 621.14,
+Windows 11 build 26300.
+
+- **NVIDIA neural rendering on any GPU.** Root cause of the 0xBAD00002 failure: NGX only creates features on the GPU
+  of the process's oldest live D3D11/D3D12 device. In `MoonSR.exe` the Direct2D UI device is the oldest. WGC,
+  swapchain, RTSS, GPU priority and cross-adapter links were ruled out. Fix: helper process `MoonSR_NrHost.exe`
+  (shared NT-handle textures, two shared D3D11 fences, named pipe protocol v2, kill-on-close job, 30 s / 2 s
+  timeouts), used when NVIDIA NR runs off the monitor's GPU, and as an automatic fallback when in-process creation is
+  refused. New smoke option `--first-device`. CLI results (6 s, 1280x720 test pattern): `--gpu-nr A400` 87 frames and
+  0 errors, `--adapter A400` 91, `--gpu-up A400 --gpu-nr 5060` 339, all-5060 unchanged. Helper cost per frame not
+  measured; not tested in the GUI. Details: NR_BRIDGE.md, ARCHITECTURE.md A6, KNOWN_ISSUES.md.
+- **Online learning removed.** Moon ALSR learning (`alsr_learn`, learned filters, per-game profiles) and frame
+  generation adaptive learning (controller, sampler, policy, profile) are deleted with their UI, settings keys
+  (ignored in old settings files), CLI flags (`--nolearn`, `--fg-learn`, `--fg-reset-at`, `--fg-disable-at`; timing
+  diagnostics now under `--fg-diag`), `moonsr_bench --alsr-learning` and the fgbench adaptive tests. Testpattern
+  `--learning-pattern` is now `--motion-pattern`. Default output is bit-identical before and after: 36/36 temporal
+  harness rows had identical hashes. The earlier baseline had measured learning at +0.001 to +0.012 dB at 1.5x and no
+  effect at 2x (BENCHMARKS.md).
+- **Rename.** The scaler list shows "MoonSR (experimental)"; "MoonSR Spatial" is unchanged. CLI `--scaler moonsr`,
+  alias `alsr` kept. Saved settings naming "Moon ALSR..." map to MoonSR. Internal identifiers (`ScalerKind::MoonALSR`,
+  `alsr_*` files) are unchanged. BENCHMARKS.md has a naming note; recorded numbers are unchanged.
+- **Output window not topmost.** Normal borderless click-through, no-activate window over the output monitor that
+  keeps itself directly above the captured game window (WinEvent hooks + 100 ms poll; only MoonSR's own window is
+  moved). Other windows can be dragged over it and alt-tab works. Clicking into the game restacks within a few ms
+  (0.7-3 ms after foreground change in one test, 22 ms end to end in another). Hidden while the game is minimised or
+  cloaked. Windows hides the taskbar while the game is foreground (observed shell heuristic). While another window
+  overlaps, DWM composes (no independent flip). `PresentOptions::topmost=true` keeps the old behaviour and is not
+  exposed in the UI. The launcher no longer toggles itself topmost. The software cursor only draws when the cursor is
+  over the game window. Pacing unchanged: 120 fps FG 2x median 8.04-8.15 ms before and after, 0 dropped. Not tested:
+  elevated games, a real game.
+- **Close to system tray.** New setting "Close to system tray" (default off), Diagnostics page, "Application" section,
+  saved as `[App] CloseToTray`. When on, closing hides the window; scaling continues; the icon exists only while
+  hidden; click restores; right-click menu: Open MoonSR, Start scaling (countdown), Stop scaling, Exit. Launching
+  MoonSR again restores the hidden window. A scripted test passed; a real mouse click on the icon and an Explorer
+  restart were not tested.
+- **Research.** `research/alsr_v2.md` (MoonSR v2 audit and plan; the capture-only path has no jitter and cannot reach
+  parity with XeSS 2 / FSR 4 on static content) and `research/fg_quality.md` (frame generation base-quality audit and
+  plan). Both are indexed in RESEARCH.md; their milestones are listed in ROADMAP.md as the next work.
+- **Temporal harness.** `moonsr_bench --temporal` with its baseline is recorded in BENCHMARKS.md ("Moon ALSR baseline
+  (temporal harness), 2026-11-21"); it was used for the learning-removal bit-identity check.
+- Next: MoonSR v2 M0 and frame generation M0 (harnesses and baselines) per the roadmap; GUI test of the NR helper
+  path; helper log pruning.
+
+---
+
 ## 2026-11-22 - Session 5: GPU per pipeline stage; Output page removed
 
 - Owner: remove the Output page, move Monitor to Home, remove the Processing GPU picker, and choose a GPU for each

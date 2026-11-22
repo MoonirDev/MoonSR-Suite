@@ -35,6 +35,8 @@ public:
     static std::unique_ptr<GpuRunner> Open(const moonsr::AdapterInfo& info, std::string& err);
 
     const moonsr::AdapterInfo& Info() const { return info_; }
+    moonsr::GpuDevice& Device() { return *dev_; }
+    moonsr::ScalePass& Pass() { return *pass_; }
 
     // Uploads `in` as B8G8R8A8_UNORM, renders with FitMode::Stretch into a B8G8R8A8_UNORM target of dw x dh and reads
     // the result back.

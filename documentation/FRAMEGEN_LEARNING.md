@@ -1,5 +1,9 @@
 # Adaptive frame-generation learning
 
+> Removed 2026-11-22 (owner decision): frame-generation adaptive learning (`adaptive_controller`, sampler, policy, profile) is deleted
+> together with its UI, settings keys and CLI flags. This file describes the removed feature and is kept for history
+> only. Old profile folders under `%LOCALAPPDATA%\MoonSR\profiles` are left on disk and ignored.
+
 Adaptive learning is optional and is off by default. Enable it on the Frame generation page while using a game.
 The selected flow scale remains the maximum: learning tries one lower setting and never changes the requested
 frame multiplier. Disabling learning immediately restores the selected scale.

@@ -1,81 +1,38 @@
-// Moon ALSR single-frame reconstruction ("seed"): MoonSR Spatial + the per-game learned filter bank, fused.
-// Owner: upscaling-engineer. Used by alsr_seed_ps.hlsl (RenderSingle, debug) and inside alsr_reproject_ps.hlsl, which
-// evaluates it ONLY for the pixels that need it (no history, rejected or partly trusted history, overlay ring).
-// CPU reference: alsr::SpatialCpu + alsr::ApplyCpuRow (src/upscale/alsr_learn.cpp) - window, phase, GeoBucket, the
-// 8-bit quantisation of the generic tap and the filter layout must stay identical.
+// MoonSR temporal upscaler: single-frame reconstruction ("seed") = MoonSR Spatial at the output pixel.
+// Owner: upscaling-engineer. Used by alsr_seed_ps.hlsl (RenderSingle) and alsr_seedblend_ps.hlsl, which evaluates it
+// ONLY for the pixels that need it (no history, rejected or partly trusted history, overlay ring).
 //
 //   f  = (p + 0.5) * src / dst - 0.5         sample position in source texels (centres at integers)
-//   S  = the 5x5 source texels around c = CentreOf(f) (nearest texel; clamped to the frame)
-//   G  = MoonSR Spatial at f from the 4x4 texels floor(f) - 1 .. floor(f) + 2 (always inside S), quantised to 8 bit
-//        exactly as the former RGBA8 intermediate (the learner trains on that quantised value)
-//   out = w[0] * G + sum_k w[1 + k] * S_k,  w = table[(phaseY * qx + phaseX) * 72 + GeoBucket(luma of S)]
-// The published table already contains the blend with the generic filter (w = alpha * learned + (1 - alpha) *
-// (1, 0, ...)); with learning off (gSeedMisc.y == 0) the result is G.
-// Before Stage 3 this was two output-resolution passes (moonsr_spatial 0.24 ms + alsr_learned 0.18 ms on the RTX 5060
-// at 720p -> 1080p) evaluated for every pixel every frame, although with tracked history most pixels never use it.
+//   C  = the 4x4 texels floor(f) - 1 .. floor(f) + 2 (clamped to the frame), taken from the 5x5 texels around the
+//        nearest texel (see AlsrSeed)
+//   out = MoonSR Spatial(C, f - floor(f)), quantised to 8 bit exactly as the former RGBA8 intermediate
+// Before Stage 3 this was a separate output-resolution pass (moonsr_spatial 0.24 ms on the RTX 5060 at 720p -> 1080p)
+// evaluated for every pixel every frame, although with tracked history most pixels never use it.
 #ifndef MOONSR_ALSR_SEED_HLSLI
 #define MOONSR_ALSR_SEED_HLSLI
 
 cbuffer SeedConstants : register(b1)
 {
     float4 gSeedSrc;   // src w, h, 1/w, 1/h
-    float4 gSeedDst;   // dst w, h, min magnification, 0
-    uint4 gSeedPhase;  // qx, qy, periodic x, periodic y
-    uint4 gSeedMisc;   // debug (1 = alpha view), use learned filters, 0, 0
+    float4 gSeedDst;   // dst w, h, min magnification, 0 (must stay 0: see AlsrSeed)
 };
 
 #ifndef ALSR_SEED_SRC_REG
 #define ALSR_SEED_SRC_REG t0
-#define ALSR_SEED_TABLE_REG t1
 #endif
 Texture2D<float4> gSeedTex : register(ALSR_SEED_SRC_REG); // captured frame, gamma-encoded
-Buffer<float4> gSeedTable : register(ALSR_SEED_TABLE_REG); // 7 float4 per bucket: w[0..25], alpha, 0
 
 float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 
 #include "upscale/moonsr_spatial.hlsli"
 
-static const uint kSeedAngles = 8, kSeedStrengths = 3, kSeedCoherences = 3, kSeedGeo = 72, kSeedPhaseBins = 4;
-
 int SeedCentreOf(float f) { return int(floor(f + 0.5 + 1e-3)); }
 
-uint SeedPhaseOf(uint x, float f, uint q, uint periodic)
-{
-    if (periodic != 0) return x % q;
-    const float t = f - float(SeedCentreOf(f)) + 0.5;
-    return uint(clamp(int(t * kSeedPhaseBins), 0, int(kSeedPhaseBins) - 1));
-}
-
-// Mirror of alsr::GeoBucket (alsr_learn.cpp).
-uint SeedGeoBucket(float l[25])
-{
-    static const float bw[3] = {0.25, 0.5, 0.25};
-    float jxx = 0.0, jxy = 0.0, jyy = 0.0;
-    [unroll] for (int j = 1; j <= 3; ++j) {
-        [unroll] for (int i = 1; i <= 3; ++i) {
-            const float gx = 0.5 * (l[j * 5 + i + 1] - l[j * 5 + i - 1]);
-            const float gy = 0.5 * (l[(j + 1) * 5 + i] - l[(j - 1) * 5 + i]);
-            const float w = bw[i - 1] * bw[j - 1];
-            jxx += w * gx * gx;
-            jxy += w * gx * gy;
-            jyy += w * gy * gy;
-        }
-    }
-    const float tr = jxx + jyy, dxx = jxx - jyy;
-    const float disc = sqrt(dxx * dxx + 4.0 * jxy * jxy);
-    const float l1 = sqrt(max(0.0, 0.5 * (tr + disc))), l2 = sqrt(max(0.0, 0.5 * (tr - disc)));
-    const float coh = (l1 - l2) / (l1 + l2 + 1e-9);
-    float ang = 0.5 * atan2(2.0 * jxy, dxx);
-    if (ang < 0.0) ang += 3.14159265;
-    const uint a = min(uint(ang * (kSeedAngles / 3.14159265)), kSeedAngles - 1);
-    const uint s = l1 < 0.015 ? 0u : (l1 < 0.06 ? 1u : 2u);
-    const uint c = coh < 0.3 ? 0u : (coh < 0.6 ? 1u : 2u);
-    return (a * kSeedStrengths + s) * kSeedCoherences + c;
-}
-
-// Gamma-encoded seed colour of output pixel p (not saturated beyond what the filters produce; caller saturates).
-// `alpha` = the bucket's learned blend weight (0 = generic) for the debug view.
-float3 AlsrSeed(uint2 p, out float alpha)
+// Gamma-encoded seed colour of output pixel p, 0..1.
+// The 4x4 window is selected from the 5x5 texels around the nearest texel c, as in earlier versions (which also fed
+// a filter bank from the 5x5 window); this keeps the output bit-identical to them. Loading the 4x4 texels directly
+// reads the same values but compiles to different arithmetic (measured: output hashes change, PSNR within 0.0003 dB).
+float3 AlsrSeed(uint2 p)
 {
     const float2 f = (float2(p) + 0.5) * gSeedSrc.xy / gSeedDst.xy - 0.5;
     const int2 c = int2(SeedCentreOf(f.x), SeedCentreOf(f.y));
@@ -94,24 +51,11 @@ float3 AlsrSeed(uint2 p, out float alpha)
             C[j * 4 + i] = ox ? a0 : a1;
         }
     }
-    const float3 g = round(saturate(MoonsrSpatial(C, t, gSeedDst.z, 1.0, 0.015)) * 255.0) / 255.0;
-    alpha = 0.0;
-    if (gSeedMisc.y == 0) return g;
-    float l[25];
-    [unroll] for (int k2 = 0; k2 < 25; ++k2) l[k2] = Luma(S[k2]);
-    const uint bucket = (SeedPhaseOf(p.y, f.y, gSeedPhase.y, gSeedPhase.w) * gSeedPhase.x + SeedPhaseOf(p.x, f.x, gSeedPhase.x, gSeedPhase.z)) * kSeedGeo +
-                        SeedGeoBucket(l);
-    const uint b0 = bucket * 7;
-    float4 w4 = gSeedTable[b0];
-    float3 o = w4.x * g + w4.y * S[0] + w4.z * S[1] + w4.w * S[2];
-    [unroll] for (int q = 1; q < 6; ++q) {
-        w4 = gSeedTable[b0 + q];
-        o += w4.x * S[q * 4 - 1] + w4.y * S[q * 4] + w4.z * S[q * 4 + 1] + w4.w * S[q * 4 + 2];
-    }
-    w4 = gSeedTable[b0 + 6];
-    o += w4.x * S[23] + w4.y * S[24];
-    alpha = w4.z;
-    return o;
+    const float3 q = round(saturate(MoonsrSpatial(C, t, gSeedDst.z, 1.0, 0.015)) * 255.0) / 255.0;
+    // Exact no-op (gSeedDst.w is always 0) that stops fxc from folding the 1/255 above into the caller's arithmetic
+    // (the sRGB decode in alsr_seedblend). Without it the output is not bit-identical to the 8-bit quantised seed of
+    // earlier versions (measured: hashes differ, PSNR within 0.0003 dB).
+    return asfloat(asuint(q) | asuint(gSeedDst.w));
 }
 
 #endif

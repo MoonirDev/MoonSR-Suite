@@ -809,3 +809,223 @@ Live (`moonsr_testpattern` 1280x720 at 30 fps, `moonsr_cli --fg 2 --scaler lancz
 
 Neural rendering on the A400 with the 5060 presenting: refused (NVIDIA runtime, see NR_BRIDGE.md). All stages on the
 A400 with neural rendering: works (168 captured, 92 presented in 6 s; the A400 is too slow for 30 fps NR).
+
+## Moon ALSR baseline (temporal harness), 2026-11-21
+
+> Naming note (2026-11-22): "Moon ALSR" in the sections below is now named MoonSR in the product (the scaler list shows
+> "MoonSR (experimental)"; CLI `--scaler moonsr`, alias `alsr`). Recorded numbers are unchanged. The learning options
+> referred to below (`--alsr-learning`, `--nolearn`, `--fg-learn`) and the learners themselves were removed on
+> 2026-11-22; those runs cannot be repeated with the current tree. Timing diagnostics are now under `--fg-diag`.
+
+First measurement of Moon ALSR after the offline `tools/tbench` was removed: a new temporal mode of `moonsr_bench`
+(`--temporal`, sources `tools/bench/temporal*.cpp`) with exact ground truth. Measured by the benchmark-specialist.
+
+**Tree**: commit `814bc0d` + uncommitted harness (`tools/bench/temporal.h`, `temporal.cpp`, `temporal_seq.cpp`, edits to
+`main.cpp`, `selftest.cpp`, `gpu_runner.h`, `report.cpp`, `CMakeLists.txt`). Source hash printed by the tool:
+`e7b612144639a9ee (73 files)`. Build: `powershell -ExecutionPolicy Bypass -File tools\build.ps1 -BuildDir build\bench2 -Target moonsr_bench`
+(RelWithDebInfo, /W4 clean). OS Windows 11 build 10.0.26300.9974, Ryzen 9 7900X, RTX 5060 and RTX A400 (both driver
+621.14 / UMD 32.0.16.2114). Both GPUs ran in one invocation, so they scored identical inputs.
+
+**Commands**
+
+```
+build\bench2\bin\moonsr_bench.exe --selftest --adapter 5060
+build\bench2\bin\moonsr_bench.exe --temporal --adapter 5060 --adapter A400 --tag baseline
+build\bench2\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,scene_cut --scales 1.5 --tag det
+build\bench2\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,hud_pan --scales 1.5,2 --methods alsr --alsr-learning --tag learn   # option removed 2026-11-22
+```
+
+Defaults used: 1920x1080 ground truth, 64 frames per sequence, ground-truth supersampling 3x3, warm-up 8 frames excluded
+from every average, sharpness 0 for all methods, Moon ALSR `AlsrSettings` defaults except `learning = false` and
+`useLearned = false` (stability 0.85), `FrameGenSettings` defaults, no `SetProfile` (no persistence). Scales 1.5x
+(1280x720 input) and 2x (960x540 input). Raw CSV: `temporal_summary_t_baseline.csv` (one row per run) and
+`temporal_frames_t_baseline.csv` (one row per frame), written to `benchmarks\output\results` (git-ignored output dir).
+
+**What is measured.** Seven procedural sequences (pure functions of x, y, frame, so the ground truth is exact):
+`pan_slow` (1.1, 0.5 px/frame at 1080p), `pan_fast` (17.3, 6.1), `rot_zoom` (rotating, zooming 560 px disc with spokes
+over a static background), `hud_pan` (3.7, 1.3 pan under a static HUD: health bar, seven-segment score on a translucent
+panel, ammo ticks, 1 px crosshair), `scene_cut` (pan, hard cut to another scene at frame 32 with different motion),
+`thin_pan` (1 px horizontal/vertical/diagonal lines and rings panning at 0.73, 0.41 px/frame), `still` (no motion).
+The game-resolution frame is either **aliased** (point sample of the continuous scene at input pixel centres, as an
+engine without AA renders) or **area** (exact box average of the 3x3-supersampled ground truth). Each frame goes through
+the real `ScalePass` (Lanczos-3, MoonSR Spatial) or through `FrameGenerator::PushFrame` + `AlsrUpscaler::Render` on the same
+`GpuDevice`, is read back and scored against the ground truth.
+
+Metrics: luma PSNR (BT.709 on gamma-encoded values, float, peak 255), luma SSIM (11x11 Gaussian), **flicker** = mean
+|e_t - e_(t-1)| of the luma error e = output - ground truth in 8-bit levels (excludes the scene-cut frame itself), HUD =
+the same on the four HUD rectangles (MSE over their union; SSIM = mean of the four crops), cut window = mean over frames
+32..39 (cut frame = 32), plus the single cut frame. Averages: arithmetic mean of per-frame values over frames 8..63.
+GPU time is measured in a separate pass (scoring leaves the GPU idle between frames): the whole sequence is submitted
+back to back twice with D3D11 timestamp queries around every call, and frames 8..63 of the second pass are reported.
+
+**Validation of the harness** (`--selftest`, 0 failures, 22 temporal checks): scorer identity gives PSNR inf / SSIM 1 /
+flicker 0; a constant +5 offset gives exactly 20 log10(255/5) = 34.151 dB; alternating +5/-5 gives flicker 10.000; an
+error confined to a HUD rectangle matches the analytic HUD and frame PSNR (30.069 dB hud); an integer pan of (4, 2)
+px/frame translates the ground truth with 0 of 107352 samples differing; point sampling at 1x equals the ss=1 render;
+2x area input equals the 2x2 box mean; an end-to-end 1x run through the GPU runner reproduces the ground truth exactly
+(PSNR inf); the runner output equals the one-shot `ScalePass` output; per-frame PSNR/SSIM equal `Compare()`; Moon ALSR
+output is bit-identical across two runs. Determinism of the full harness: a rerun of 12 runs (pan_slow, scene_cut, 1.5x,
+both input modes, 3 methods, RTX 5060) matched the baseline in output hash, ground-truth hash, PSNR, SSIM and flicker
+in all 12; every one of the 84 RTX A400 runs produced output bit-identical to the RTX 5060 (FNV-1a of all frames).
+
+### Results (RTX 5060; quality is identical on the RTX A400)
+
+##### 1.5x, aliased input, RTX 5060 (luma PSNR dB / SSIM / flicker; best of the three in bold per metric)
+
+| Sequence | Lanczos-3 | MoonSR Spatial | Moon ALSR |
+|---|---|---|---|
+| pan_slow | **37.81** / **0.9810** / **2.01** | 37.45 / 0.9754 / 2.20 | 36.56 / 0.9749 / 2.31 |
+| pan_fast | **37.79** / **0.9808** / **2.11** | 37.39 / 0.9751 / 2.38 | 37.39 / 0.9773 / 2.33 |
+| rot_zoom | **35.84** / **0.9790** / **0.53** | 35.60 / 0.9733 / 0.53 | 34.56 / 0.9668 / 0.83 |
+| hud_pan | **35.84** / **0.9794** / **2.04** | 35.55 / 0.9741 / 2.29 | 34.96 / 0.9763 / 2.30 |
+| scene_cut | **37.66** / **0.9810** / **2.07** | 37.30 / 0.9753 / 2.45 | 36.62 / 0.9767 / 2.44 |
+| thin_pan | **14.42** / **0.7264** / 40.80 | 13.68 / 0.7109 / 42.14 | 13.91 / 0.7071 / **40.39** |
+| still | **37.75** / **0.9807** / **0.00** | 37.36 / 0.9742 / **0.00** | 37.36 / 0.9741 / **0.00** |
+
+##### 1.5x, area input, RTX 5060 (luma PSNR dB / SSIM / flicker; best of the three in bold per metric)
+
+| Sequence | Lanczos-3 | MoonSR Spatial | Moon ALSR |
+|---|---|---|---|
+| pan_slow | 40.08 / 0.9772 / 2.03 | 40.07 / 0.9708 / 2.13 | **40.79** / **0.9845** / **1.79** |
+| pan_fast | **40.09** / **0.9771** / **2.24** | 40.05 / 0.9707 / 2.43 | 40.01 / 0.9748 / 2.31 |
+| rot_zoom | 38.61 / **0.9767** / 0.47 | **39.05** / 0.9708 / **0.43** | 38.05 / 0.9653 / 0.65 |
+| hud_pan | 38.54 / 0.9765 / 2.16 | **39.00** / 0.9707 / 2.36 | 38.57 / **0.9780** / **2.09** |
+| scene_cut | 39.96 / 0.9772 / 2.32 | 40.00 / 0.9708 / 2.55 | **40.52** / **0.9827** / **2.03** |
+| thin_pan | 17.65 / 0.8185 / 29.21 | **18.23** / **0.8497** / **26.59** | 18.02 / 0.8330 / 26.95 |
+| still | **40.02** / **0.9770** / **0.00** | 40.00 / 0.9704 / **0.00** | 39.99 / 0.9703 / **0.00** |
+
+##### 2x, aliased input, RTX 5060 (luma PSNR dB / SSIM / flicker; best of the three in bold per metric)
+
+| Sequence | Lanczos-3 | MoonSR Spatial | Moon ALSR |
+|---|---|---|---|
+| pan_slow | 35.08 / 0.9437 / 3.51 | 35.14 / 0.9407 / 3.39 | **35.71** / **0.9683** / **2.52** |
+| pan_fast | 35.07 / 0.9429 / 3.72 | 35.08 / 0.9396 / 3.73 | **35.14** / **0.9510** / **3.36** |
+| rot_zoom | 33.18 / **0.9202** / 0.79 | **33.24** / 0.9109 / **0.75** | 32.56 / 0.9024 / 1.02 |
+| hud_pan | 34.33 / 0.9424 / 3.45 | 34.53 / 0.9398 / 3.56 | **34.83** / **0.9633** / **2.84** |
+| scene_cut | 34.96 / 0.9438 / 3.90 | 35.02 / 0.9408 / 3.90 | **35.67** / **0.9661** / **2.88** |
+| thin_pan | **12.00** / 0.5192 / 53.56 | 11.57 / 0.5209 / 54.36 | 11.86 / **0.5259** / **51.44** |
+| still | **34.56** / **0.9181** / **0.00** | 34.48 / 0.9068 / **0.00** | 34.48 / 0.9066 / **0.00** |
+
+##### 2x, area input, RTX 5060 (luma PSNR dB / SSIM / flicker; best of the three in bold per metric)
+
+| Sequence | Lanczos-3 | MoonSR Spatial | Moon ALSR |
+|---|---|---|---|
+| pan_slow | 37.43 / 0.9505 / 2.93 | 37.77 / 0.9445 / 2.88 | **39.20** / **0.9733** / **2.28** |
+| pan_fast | 37.42 / 0.9499 / 3.27 | 37.72 / 0.9436 / 3.32 | **37.75** / **0.9529** / **3.11** |
+| rot_zoom | 35.45 / **0.9273** / 0.65 | **35.87** / 0.9169 / **0.57** | 35.09 / 0.9084 / 0.85 |
+| hud_pan | 36.54 / 0.9497 / 3.04 | 37.28 / 0.9444 / 3.21 | **37.50** / **0.9640** / **2.63** |
+| scene_cut | 37.33 / 0.9507 / 3.49 | 37.71 / 0.9447 / 3.53 | **38.76** / **0.9686** / **2.73** |
+| thin_pan | 15.51 / 0.6925 / 36.54 | **15.93** / **0.7431** / **34.17** | 15.58 / 0.6982 / 35.48 |
+| still | 36.35 / **0.9236** / **0.00** | **36.41** / 0.9115 / **0.00** | 36.40 / 0.9114 / **0.00** |
+
+##### HUD region (hud_pan) and scene-cut window (scene_cut, frames 32..39), RTX 5060
+
+| Scale | Input | Method | HUD PSNR | HUD SSIM | HUD flicker | cut-frame PSNR | cut window PSNR | cut window SSIM |
+|---|---|---|---|---|---|---|---|---|
+| 1.5x | aliased | Lanczos-3 | 24.50 | 0.8963 | 1.46 | 37.45 | 37.48 | 0.9809 |
+| 1.5x | aliased | MoonSR Spatial | 24.34 | 0.8999 | 1.59 | 37.07 | 37.13 | 0.9752 |
+| 1.5x | aliased | Moon ALSR | 23.09 | 0.8831 | 2.62 | 37.07 | 36.49 | 0.9769 |
+| 1.5x | area | Lanczos-3 | 27.96 | 0.9474 | 1.46 | 39.79 | 39.83 | 0.9771 |
+| 1.5x | area | MoonSR Spatial | 29.66 | 0.9584 | 1.59 | 39.88 | 39.92 | 0.9707 |
+| 1.5x | area | Moon ALSR | 27.68 | 0.9315 | 2.96 | 39.88 | 40.23 | 0.9796 |
+| 2x | aliased | Lanczos-3 | 26.31 | 0.8653 | 2.35 | 34.34 | 34.74 | 0.9396 |
+| 2x | aliased | MoonSR Spatial | 27.22 | 0.8714 | 2.46 | 34.30 | 34.80 | 0.9354 |
+| 2x | aliased | Moon ALSR | 25.76 | 0.8541 | 3.43 | 34.30 | 35.22 | 0.9526 |
+| 2x | area | Lanczos-3 | 27.90 | 0.9119 | 2.09 | 36.20 | 37.05 | 0.9463 |
+| 2x | area | MoonSR Spatial | 30.74 | 0.9232 | 2.22 | 36.32 | 37.42 | 0.9394 |
+| 2x | area | Moon ALSR | 28.42 | 0.8909 | 3.44 | 36.32 | 37.90 | 0.9518 |
+
+##### GPU time per frame (ms, mean / median / p95 over frames 8..63 of the second back-to-back pass; ALSR = Render + motion estimator PushFrame shown separately)
+
+| GPU | Scale | Method | mean over 7 sequences, aliased (ms) | min..max over sequences (ms) | motion estimator (ms, mean) |
+|---|---|---|---|---|---|
+| 5060 | 1.5x | Lanczos-3 | 0.391 | 0.120..0.762 | - |
+| 5060 | 1.5x | MoonSR Spatial | 0.286 | 0.232..0.450 | - |
+| 5060 | 1.5x | Moon ALSR | 0.794 | 0.597..0.953 | 0.450 |
+| 5060 | 2x | Lanczos-3 | 0.411 | 0.120..0.840 | - |
+| 5060 | 2x | MoonSR Spatial | 0.270 | 0.223..0.474 | - |
+| 5060 | 2x | Moon ALSR | 0.550 | 0.436..0.717 | 0.291 |
+| A400 | 1.5x | Lanczos-3 | 0.983 | 0.911..1.085 | - |
+| A400 | 1.5x | MoonSR Spatial | 1.840 | 1.683..1.919 | - |
+| A400 | 1.5x | Moon ALSR | 4.581 | 4.214..5.554 | 2.540 |
+| A400 | 2x | Lanczos-3 | 0.970 | 0.934..1.002 | - |
+| A400 | 2x | MoonSR Spatial | 1.849 | 1.786..1.883 | - |
+| A400 | 2x | Moon ALSR | 3.682 | 3.312..4.820 | 1.470 |
+
+##### Moon ALSR GPU time per sequence (ms mean: Render / motion estimator), aliased input
+
+| GPU | Scale | pan_slow | pan_fast | rot_zoom | hud_pan | scene_cut | thin_pan | still |
+|---|---|---|---|---|---|---|---|---|
+| 5060 | 1.5x | 0.770 / 0.463 | 0.884 / 0.450 | 0.953 / 0.431 | 0.757 / 0.457 | 0.597 / 0.438 | 0.832 / 0.506 | 0.765 / 0.406 |
+| 5060 | 2x | 0.602 / 0.310 | 0.490 / 0.288 | 0.717 / 0.290 | 0.485 / 0.311 | 0.466 / 0.289 | 0.653 / 0.294 | 0.436 / 0.255 |
+| A400 | 1.5x | 4.214 / 2.573 | 4.283 / 2.488 | 4.664 / 2.350 | 4.415 / 2.546 | 4.696 / 2.900 | 5.554 / 2.672 | 4.239 / 2.251 |
+| A400 | 2x | 3.344 / 1.527 | 3.458 / 1.465 | 3.811 / 1.389 | 3.641 / 1.501 | 3.391 / 1.516 | 4.820 / 1.511 | 3.312 / 1.384 |
+
+##### Moon ALSR minus the best spatial method (luma PSNR dB; negative = ALSR loses), RTX 5060
+
+| Sequence | 1.5x aliased | 1.5x area | 2x aliased | 2x area |
+|---|---|---|---|---|
+| pan_slow | -1.25 | +0.71 | +0.57 | +1.42 |
+| pan_fast | -0.40 | -0.07 | +0.05 | +0.03 |
+| rot_zoom | -1.28 | -0.99 | -0.68 | -0.78 |
+| hud_pan | -0.88 | -0.44 | +0.30 | +0.22 |
+| scene_cut | -1.03 | +0.51 | +0.65 | +1.05 |
+| thin_pan | -0.51 | -0.20 | -0.14 | -0.35 |
+| still | -0.40 | -0.03 | -0.08 | -0.01 |
+
+Output bit-identity RTX A400 vs RTX 5060 (FNV-1a of all 64 output frames): 84 of 84 runs identical.
+
+
+**Timing caveat.** The RTX 5060 per-frame times are not stable: the same Lanczos-3 pass at 2x measured 0.120 ms median on
+`pan_fast`/`rot_zoom` but 0.33-0.70 ms on other sequences (p95 up to 1.65 ms), so differences of a few tenths of a
+millisecond on that GPU are noise (probably clock/power state, not investigated). The RTX A400 is steady (Lanczos 0.91-1.09 ms,
+MoonSR Spatial 1.68-1.92 ms, per sequence mean). Treat the A400 column as the usable cost figure; the 5060 figures only say
+that all methods are well under 1 ms there. The motion estimator is a separate cost that the engine pays anyway when frame
+generation is on.
+
+**Learning (`--alsr-learning`, removed 2026-11-22; RTX 5060, pan_slow and hud_pan).** At 2x learning is not supported by the upscaler
+(`learningScaleSupported = 0`, 0 samples) and the output equals the learning-off output exactly. At 1.5x (1.28 M samples, 4
+solves, learned filters active, coverage 0.39-0.69 after 64 frames) the change is +0.001 to +0.012 dB luma PSNR (pan_slow aliased
+36.564 -> 36.565, hud_pan area 38.565 -> 38.577). 64 frames is far shorter than a real session, so this says nothing
+about long-run learning; learning is not part of the baseline above and the learning runs are not bit-deterministic by design
+(worker thread).
+
+**Reading the results (plain statements).**
+- Moon ALSR beats the best spatial scaler on the panning content with area (anti-aliased) input (e.g. pan_slow 2x +1.42 dB,
+  scene_cut 2x +1.05 dB, SSIM 0.9733 vs 0.9505 at 2x) and at 2x aliased input (pan_slow +0.57 dB, scene_cut +0.65 dB, hud_pan +0.30 dB, SSIM up to
+  +0.025 over Lanczos-3), with the lowest error flicker on those sequences; on pan_fast at 2x the gain is only +0.03 to +0.05 dB.
+- Moon ALSR **loses** at 1.5x with aliased input on every sequence with motion: -1.25 dB (pan_slow), -0.40 (pan_fast), -1.28
+  (rot_zoom), -0.88 (hud_pan), -1.03 (scene_cut) against Lanczos-3 in PSNR, although its SSIM is above MoonSR Spatial on pan_fast, hud_pan and scene_cut (and below Lanczos-3). It also loses at 1.5x area on pan_fast, rot_zoom, hud_pan and thin_pan, and on `rot_zoom` at every setting
+  (-0.68 to -0.99 dB at 2x and 1.5x area, -1.28 dB at 1.5x aliased; flicker 0.83 vs 0.53 at 1.5x aliased): content with rotation/zoom is where the image-based motion
+  estimate is least reliable.
+- In the HUD rectangles Moon ALSR is below MoonSR Spatial in all four configurations and below Lanczos-3 in three of four
+  (1.5x aliased 23.09 dB vs 24.50 Lanczos / 24.34 Spatial; the exception is 2x area, 28.42 vs 27.90 Lanczos / 30.74 Spatial),
+  and its HUD flicker is higher in all four (2.62-3.44 vs 1.46-2.46 levels), i.e. the static overlay is not protected as well as
+  a single-frame upscale. Whole-frame numbers hide this because the HUD covers about 3% of the frame.
+- Scene cut: the cut frame scores exactly the same as MoonSR Spatial in all four configurations (e.g. 37.07 = 37.07 dB at 1.5x
+  aliased; history restarts from the single-frame result), which is 0.04-0.38 dB below Lanczos-3 in two configurations (aliased) and 0.09-0.12 dB above it in the other two (area). The 8-frame window after the cut
+  is 0.4-0.9 dB below ALSR own sequence mean (2x aliased 35.22 vs 35.67 dB, 2x area 37.90 vs 38.76) but still above the spatial
+  scalers at 2x (34.74 / 34.80 aliased, 37.05 / 37.42 area); at 1.5x aliased the window is 0.99 dB below Lanczos-3 (36.49 vs 37.48).
+- `thin_pan` (1 px lines) is bad for every method (PSNR 12-18 dB); ALSR is below the best spatial method in all four configurations (by 0.14-0.51 dB); it is above Lanczos-3 only at 1.5x area (+0.37 dB).
+- `still`: ALSR reproduces the single-frame result (0.01-0.40 dB below Lanczos-3, zero flicker). It is not better than
+  Lanczos-3 on static content at any setting; MoonSR Spatial is below Lanczos-3 in SSIM on every sequence here.
+- MoonSR Spatial is within 0.8 dB of Lanczos-3 in PSNR (ahead by up to +0.74 dB on hud_pan 2x area, behind by up to 0.74 dB, thin_pan 1.5x aliased) and
+  0.002-0.012 lower in SSIM on every sequence except thin_pan, where it is higher.
+
+**Known limitations of the harness (what it does not represent about real games).**
+- Synthetic content: hashed discs/rectangles, value noise and vector HUD. No real textures, lighting, particles, motion blur,
+  transparency, film grain or video compression, no post-processing, no sub-pixel camera jitter and no TAA. Real game frames
+  differ in ways that matter to a temporal upscaler.
+- Motion is rigid translation, one rotation/zoom and one cut, with constant velocity at an exact 60 fps cadence; no frame-time
+  jitter, dropped frames, parallax or independently moving objects.
+- Aliased input is a single point sample of a continuous function (perfectly aliased); real engines mix MSAA, TAA and
+  shader-level filtering. The ground truth is a 3x3 box-filtered render, so "exact" means exact for that definition; PSNR
+  against it penalises sharper-than-box reconstructions.
+- The HUD here is static and fully opaque/translucent vector art authored for 1080p; real HUDs animate and use fonts.
+- Metrics are luma only (no chroma, no perceptual metric such as FLIP or LPIPS); flicker is an error-difference statistic, not
+  a visibility model. HUD SSIM is the mean over four crops, not a masked SSIM map.
+- Capture path effects are not modelled (Windows Graphics Capture format/timing, compression, cursor); input is exact BGRA8.
+- Timing is an isolated back-to-back GPU time at idle on one process, not in-game cost (no competing game load, no capture or
+  present), and see the timing caveat above. Quality runs score one frame at a time with a blocking readback.
+- Learning is off in the baseline; the learned-filter path was measured only for 64 frames.
+- No reference third-party upscaler (DLSS, FSR, XeSS) was measured: not measurable on captures, see the reference table above.

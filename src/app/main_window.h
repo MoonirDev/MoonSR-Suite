@@ -46,9 +46,13 @@ struct TestOptions {
     std::wstring order;              // --test-order "neural,framegen,upscaling" (not persisted)
     bool drag = false;               // --test-drag x1,y1,x2,y2 (client DIPs): press at 1, move to 2 and keep holding
     int dragX1 = 0, dragY1 = 0, dragX2 = 0, dragY2 = 0;
+    int closeToTray = -1;            // --test-close-to-tray 0|1: overrides the setting for this run
 };
 
 TestOptions ParseTestOptions();
+
+// Posted by a second instance to ask the running one to show itself (it may be hidden in the tray).
+constexpr UINT WM_APP_RESTORE = WM_APP + 3;
 
 class MainWindow {
 public:
@@ -76,6 +80,15 @@ private:
     void ApplyWindowIcons();
     void OnClose();
 
+    // Notification-area icon (close to tray). The icon exists only while the window is hidden to the tray.
+    bool CloseToTrayEnabled() const;
+    void HideToTray();
+    void RestoreFromTray();
+    bool AddTrayIcon();
+    void RemoveTrayIcon();
+    void OnTrayMessage(WPARAM wp, LPARAM lp);
+    void ShowTrayMenu(POINT anchor);
+
     // Population
     void PopulateWindows();
     void PopulateMonitors();
@@ -97,7 +110,6 @@ private:
     void UpdateNeuralState();
     void OnNeuralChange();
     void SubmitNeuralSettings();
-    void UpdateLauncherZOrder(bool active);
     void OnAddModel();
     void OpenModelsFolder();
     void BeginInspect(const std::wstring& path);
@@ -117,15 +129,10 @@ private:
     void UpdatePictureState();
     void OnPictureChange();
 
-    // Moon ALSR
+    // MoonSR temporal upscaler
     bool AlsrSelected() const;
     AlsrSettings CurrentAlsr() const;
     void UpdateAlsrUi();
-    void UpdateAlsrStatus(const EngineStats& st);
-    void ConfirmAlsrReset();
-    void ConfirmFrameGenLearningReset();
-    void UpdateFrameGenLearningStatus(const EngineStats& st);
-    void OpenProfilesFolder();
 
     // Load order
     PipelineOrder CurrentOrder() const;
@@ -166,6 +173,9 @@ private:
     HINSTANCE instance_ = nullptr;
     UINT dpi_ = 96;
     bool mica_ = false;
+    bool trayIconShown_ = false;  // window hidden to the tray and the icon registered
+    bool exiting_ = false;        // a real exit was requested: WM_CLOSE must not hide to the tray
+    HICON trayIcon_ = nullptr;
     ui::Gfx gfx_;
     ui::View view_;
     AppUi ui_;
@@ -211,7 +221,6 @@ private:
     struct TestStatus {
         std::wstring state = L"Idle", frameGen = L"Off", scaler, engineOrder;
         bool alsrActive = false;
-        unsigned long long alsrSamples = 0;
         double game = 0, displayed = 0, generated = 0, latencyMs = 0;
     } status_;
 };

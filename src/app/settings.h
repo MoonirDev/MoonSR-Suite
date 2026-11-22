@@ -31,21 +31,20 @@ struct AppSettings {
     int sharpnessPercent = 0; // 0..100
     bool vsync = false;
     bool showCursor = true;
+    bool closeToTray = false;       // window close hides to the notification area instead of exiting
     bool showFrameCounter = false; // "<game fps>/<displayed fps>" in the top-left corner of the output
     // Frame generation
     int frameGenMultiplier = 1;   // 1 = off, 2..6
     int frameGenLastMultiplier = 2;  // last non-off multiplier, restored when frame generation is switched back on
     int frameGenFlowPercent = 50; // 25..100 in steps of 5
     bool frameGenHudProtection = true;
-    bool frameGenAdaptiveLearning = false;
     // Neural rendering (user-supplied model; see ModelStore)
     bool neuralRendering = false;
     std::wstring neuralModelId;
     NeuralSettings neuralSettings;
     PictureSettings pictureSettings;
-    // Moon ALSR
-    bool alsrLearning = true;
-    bool alsrUseLearned = false;
+    // MoonSR temporal upscaler. Keys that older versions wrote and this one no longer uses stay in the file and
+    // are ignored when loading.
     int alsrHistoryPercent = 85;  // 50..95
     // Processing order, e.g. "neural,framegen,upscaling"; empty / invalid = default
     std::wstring pipelineOrder;

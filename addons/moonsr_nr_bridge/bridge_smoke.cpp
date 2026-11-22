@@ -22,6 +22,14 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 1 && std::wstring_view(argv[1]) == L"--priority") { priority = true; --argc; ++argv; }
     const bool timing = argc > 2 && std::wstring_view(argv[1]) == L"--timing";
     if (timing) { --argc; ++argv; }
+    // --first-device <adapter name substring>: regression check for NGX's oldest-device rule (see
+    // src/engine/remote_stages.h). A D3D11 device is created on that adapter first and kept alive, then one frame is
+    // processed on the test adapter. NGX creates features only on the adapter of a process's oldest live device, so
+    // on a different adapter the expected result is FAIL_PlatformError (0xBAD00002): exit 0 when that is what happens
+    // (or when both are the same adapter and the frame succeeds), exit 3 when the driver no longer refuses -- then
+    // MoonSR's helper process for NVIDIA neural rendering off the monitor's GPU may no longer be needed.
+    const wchar_t* firstDevice = nullptr;
+    if (argc > 3 && std::wstring_view(argv[1]) == L"--first-device") { firstDevice = argv[2]; argc -= 2; argv += 2; }
     HMODULE module = nullptr;
     HMODULE fixture = nullptr;
     void* instance = nullptr;
@@ -35,7 +43,9 @@ int wmain(int argc, wchar_t** argv) {
         const bool amd = amdFixture || (argc > 1 && std::wstring_view(argv[1]) == L"--amd");
         const int modelArg = amd ? 2 : 1;
         check(argc <= modelArg + 2 && (!amd || argc > modelArg),
-              "Usage: MoonSR_NrBridgeSmoke.exe [--priority] [--timing] [--amd] [runtime path [adapter name substring]]");
+              "Usage: MoonSR_NrBridgeSmoke.exe [--priority] [--timing | --first-device <adapter>] [--amd] "
+              "[runtime path [adapter name substring]]");
+        check(!firstDevice || (!amd && !timing && argc > 1), "--first-device needs an NVIDIA runtime path");
         const bool usingFixture = argc == 1;
         auto model = usingFixture ? (dir / L"MoonSR_NrFixture.dll").wstring() : std::filesystem::absolute(argv[modelArg]).wstring();
         int (*configure)(unsigned, unsigned) = nullptr;
@@ -72,6 +82,25 @@ int wmain(int argc, wchar_t** argv) {
             adapter.Reset();
         }
         check(adapter != nullptr, amd ? "Find AMD adapter" : "Find NVIDIA adapter");
+        ComPtr<ID3D11Device> olderDevice;
+        bool sameAdapter = false;
+        if (firstDevice) {
+            ComPtr<IDXGIAdapter1> first;
+            for (UINT i = 0; factory->EnumAdapters1(i, &first) != DXGI_ERROR_NOT_FOUND; ++i) {
+                DXGI_ADAPTER_DESC1 desc{}; first->GetDesc1(&desc);
+                if (std::wstring_view(desc.Description).find(firstDevice) != std::wstring_view::npos) {
+                    DXGI_ADAPTER_DESC1 tested{}; adapter->GetDesc1(&tested);
+                    sameAdapter = desc.AdapterLuid.LowPart == tested.AdapterLuid.LowPart &&
+                                  desc.AdapterLuid.HighPart == tested.AdapterLuid.HighPart;
+                    printf("Older device on %ls\n", desc.Description);
+                    break;
+                }
+                first.Reset();
+            }
+            check(first != nullptr, "Find the --first-device adapter");
+            hrcheck(D3D11CreateDevice(first.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                      nullptr, 0, D3D11_SDK_VERSION, &olderDevice, nullptr, nullptr), "Create older device");
+        }
         ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
         hrcheck(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                                   nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context), "Create capture device");
@@ -88,6 +117,35 @@ int wmain(int argc, wchar_t** argv) {
         cfg.passes = 1; cfg.resolutionPercent = 100; cfg.intensityPercent = 100; cfg.structurePercent = 80;
         cfg.tonePercent = 30; cfg.skinPercent = 80; cfg.detailPercent = cfg.colourPercent = 100; cfg.autoMask = 1;
         const wchar_t* error = nullptr;
+        if (firstDevice) {
+            constexpr unsigned width = 320, height = 240;
+            std::vector<uint32_t> pixels(width * height, 0xff406080u);
+            D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
+            desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1; desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA data{pixels.data(), width * 4, 0}; ComPtr<ID3D11Texture2D> source;
+            hrcheck(device->CreateTexture2D(&desc, &data, &source), "Create source");
+            check(api->Create(&cfg, &instance, &error) == MOONSR_NR_BRIDGE_OK, "Create failed");
+            MoonSrNrBridgeFrame frame{}; frame.size = sizeof(frame); frame.texture = source.Get();
+            frame.right = width; frame.bottom = height; frame.sequence = 1; frame.reset = 1; frame.saturation = 100;
+            MoonSrNrBridgeOutput out{}; out.size = sizeof(out);
+            const bool processed = api->Process(instance, &frame, &out, &error) == MOONSR_NR_BRIDGE_OK;
+            const std::wstring message = processed || !error ? L"" : error;
+            api->Destroy(instance); instance = nullptr;
+            FreeLibrary(module); module = nullptr;
+            if (sameAdapter) {
+                printf(processed ? "Same adapter: frame processed\n" : "Same adapter: frame FAILED: %ls\n", message.c_str());
+                return processed ? 0 : 1;
+            }
+            if (processed) {
+                puts("Driver no longer refuses NR beside an older device on another GPU (NGX oldest-device rule gone)");
+                return 3;
+            }
+            const bool expected = message.find(L"0xBAD00002") != std::wstring::npos;
+            printf("%s: %ls\n", expected ? "Refused as expected (NGX oldest-device rule)" : "Unexpected failure",
+                   message.c_str());
+            return expected ? 0 : 1;
+        }
         if (timing) {
             constexpr unsigned width = 1280, height = 720, warmup = 24, count = 160;
             D3D11_TEXTURE2D_DESC desc{};

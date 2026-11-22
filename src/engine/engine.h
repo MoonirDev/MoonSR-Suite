@@ -8,7 +8,6 @@
 
 #include "core/types.h"
 #include "framegen/frame_generator.h"
-#include "framegen/adaptive_controller.h"
 #include "models/model_store.h"
 #include "neural/neural_settings.h"
 #include "upscale/alsr_upscaler.h"
@@ -29,7 +28,6 @@ enum class CursorMode : uint32_t {
 struct FrameGenConfig {
     uint32_t multiplier = 1; // 1 = off. 2..6 = displayed frames per real frame (M - 1 generated per real frame)
     FrameGenSettings settings;
-    bool adaptiveLearning = false;
     bool operator==(const FrameGenConfig&) const = default;
 };
 
@@ -74,8 +72,8 @@ struct EngineConfig {
     CursorMode cursor = CursorMode::Software;
     FrameGenConfig frameGen;
     PipelineOrder order;
-    // Moon ALSR options, used when scale.scaler == ScalerKind::MoonALSR. `sharpness` here is ignored: the engine
-    // takes it from scale.sharpness. Learning state is kept per game in %LOCALAPPDATA%\MoonSR\profiles.
+    // MoonSR temporal upscaler options, used when scale.scaler == ScalerKind::MoonALSR. `sharpness` here is
+    // ignored: the engine takes it from scale.sharpness. The upscaler keeps no per-game state.
     AlsrSettings alsr;
     // Neural rendering with a USER-SUPPLIED model (see ModelStore). `neuralModelId` selects a model from
     // Engine::Models(). The separately built bridge loads the selected runtime.
@@ -116,7 +114,6 @@ struct EngineStats {
     // Plain-language explanation whenever frame generation is requested but not fully active (limited, paused on
     // irregular frames, unavailable). Empty when everything requested is being delivered. Show it to the user.
     std::wstring frameGenNote;
-    fgadaptive::ControllerStatus frameGenLearning;
     // Neural rendering: false until a runtime actually processes frames. The note explains the current state.
     bool neuralRenderingActive = false;
     uint64_t neuralProcessedFrames = 0, neuralProcessedGeneratedFrames = 0;
@@ -129,11 +126,10 @@ struct EngineStats {
     // Which GPU runs each stage and how frames cross between GPUs, e.g. "Frame generation: RTX A400 (copy: D3D12
     // cross-adapter heap) > Upscaling: RTX 5060". Empty while idle.
     std::wstring stageGpuText;
-    // Moon ALSR: true while it is producing the displayed image. `alsrNote` explains when it was requested but
-    // is not in use. `alsr` is the per-game learning status.
+    // MoonSR temporal upscaler: true while it is producing the displayed image. `alsrNote` explains when it was
+    // requested but is not in use.
     bool alsrActive = false;
     std::wstring alsrNote;
-    AlsrLearningStatus alsr;
     // Diagnostic recording (see Engine::RecordFrames).
     bool recording = false;            // a recording is in progress
     std::wstring lastRecordingDir;     // folder of the most recently finished recording
@@ -188,15 +184,11 @@ public:
     void SetScaleSettings(const ScaleSettings& settings);
     void SetVsync(bool vsync);
     void SetFrameGen(const FrameGenConfig& frameGen);
-    // Clears the current adaptive frame-generation profile, if learning is active.
-    void ResetFrameGenLearning();
     void SetFrameCounter(bool show);
     void SetPictureSettings(const PictureSettings& settings);
     void SetNeuralSettings(bool enabled, const std::wstring& modelId, const NeuralSettings& settings);
     void SetPipelineOrder(const PipelineOrder& order);
     void SetAlsrSettings(const AlsrSettings& settings);
-    // Forgets everything Moon ALSR learned for the game currently being scaled (deletes its profile).
-    void ResetAlsrLearning();
 
     // Default order, display names and one-line descriptions for the UI.
     static PipelineOrder DefaultOrder();

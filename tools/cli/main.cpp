@@ -1,14 +1,16 @@
 // moonsr_cli: command-line driver for the engine. Used for integration testing and scripted measurements.
 //
 //   moonsr_cli --list
-//   moonsr_cli --window <title substring> [--seconds N] [--scaler <name substring>] [--sharpness 0..1]
+//   moonsr_cli --window <title substring> [--seconds N] [--scaler <name>] [--sharpness 0..1]
 //              [--fit fit|stretch|integer] [--vsync] [--monitor <index>] [--adapter <name substring>] [--cycle]
 //              [--cursor none|captured|software] [--fg <multiplier 1..6>] [--fgquality performance|balanced|quality]
 //              [--flowscale 0.25..1] [--record <frames> <directory>] (starts recording 2 s into the run)
-//              [--fg-learn] [--fg-reset-at N] [--fg-disable-at N] (diagnostics, seconds)
+//              [--fg-diag] (prints presentation timing diagnostics every second)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
 //              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
 //
+// --scaler takes a scaler name substring (case-insensitive), or one of the short names nearest, bilinear, bicubic,
+// lanczos, spatial, moonsr (the MoonSR temporal upscaler; `alsr` is accepted as an alias).
 // --cycle switches through every available scaler during the run (exercises live setting changes).
 #include "core/log.h"
 #include "engine/engine.h"
@@ -30,6 +32,20 @@ std::wstring Lower(std::wstring s) {
 }
 
 bool Contains(const std::wstring& hay, const std::wstring& needle) { return Lower(hay).find(Lower(needle)) != std::wstring::npos; }
+
+// Short scaler names. "moonsr" selects the temporal upscaler (as a substring it would also match "MoonSR Spatial");
+// "alsr" is its former name, kept as an alias.
+bool ShortScalerName(const std::wstring& name, ScalerKind& kind) {
+    const std::wstring n = Lower(name);
+    if (n == L"moonsr" || n == L"alsr" || n == L"moonalsr") kind = ScalerKind::MoonALSR;
+    else if (n == L"spatial" || n == L"moonsr-spatial") kind = ScalerKind::MoonSRSpatial;
+    else if (n == L"nearest") kind = ScalerKind::Nearest;
+    else if (n == L"bilinear") kind = ScalerKind::Bilinear;
+    else if (n == L"bicubic" || n == L"catmull-rom") kind = ScalerKind::Bicubic;
+    else if (n == L"lanczos") kind = ScalerKind::Lanczos;
+    else return false;
+    return true;
+}
 
 const wchar_t* StateName(EngineState s) {
     switch (s) {
@@ -56,7 +72,7 @@ void List() {
                 m.desktopRect.right - m.desktopRect.left, m.desktopRect.bottom - m.desktopRect.top, m.refreshHz,
                 m.primary ? L" primary" : L"", m.hdrEnabled ? L" HDR" : L"");
     }
-    wprintf(L"Scalers:\n");
+    wprintf(L"Scalers (--scaler takes a name substring or nearest, bilinear, bicubic, lanczos, spatial, moonsr):\n");
     for (const auto& s : Engine::ListScalers()) wprintf(L"  %s%s\n", s.name, s.available ? L"" : L"  (not in this build)");
     wprintf(L"Windows:\n");
     for (const auto& w : Engine::ListWindows())
@@ -70,9 +86,9 @@ int wmain(int argc, wchar_t** argv) {
     double seconds = 5.0;
     float sharpness = 0.0f;
     int monitorIndex = -1;
-    bool vsync = false, list = false, cycle = false, counter = false, noscale = false, upscaleFirst = false, nolearn = false, fgLearn = false;
+    bool vsync = false, list = false, cycle = false, counter = false, noscale = false, upscaleFirst = false, fgDiag = false;
     int fgMultiplier = 1;
-    int fgResetAt = 0, fgDisableAt = 0, orderSwitchAt = 0;
+    int orderSwitchAt = 0;
     float flowScale = 0.5f;
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
@@ -95,16 +111,13 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--noscale") noscale = true;
         else if (a == L"--upscale-first") upscaleFirst = true;
         else if (a == L"--order-switch-at") orderSwitchAt = _wtoi(next().c_str());
-        else if (a == L"--nolearn") nolearn = true;
         else if (a == L"--neural") neuralModel = next();
         else if (a == L"--gpu-nr") gpuNr = next();
         else if (a == L"--gpu-fg") gpuFg = next();
         else if (a == L"--gpu-up") gpuUp = next();
         else if (a == L"--cursor") cursorMode = Lower(next());
         else if (a == L"--fg") fgMultiplier = _wtoi(next().c_str());
-        else if (a == L"--fg-learn") fgLearn = true;
-        else if (a == L"--fg-reset-at") fgResetAt = _wtoi(next().c_str());
-        else if (a == L"--fg-disable-at") fgDisableAt = _wtoi(next().c_str());
+        else if (a == L"--fg-diag") fgDiag = true;
         else if (a == L"--record") {
             recordFrames = _wtoi(next().c_str());
             recordDir = next();
@@ -138,21 +151,26 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     std::vector<ScalerKind> available;
+    ScalerKind shortKind{};
+    const bool isShort = !scalerName.empty() && ShortScalerName(scalerName, shortKind);
+    bool scalerFound = scalerName.empty();
     for (const auto& s : Engine::ListScalers()) {
         if (!s.available) continue;
         available.push_back(s.kind);
-        if (!scalerName.empty() && Contains(s.name, scalerName)) cfg.scale.scaler = s.kind;
+        if (isShort ? s.kind == shortKind : (!scalerName.empty() && Contains(s.name, scalerName))) {
+            cfg.scale.scaler = s.kind;
+            scalerFound = true;
+        }
     }
+    if (!scalerFound) fwprintf(stderr, L"No scaler matches '%s'; using the default.\n", scalerName.c_str());
     cfg.scale.sharpness = sharpness;
     cfg.scale.fit = fit == L"stretch" ? FitMode::Stretch : fit == L"integer" ? FitMode::Integer : FitMode::Fit;
     cfg.vsync = vsync;
     cfg.showFrameCounter = counter;
     cfg.scale.enabled = !noscale;
-    cfg.alsr.learning = !nolearn;
     if (upscaleFirst)
         cfg.order.stages = {PipelineStage::NeuralRendering, PipelineStage::Upscaling, PipelineStage::FrameGeneration};
     cfg.frameGen.multiplier = static_cast<uint32_t>(std::clamp(fgMultiplier, 1, 6));
-    cfg.frameGen.adaptiveLearning = fgLearn;
     if (!neuralModel.empty()) {
         // Neural rendering with an installed model id (see %LOCALAPPDATA%\MoonSR\models\catalogue.txt), one pass.
         cfg.neuralRendering = true;
@@ -221,30 +239,15 @@ int wmain(int argc, wchar_t** argv) {
             wprintf(L"     frame gen x%u%s: generated %.1f fps, hold-back %.2f ms, generated presented %llu, scheduler late %llu\n",
                     s.frameGenMultiplier, s.frameGenLimited ? L" (limited by the engine)" : L"", s.generatedFps,
                     s.frameGenDelayMs, s.generatedPresented, s.generatedLate);
-        if (fgLearn && s.generatedSkipped) wprintf(L"     catch-up: generated frames skipped %llu\n", s.generatedSkipped);
+        if (fgDiag && s.generatedSkipped) wprintf(L"     catch-up: generated frames skipped %llu\n", s.generatedSkipped);
         if (!s.frameGenNote.empty()) wprintf(L"     note: %s\n", s.frameGenNote.c_str());
-        if (fgLearn) wprintf(L"     present call %.2f ms, swapchain wait %.2f ms; present intervals median %.2f ms p95 %.2f ms\n",
+        if (fgDiag) wprintf(L"     present call %.2f ms, swapchain wait %.2f ms; present intervals median %.2f ms p95 %.2f ms\n",
                              s.presentCallMs, s.swapchainWaitMs, s.presentIntervalMedianMs, s.presentIntervalP95Ms);
-        if (fgLearn && s.displayIntervalSamples) wprintf(L"     DXGI display intervals median %.2f ms p95 %.2f ms (%u samples)\n",
+        if (fgDiag && s.displayIntervalSamples) wprintf(L"     DXGI display intervals median %.2f ms p95 %.2f ms (%u samples)\n",
                              s.displayIntervalMedianMs, s.displayIntervalP95Ms, s.displayIntervalSamples);
-        if (fgLearn)
-            wprintf(L"     learning: %s | profile %s | samples %u/%u | flow %.0f%% / %.0f%% | frames %llu unstable %llu, triplets %llu timing %llu motion %llu busy %llu evaluated %llu\n",
-                    s.frameGenLearning.note.c_str(), s.frameGenLearning.profileLoaded ? L"loaded" : L"new",
-                    s.frameGenLearning.training, s.frameGenLearning.validation,
-                    s.frameGenLearning.effectiveFlow * 100.0f, s.frameGenLearning.requestedFlow * 100.0f,
-                    s.frameGenLearning.sampler.frames, s.frameGenLearning.sampler.unstableFrames, s.frameGenLearning.sampler.triplets,
-                    s.frameGenLearning.sampler.timingRejected, s.frameGenLearning.sampler.motionRejected,
-                    s.frameGenLearning.sampler.expired, s.frameGenLearning.sampler.evaluations);
-        if (tick == fgResetAt) { engine.ResetFrameGenLearning(); wprintf(L"     requested learning reset\n"); }
-        if (tick == fgDisableAt) {
-            cfg.frameGen.adaptiveLearning = false;
-            engine.SetFrameGen(cfg.frameGen);
-            wprintf(L"     disabled adaptive learning\n");
-        }
         if (cfg.scale.scaler == ScalerKind::MoonALSR)
-            wprintf(L"     ALSR %s: profile %s, samples %llu, solves %u, coverage %.0f%%, validation error generic %.3f / learned %.3f%s%s\n",
-                    s.alsrActive ? L"active" : L"NOT active", s.alsr.profileLoaded ? L"loaded" : L"new", s.alsr.samples, s.alsr.solves,
-                    s.alsr.coverage * 100.0f, s.alsr.genericError, s.alsr.learnedError, s.alsrNote.empty() ? L"" : L" | ", s.alsrNote.c_str());
+            wprintf(L"     MoonSR %s%s%s\n", s.alsrActive ? L"active" : L"NOT active", s.alsrNote.empty() ? L"" : L" | ",
+                    s.alsrNote.c_str());
         if (upscaleFirst || orderSwitchAt) wprintf(L"     order: %s%s%s\n", s.pipelineOrderText.c_str(), s.pipelineOrderNote.empty() ? L"" : L" | ", s.pipelineOrderNote.c_str());
         if (tick == orderSwitchAt) {
             cfg.order.stages = upscaleFirst ? Engine::DefaultOrder().stages :

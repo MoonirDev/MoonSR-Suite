@@ -98,6 +98,7 @@ AppSettings LoadSettings() {
     s.sharpnessPercent = std::clamp(ReadInt(path, L"Scaling", L"Sharpness", 0), 0, 100);
     s.vsync = ReadInt(path, L"Scaling", L"VSync", 0) != 0;
     s.showCursor = ReadInt(path, L"Scaling", L"ShowCursor", 1) != 0;
+    s.closeToTray = ReadInt(path, L"App", L"CloseToTray", 0) != 0;
     s.showFrameCounter = ReadInt(path, L"Scaling", L"ShowFrameCounter", 0) != 0;
     s.neuralRendering = ReadInt(path, L"Neural", L"Enabled", 0) != 0;
     s.neuralModelId = ReadString(path, L"Neural", L"ModelId");
@@ -125,9 +126,6 @@ AppSettings LoadSettings() {
     pic.temperature = std::clamp(ReadSignedInt(path, L"Picture", L"Temperature", 0), -200, 200);
     pic.tint = std::clamp(ReadSignedInt(path, L"Picture", L"Tint", 0), -200, 200);
     pic.sharpen = std::clamp(ReadSignedInt(path, L"Picture", L"Sharpen", 0), 0, 400);
-    s.alsrLearning = ReadInt(path, L"Alsr", L"Learning", 1) != 0;
-    // The old UseLearned switch was silently ignored. Require a fresh opt-in now it actually affects the image.
-    s.alsrUseLearned = ReadInt(path, L"Alsr", L"ExperimentalUseLearned", 0) != 0;
     s.alsrHistoryPercent = std::clamp(ReadSignedInt(path, L"Alsr", L"HistoryPercent", 85), 50, 95);
     s.pipelineOrder = ReadString(path, L"Pipeline", L"Order");
     s.hasWindowPos = ReadInt(path, L"Window", L"HasPosition", 0) != 0;
@@ -141,7 +139,6 @@ AppSettings LoadSettings() {
     const int flow = std::clamp(ReadSignedInt(path, L"FrameGen", L"FlowScalePercent", 50), 25, 100);
     s.frameGenFlowPercent = std::clamp(((flow + 2) / 5) * 5, 25, 100);
     s.frameGenHudProtection = ReadSignedInt(path, L"FrameGen", L"HudProtection", 1) != 0;
-    s.frameGenAdaptiveLearning = ReadSignedInt(path, L"FrameGen", L"AdaptiveLearning", 0) != 0;
     return s;
 }
 
@@ -169,12 +166,12 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Scaling", L"Sharpness", s.sharpnessPercent);
     ok &= WriteInt(path, L"Scaling", L"VSync", s.vsync ? 1 : 0);
     ok &= WriteInt(path, L"Scaling", L"ShowCursor", s.showCursor ? 1 : 0);
+    ok &= WriteInt(path, L"App", L"CloseToTray", s.closeToTray ? 1 : 0);
     ok &= WriteInt(path, L"Scaling", L"ShowFrameCounter", s.showFrameCounter ? 1 : 0);
     ok &= WriteInt(path, L"FrameGen", L"Multiplier", s.frameGenMultiplier);
     ok &= WriteInt(path, L"FrameGen", L"LastMultiplier", s.frameGenLastMultiplier);
     ok &= WriteInt(path, L"FrameGen", L"FlowScalePercent", s.frameGenFlowPercent);
     ok &= WriteInt(path, L"FrameGen", L"HudProtection", s.frameGenHudProtection ? 1 : 0);
-    ok &= WriteInt(path, L"FrameGen", L"AdaptiveLearning", s.frameGenAdaptiveLearning ? 1 : 0);
     ok &= WriteInt(path, L"Neural", L"Enabled", s.neuralRendering ? 1 : 0);
     ok &= WriteString(path, L"Neural", L"ModelId", s.neuralModelId);
     const auto& nr = s.neuralSettings;
@@ -201,8 +198,6 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Picture", L"Temperature", pic.temperature);
     ok &= WriteInt(path, L"Picture", L"Tint", pic.tint);
     ok &= WriteInt(path, L"Picture", L"Sharpen", pic.sharpen);
-    ok &= WriteInt(path, L"Alsr", L"Learning", s.alsrLearning ? 1 : 0);
-    ok &= WriteInt(path, L"Alsr", L"ExperimentalUseLearned", s.alsrUseLearned ? 1 : 0);
     ok &= WriteInt(path, L"Alsr", L"HistoryPercent", s.alsrHistoryPercent);
     ok &= WriteString(path, L"Pipeline", L"Order", s.pipelineOrder);
     ok &= WriteInt(path, L"Window", L"HasPosition", s.hasWindowPos ? 1 : 0);

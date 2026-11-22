@@ -4,7 +4,6 @@
 #include "engine/remote_stages.h"
 
 #include "capture/capture_source.h"
-#include "core/game_profile.h"
 #include "core/log.h"
 #include "cursor/cursor_overlay.h"
 #include "diag/frame_recorder.h"
@@ -66,8 +65,6 @@ struct Engine::Impl {
         NeuralSettings settings;
     };
     std::optional<NeuralChange> pendingNeuralChange; // guarded by mutex
-    bool alsrResetRequested = false; // guarded by mutex
-    bool fgLearningResetRequested = false; // guarded by mutex
     uint32_t recordRequestFrames = 0; // guarded by mutex; non-zero = start a recording
     std::wstring recordRequestDir;
 
@@ -80,6 +77,9 @@ struct Engine::Impl {
     std::vector<std::unique_ptr<GpuDevice>> extraDevices;
     GpuDevice* fgDevice = nullptr;
     GpuDevice* nrDevice = nullptr;
+    // The adapter driving the output monitor (the "Auto" GPU, also where MoonSR.exe's Direct2D UI device lives).
+    // NVIDIA neural rendering anywhere else runs in a helper process (see StartNeural).
+    LUID outputMonitorAdapter{};
     bool fgIsRemote = false;
     GpuDevice& NrDevice() { return nrDevice ? *nrDevice : *device; }
 
@@ -97,7 +97,7 @@ struct Engine::Impl {
         if (!alsrMotion && !alsrMotionFailed) {
             std::wstring e;
             alsrMotion = FrameGenerator::Create(*device, e);
-            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"Moon ALSR motion estimator unavailable: {}", e); }
+            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"MoonSR motion estimator unavailable: {}", e); }
         }
         return alsrMotion && alsrMotion->PushFrame(input, rect, qpc) ? alsrMotion.get() : nullptr;
     }
@@ -124,27 +124,29 @@ struct Engine::Impl {
 
     bool StartNeural(std::wstring& error) {
         GpuDevice& nr = NrDevice();
-        // Measured 2026-11-22 (RTX 5060 + RTX A400, driver 621.14): NVIDIA's runtime creates its model on the GPU that
-        // captures and presents, but fails feature creation with NGX FAIL_PlatformError (0xBAD00002) on any other
-        // NVIDIA GPU of the process, in both directions. Refuse that up front instead of failing on the first frame.
-        if (nrDevice && nr.Info().vendor == Vendor::Nvidia) {
-            error = L"NVIDIA neural rendering must run on the same GPU as Upscaling (NVIDIA's runtime refuses a "
-                    L"second GPU). Choose the same GPU for both stages on the Load order page.";
-            return false;
-        }
         std::unique_ptr<NeuralBridge> bridge;
         // AMD and Intel runtimes carry their own model (amd-nr / intel-nr beside MoonSR.exe): no model id needed.
         if (nr.Info().vendor == Vendor::Amd || nr.Info().vendor == Vendor::Intel) {
             bridge = NeuralBridge::Create(nr, {}, config.neuralSettings, error);
         } else {
-            bool found = false;
             for (const auto& model : Engine::Models().List()) {
                 if (model.id != config.neuralModelId || model.kind != ModelKind::DlssNeuralRendering) continue;
+                // NGX only creates features on the adapter of the oldest D3D device in a process. In MoonSR.exe that
+                // is the output monitor's GPU (the Direct2D UI's device), so NVIDIA's runtime on any other GPU runs in
+                // a helper process (remote_stages.h), wherever Upscaling is.
+                if (!LuidIsZero(outputMonitorAdapter) && !LuidEqual(nr.Info().luid, outputMonitorAdapter)) {
+                    neural = CreateHostedNeuralBridge(*device, nr, model.storedPath, config.neuralSettings, error);
+                    return neural != nullptr;
+                }
                 bridge = NeuralBridge::Create(nr, model.storedPath, config.neuralSettings, error);
-                found = true;
-                break;
+                if (bridge && nrDevice) bridge = CreateRemoteNeuralBridge(*device, *nrDevice, std::move(bridge), error);
+                // The monitor's GPU is a guess at the oldest device (the UI window may be elsewhere): if NGX refuses
+                // the first feature creation anyway, the stage moves to the helper process.
+                neural = WithHostedFallback(*device, nr, std::move(bridge), model.storedPath, config.neuralSettings);
+                return neural != nullptr;
             }
-            if (!found) { error = L"Select an installed DLSS Neural Rendering model."; return false; }
+            error = L"Select an installed DLSS Neural Rendering model.";
+            return false;
         }
         if (bridge && nrDevice) bridge = CreateRemoteNeuralBridge(*device, *nrDevice, std::move(bridge), error);
         neural = std::move(bridge);
@@ -280,13 +282,9 @@ struct Engine::Impl {
         bool real; // true: present the newest real frame
     };
     std::unique_ptr<FrameGenerator> fg;
-    std::unique_ptr<fgadaptive::Controller> fgLearning;
-    FrameGenSettings fgLearningBaseline;
-    std::wstring fgLearningGame, fgLearningDirectory;
-    bool fgLearningFailed = false;
-    int64_t fgLearningLastDiscontinuity = 0;
 
-    // Moon ALSR. It needs the generator as its motion estimator, so the generator also runs when frame generation
+    // MoonSR temporal upscaler (internal name Moon ALSR). It needs the generator as its motion estimator, so the
+    // generator also runs when frame generation
     // is off but ALSR is selected. Real frames: AlsrUpscaler::Render once per PushFrame into alsrOut. Generated
     // frames: RenderSingle into alsrGen. Both are destination-rectangle sized and are then copied 1:1.
     std::unique_ptr<AlsrUpscaler> alsr;
@@ -300,7 +298,6 @@ struct Engine::Impl {
     Size alsrSize;
     bool pendingAlsr = false; // the real frame of the current schedule was reconstructed by ALSR
     bool pendingAlsrAfterNeural = false;
-    std::wstring gameKey;     // file-name-safe id of the captured game (exe name) for the per-game profile
 
     bool EnsureAlsrTargets(Size size) {
         if (alsrOut && alsrGen && alsrSize == size) return true;
@@ -323,7 +320,7 @@ struct Engine::Impl {
         if (SUCCEEDED(hr)) hr = device->Device()->CreateTexture2D(&td, nullptr, &alsrGen);
         if (SUCCEEDED(hr)) hr = device->Device()->CreateRenderTargetView(alsrGen.Get(), nullptr, &alsrGenRtv);
         if (FAILED(hr)) {
-            MSR_LOG_ERROR(L"Moon ALSR output textures {}x{} failed: {}", size.width, size.height, HrToString(hr));
+            MSR_LOG_ERROR(L"MoonSR output textures {}x{} failed: {}", size.width, size.height, HrToString(hr));
             alsrOut.Reset();
             alsrGen.Reset();
             return false;
@@ -358,8 +355,8 @@ struct Engine::Impl {
     double periodSlowMs = 0.0; // heavily smoothed frame time (used for the refresh-rate cap; capture timestamps jitter with the compositor)
     // Effective multiplier. Decided once per real frame (DecideMultiplier), never per loop iteration:
     //  - refresh cap with hysteresis: never more displayed frames than the monitor refreshes;
-    //  There is deliberately no GPU-cost-based multiplier limit. Normally a late slot is shown; while adaptive
-    //  learning is enabled, V-Sync catch-up may omit a sufficiently stale generated frame to reduce backlog.
+    //  There is deliberately no GPU-cost-based multiplier limit. Normally a late slot is shown; while presentation
+    //  runs late (fgRunningLate), V-Sync catch-up may omit a sufficiently stale generated frame to reduce backlog.
     uint32_t fgRequested = 1;
     uint32_t fgEffective = 1;
     uint32_t overrunCount = 0, overrunTotal = 0;
@@ -417,9 +414,6 @@ struct Engine::Impl {
         alsrFailed = false;
         overlay.reset();
         overlayFailed = false;
-        fgLearning.reset(); // drains profile writes before the GPU device is destroyed
-        fgLearningFailed = false;
-        fgLearningLastDiscontinuity = 0;
         ResetFrameGen();
         fgCreateFailed = false;
         cursor.reset();
@@ -448,15 +442,29 @@ struct Engine::Impl {
         // Stage GPUs. Auto (zero) is the adapter that drives the output monitor; that keeps the default free of
         // cross-GPU copies. The Upscaling stage's GPU is the main device: capture, upscaling and presentation.
         LUID monitorAdapter{};
+        outputMonitorAdapter = {};
         outputRefreshHz = 0.0;
         for (const auto& m : EnumerateMonitors()) {
             if (m.handle != monitor) continue;
             monitorAdapter = m.adapterLuid;
+            outputMonitorAdapter = m.adapterLuid;
             outputRefreshHz = m.refreshHz;
         }
         const auto resolve = [&](const LUID& chosen) { return LuidIsZero(chosen) ? monitorAdapter : chosen; };
         const LUID mainAdapter = resolve(config.stageAdapters.upscaling);
         const bool userChoseMain = !LuidIsZero(config.stageAdapters.upscaling);
+        // Neural rendering on the output monitor's GPU runs in this process. NVIDIA's NGX accepts it only if that GPU
+        // has the oldest device of the process: in MoonSR.exe the UI's Direct2D device already sees to that, in a
+        // process without a UI (moonsr_cli) the stage's device must be created before the main one.
+        const LUID nrAdapter = resolve(config.stageAdapters.neuralRendering);
+        if (!LuidIsZero(nrAdapter) && LuidEqual(nrAdapter, monitorAdapter) && !LuidEqual(nrAdapter, mainAdapter)) {
+            std::wstring stageError;
+            if (auto created = GpuDevice::Create(&nrAdapter, stageError))
+                extraDevices.push_back(std::move(created));
+            else
+                MSR_LOG_WARN(L"Neural rendering: could not create its device ahead of the main one ({}); it is retried "
+                             L"after the main device", stageError);
+        }
         device = GpuDevice::Create(LuidIsZero(mainAdapter) ? nullptr : &mainAdapter, error);
         if (!device && !userChoseMain && !LuidIsZero(mainAdapter)) {
             // The monitor may be driven by a display-only adapter (indirect / virtual / USB display).
@@ -514,6 +522,7 @@ struct Engine::Impl {
         PresentOptions po;
         po.monitor = monitor;
         po.vsync = config.vsync;
+        po.keepAbove = config.targetWindow; // ordinary window kept directly above the game, not topmost
         presenter = Presenter::Create(*device, po, error);
         if (!presenter) return false;
         appliedVsync = config.vsync;
@@ -540,33 +549,6 @@ struct Engine::Impl {
             error = L"Neural rendering could not start: " + error;
             return false;
         }
-
-        // Per-game identity for Moon ALSR profiles: the captured window's exe name, reduced to safe characters.
-        gameKey.clear();
-        for (const auto& w : EnumerateCaptureWindows()) {
-            if (w.hwnd != config.targetWindow) continue;
-            for (wchar_t c : w.exeName)
-                gameKey.push_back((iswalnum(c) || c == L'.' || c == L'-' || c == L'_') ? static_cast<wchar_t>(towlower(c)) : L'_');
-            break;
-        }
-        if (gameKey.empty()) gameKey = L"unknown";
-        // Use the executable's full path for learning identity so games with the same filename stay separate.
-        fgLearningGame.clear();
-        DWORD targetPid = 0;
-        GetWindowThreadProcessId(config.targetWindow, &targetPid);
-        if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, targetPid)) {
-            wchar_t executable[32768]{};
-            DWORD len = static_cast<DWORD>(std::size(executable));
-            if (QueryFullProcessImageNameW(process, 0, executable, &len)) {
-                fgLearningGame.assign(executable, len);
-                std::transform(fgLearningGame.begin(), fgLearningGame.end(), fgLearningGame.begin(),
-                               [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-            }
-            CloseHandle(process);
-        }
-        wchar_t localAppData[MAX_PATH]{};
-        const DWORD localLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
-        fgLearningDirectory = localLen && localLen < MAX_PATH ? std::wstring(localAppData) + L"\\MoonSR\\profiles" : L"";
 
         std::lock_guard lock(mutex);
         stats.adapterName = device->Info().name;
@@ -1036,7 +1018,7 @@ struct Engine::Impl {
             const double value = wcstod(delayText, &end);
             if (end != delayText && *end == L'\0' && std::isfinite(value)) scheduleDelayMs = std::clamp(value, 0.0, 8.0);
         }
-        double catchupSlots = -1.0; // automatic during learning or sustained presentation backlog
+        double catchupSlots = -1.0; // automatic during sustained presentation backlog
         wchar_t catchupText[24]{};
         if (GetEnvironmentVariableW(L"MOONSR_FG_CATCHUP_SLOTS", catchupText, static_cast<DWORD>(std::size(catchupText)))) {
             wchar_t* end = nullptr;
@@ -1046,7 +1028,6 @@ struct Engine::Impl {
         }
         bool haveAppliedOrder = false, lastUpscaleFirst = false;
         bool haveFgInputMode = false, lastFgPreScaled = false;
-        int64_t lastLateLearningProbe = 0;
         ScaleSettings lastUpscaleSettings;
         PipelineOrder appliedOrder;
 
@@ -1065,8 +1046,6 @@ struct Engine::Impl {
             AlsrSettings alsrSettings;
             PictureSettings pictureSettings;
             std::optional<NeuralChange> neuralChange;
-            bool alsrReset = false;
-            bool fgLearningReset = false;
             bool vsync;
             {
                 std::lock_guard lock(mutex);
@@ -1077,10 +1056,6 @@ struct Engine::Impl {
                 alsrSettings = liveAlsr;
                 pictureSettings = livePicture;
                 if (pendingIndex >= pendingCount) neuralChange.swap(pendingNeuralChange);
-                alsrReset = alsrResetRequested;
-                alsrResetRequested = false;
-                fgLearningReset = fgLearningResetRequested;
-                fgLearningResetRequested = false;
                 overlayEnabled = liveFrameCounter;
             }
 
@@ -1113,45 +1088,19 @@ struct Engine::Impl {
                 // Only once the presents still owed have been shown, so the last real frame is not lost.
                 ResetFrameGen();
             }
-            if (fgLearning) {
-                if (!fgCfg.adaptiveLearning || requested <= 1) {
-                    fgadaptive::ProfileContext unused;
-                    fgLearning->Configure(false, unused, runtimeFgSettings, fgLearningDirectory);
-                }
-                fgLearning->Tick(false);
-                if (fgLearningReset) fgLearning->ResetLearning();
-            }
-            if (fg) {
-                const bool useLearned = fgLearning && fgCfg.adaptiveLearning && requested > 1 &&
-                                        fgLearningBaseline == runtimeFgSettings;
-                fg->SetSettings(useLearned ? fgLearning->EffectiveSettings() : runtimeFgSettings);
-            }
+            if (fg) fg->SetSettings(runtimeFgSettings);
             if (wantAlsr && fg && !alsr) {
                 std::wstring alsrError;
                 alsr = AlsrUpscaler::Create(*device, alsrError);
                 if (!alsr) {
                     alsrFailed = true;
-                    MSR_LOG_ERROR(L"Moon ALSR unavailable ({}); using Lanczos-3 instead", alsrError);
+                    MSR_LOG_ERROR(L"MoonSR temporal upscaler unavailable ({}); using Lanczos-3 instead", alsrError);
                 } else {
-                    const std::wstring dir = GameProfileDirectory(fgLearningDirectory, fgLearningGame);
-                    // Older ALSR versions used only an executable name. Move the old file once, without
-                    // overwriting a profile already associated with this full path.
-                    if (!dir.empty() && gameKey != L"unknown") {
-                        std::error_code ec;
-                        std::filesystem::create_directories(dir, ec);
-                        if (!ec) {
-                            const auto oldPath = std::filesystem::path(fgLearningDirectory) / (gameKey + L".alsr");
-                            const auto newPath = std::filesystem::path(dir) / L"upscaling.alsr";
-                            MoveFileW(oldPath.c_str(), newPath.c_str());
-                        }
-                    }
-                    if (!alsr->SetProfile(dir, dir.empty() ? L"" : L"upscaling")) MSR_LOG_WARN(L"Moon ALSR: profile folder '{}' unavailable; learning will not persist", dir);
-                    MSR_LOG_INFO(L"Moon ALSR active for game '{}'", gameKey);
+                    MSR_LOG_INFO(L"MoonSR temporal upscaler active");
                 }
             } else if (!wantAlsr && alsr && pendingIndex >= pendingCount) {
                 ReleaseAlsr();
             }
-            if (alsr && alsrReset) alsr->ResetLearning();
             const bool useAlsr = wantAlsr && alsr && fg;
             if (!fg) activeMultiplier = 1;
             // Load order: is upscaling placed before frame generation?
@@ -1162,7 +1111,6 @@ struct Engine::Impl {
                     if (alsr) alsr->Reset();
                     if (alsrMotion) alsrMotion->Reset();
                     neuralReset = true;
-                    fgLearningLastDiscontinuity = QpcNow();
                 }
                 appliedOrder = order;
             }
@@ -1177,7 +1125,6 @@ struct Engine::Impl {
                 if (neuralBeforeFg && fg) { fg->Reset(); fgHasHistory = false; }
                 if (alsr) alsr->Reset();
                 if (alsrMotion) alsrMotion->Reset();
-                fgLearningLastDiscontinuity = QpcNow();
             }
             const bool upscaleFirst = orderUpscaleFirst && settings.enabled;
             // Finish the old schedule first, then discard history before changing the generator's input.
@@ -1186,7 +1133,6 @@ struct Engine::Impl {
                 if (haveAppliedOrder && fg) { fg->Reset(); fgHasHistory = false; }
                 if (haveAppliedOrder && alsr) alsr->Reset();
                 if (alsrMotion) alsrMotion->Reset();
-                fgLearningLastDiscontinuity = QpcNow();
                 lastUpscaleFirst = upscaleFirst;
                 lastUpscaleSettings = settings;
                 haveAppliedOrder = true;
@@ -1211,11 +1157,6 @@ struct Engine::Impl {
                 }
                 waitForSwapchain = false;
             }
-            if (fgLearning) {
-                fgLearning->SetOverloaded(fgRunningLate);
-                // Poll results here. Submit learning work only after capture confirms there is no frame waiting.
-                fgLearning->Tick(false);
-            }
 
             CursorState cursorState;
             if (cursor) {
@@ -1227,7 +1168,7 @@ struct Engine::Impl {
             if (fg && pendingIndex < pendingCount) {
                 const Pending p = pending[pendingIndex++];
                 const double activeCatchup = catchupSlots >= 0.0 ? catchupSlots :
-                    ((fgCfg.adaptiveLearning || fgRunningLate) ? 1.5 : 0.0);
+                    (fgRunningLate ? 1.5 : 0.0);
                 if (activeCatchup > 0.0 &&
                     ShouldSkipStaleGenerated(vsync, p.real, pendingSlotMs, QpcToMs(QpcNow() - p.dueQpc), activeCatchup)) {
                     std::lock_guard lock(mutex);
@@ -1292,7 +1233,7 @@ struct Engine::Impl {
                     if (p.real) {
                         if (!alsrMotion && !alsrMotionFailed) {
                             std::wstring motionError; alsrMotion = FrameGenerator::Create(*device, motionError);
-                            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"Moon ALSR motion unavailable: {}", motionError); }
+                            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"MoonSR motion estimator unavailable: {}", motionError); }
                         }
                         const RectI r{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
                         ok = alsrMotion && alsrMotion->PushFrame(tex, r, pendingRealArrivalQpc) &&
@@ -1302,7 +1243,7 @@ struct Engine::Impl {
                         ok = alsr->RenderSingle(tex, alsrGenRtv.Get(), alsrSize, alsrSettings);
                         if (ok) tex = alsrGen.Get();
                     }
-                    if (!ok) { exitError = L"Moon ALSR could not run after neural rendering."; exitState = EngineState::Failed; break; }
+                    if (!ok) { exitError = L"MoonSR could not run after neural rendering."; exitState = EngineState::Failed; break; }
                     texSize = alsrSize; alreadyUpscaled = true;
                 }
                 RectI destRect;
@@ -1382,7 +1323,7 @@ struct Engine::Impl {
                     if (!p.real) stats.generatedPresented++;
                 }
                 stats.scalerName = !settings.enabled ? L"Off (shown 1:1)"
-                                  : (settings.scaler == ScalerKind::MoonALSR && !pendingAlsr && !pendingAlsrAfterNeural && !(useAlsr && pendingPreScaled)) ? L"Lanczos-3 (Moon ALSR not active)"
+                                  : (settings.scaler == ScalerKind::MoonALSR && !pendingAlsr && !pendingAlsrAfterNeural && !(useAlsr && pendingPreScaled)) ? L"Lanczos-3 (MoonSR not active)"
                                   : ScalePass::ScalerName(settings.scaler);
             } else {
             {
@@ -1416,19 +1357,9 @@ struct Engine::Impl {
             }
 
             CapturedFrame frame;
-            const int64_t captureCheckQpc = QpcNow();
-            const bool learningProbe = fgRunningLate &&
-                (!lastLateLearningProbe || QpcToMs(captureCheckQpc - lastLateLearningProbe) >= 8000.0);
-            const bool learningReady = fgLearning && fgLearning->ReadyForEvaluation() &&
-                (!fgRunningLate || learningProbe) && periodMs > 0.0 && !(recorder && recorder->Active()) &&
-                (!fgLearningLastDiscontinuity || QpcToMs(captureCheckQpc - fgLearningLastDiscontinuity) > 1000.0);
-            const uint32_t captureWaitMs = learningReady ? 0 : (cursor ? kAcquireTimeoutCursorMs : kAcquireTimeoutMs);
+            const uint32_t captureWaitMs = cursor ? kAcquireTimeoutCursorMs : kAcquireTimeoutMs;
             const CaptureStatus cs = capture->AcquireFrame(captureWaitMs, frame);
             if (cs == CaptureStatus::Timeout) {
-                if (learningReady) {
-                    fgLearning->Tick(true);
-                    if (learningProbe) lastLateLearningProbe = captureCheckQpc;
-                }
                 // Nothing new from the game; the last presented frame stays on screen. With a software cursor,
                 // re-composite when the cursor moved, changed shape or appeared / disappeared.
                 if (cursor && sceneValid && !(cursorState == drawnCursor)) {
@@ -1474,7 +1405,6 @@ struct Engine::Impl {
                 }
                 // Real frame time estimate; maintained with and without generation.
                 const bool stable = UpdatePeriod(frame);
-                if (!stable || frame.droppedBefore > 4) fgLearningLastDiscontinuity = QpcNow();
                 const uint32_t effective = fg ? DecideMultiplier(vsync) : 1;
                 activeMultiplier = effective;
                 const bool willGenerate = fg && effective > 1;
@@ -1490,7 +1420,7 @@ struct Engine::Impl {
                         if (useAlsr) {
                             if (!alsrMotion && !alsrMotionFailed) {
                                 std::wstring e; alsrMotion = FrameGenerator::Create(*device, e);
-                                if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"Moon ALSR motion unavailable: {}", e); }
+                                if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"MoonSR motion estimator unavailable: {}", e); }
                             }
                             capturePreScaled = alsrMotion && !ds.Empty() && EnsureAlsrTargets(ds) &&
                                 alsrMotion->PushFrame(pipelineTexture, pipelineRect, frame.captureQpc) &&
@@ -1545,7 +1475,7 @@ struct Engine::Impl {
                                 alsrMotion = FrameGenerator::Create(*device, motionError);
                                 if (!alsrMotion) {
                                     alsrMotionFailed = true;
-                                    MSR_LOG_ERROR(L"Moon ALSR separate motion estimator unavailable: {}", motionError);
+                                    MSR_LOG_ERROR(L"MoonSR separate motion estimator unavailable: {}", motionError);
                                 }
                             }
                             preScaledNow = alsrMotion && !ds.Empty() && EnsureAlsrTargets(ds) &&
@@ -1563,56 +1493,10 @@ struct Engine::Impl {
                     if (haveFgInputMode && lastFgPreScaled != preScaledNow) {
                         fg->Reset();
                         fgHasHistory = false;
-                        fgLearningLastDiscontinuity = QpcNow();
                     }
                     haveFgInputMode = true;
                     lastFgPreScaled = preScaledNow;
-                    if (fgCfg.adaptiveLearning && requested > 1 && !fgLearning && !fgLearningFailed) {
-                        try { fgLearning = std::make_unique<fgadaptive::Controller>(*device); }
-                        catch (const std::exception&) {
-                            fgLearningFailed = true;
-                            MSR_LOG_ERROR(L"Adaptive frame generation could not start its profile worker");
-                        }
-                    }
-                    if (fgLearning && fgCfg.adaptiveLearning && requested > 1) {
-                        fgadaptive::ProfileContext context;
-                        context.game = fgLearningGame;
-                        context.gameIdentity = fgLearningGame;
-                        // Different processing orders and NR runtimes produce different real inputs to frame generation.
-                        if (!context.game.empty()) {
-                            context.game += preScaledNow ? L"|upscaled" : L"|capture";
-                            if (neural && captureNeuralDone) {
-                                const auto& n = config.neuralSettings;
-                                context.game += std::format(L"|nr:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                                    config.neuralModelId, n.passes, n.resolutionPercent, n.preset, n.style, n.intensityPercent,
-                                    n.structurePercent, n.tonePercent, n.skinPercent, n.detailPercent, n.colourPercent, n.autoMask);
-                                if (capturePreScaled) context.game += L"|nr-after-upscale";
-                                if (pictureSettings.enabled)
-                                    context.game += std::format(L"|picture:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                                        pictureSettings.exposure, pictureSettings.contrast, pictureSettings.midtones,
-                                        pictureSettings.shadows, pictureSettings.highlights, pictureSettings.saturation,
-                                        pictureSettings.vibrance, pictureSettings.temperature, pictureSettings.tint, pictureSettings.sharpen);
-                            }
-                            if (preScaledNow)
-                                context.game += std::format(L"|scaler:{}:sharp:{:.3f}", static_cast<uint32_t>(settings.scaler), settings.sharpness);
-                        }
-                        context.gpuName = device->Info().name;
-                        context.gpuVendor = device->Info().vendorId;
-                        context.gpuDevice = device->Info().deviceId;
-                        context.driverVersion = device->Info().driverVersion;
-                        context.width = static_cast<uint32_t>(fgRect.Width());
-                        context.height = static_cast<uint32_t>(fgRect.Height());
-                        context.maxFlowPercent = static_cast<uint32_t>(std::lround(fgCfg.settings.flowScale * 100.0f));
-                        context.hudProtection = fgCfg.settings.hudProtection;
-                        context.preciseMotion = runtimeFgSettings.preciseMotion;
-                        fgLearning->Configure(true, context, runtimeFgSettings, fgLearningDirectory);
-                        fgLearningBaseline = runtimeFgSettings;
-                        fgLearning->Tick(false);
-                        fg->SetSettings(fgLearning->EffectiveSettings());
-                    }
                     const bool pushed = fg->PushFrame(fgInput, fgRect, frame.captureQpc);
-                    if (pushed && fgLearning && fgCfg.adaptiveLearning && requested > 1)
-                        fgLearning->Observe(fgInput, fgRect, frame.captureQpc, stable && frame.droppedBefore <= 4);
                     if (pushed) { pendingPreScaled = preScaledNow; pendingNeuralDone = captureNeuralDone; }
                     // Moon ALSR: reconstruct this real frame now (exactly once per PushFrame).
                     if (pushed) {
@@ -1632,7 +1516,7 @@ struct Engine::Impl {
                                        alsr->Render(*motionSource, alsrOutRtv.Get(), ds, alsrSettings)) {
                                 pendingAlsr = true;
                             } else {
-                                MSR_LOG_ERROR(L"Moon ALSR failed to render; switching to Lanczos-3 for this session");
+                                MSR_LOG_ERROR(L"MoonSR failed to render; switching to Lanczos-3 for this session");
                                 alsrFailed = true;
                             }
                         }
@@ -1748,7 +1632,7 @@ struct Engine::Impl {
                 stats.framesDropped += frame.droppedBefore;
                 if (ps == PresentStatus::Ok) stats.framesPresented++;
                 stats.scalerName = !settings.enabled ? L"Off (shown 1:1)"
-                                  : (settings.scaler == ScalerKind::MoonALSR && !pendingAlsr) ? L"Lanczos-3 (Moon ALSR not active)"
+                                  : (settings.scaler == ScalerKind::MoonALSR && !pendingAlsr) ? L"Lanczos-3 (MoonSR not active)"
                                   : ScalePass::ScalerName(settings.scaler);
             } else if (cs == CaptureStatus::TargetLost) {
                 exitError = L"The captured window was closed or can no longer be captured.";
@@ -1772,15 +1656,6 @@ struct Engine::Impl {
                 stats.frameGenMultiplier = activeMultiplier;
                 stats.frameGenLimited = fg && activeMultiplier < fgRequested;
                 stats.frameGenDelayMs = scheduledMultiplier > 1 ? pendingSlotMs * (scheduledMultiplier - 1) : 0.0;
-                stats.frameGenLearning = fgLearning ? fgLearning->Status() : fgadaptive::ControllerStatus{};
-                if (fgLearningFailed) stats.frameGenLearning.note = L"Adaptive learning could not start (see the log).";
-                else if (fgCfg.adaptiveLearning && requested > 1 && activeMultiplier <= 1 && !useAlsr) {
-                    stats.frameGenLearning.enabled = true;
-                    stats.frameGenLearning.collecting = false;
-                    stats.frameGenLearning.requestedFlow = fgCfg.settings.flowScale;
-                    stats.frameGenLearning.effectiveFlow = fgCfg.settings.flowScale;
-                    stats.frameGenLearning.note = L"Learning is paused until frame generation runs; check the display refresh limit.";
-                }
                 stats.latencyMs = latencyAvg;
                 overlayRendered = static_cast<uint32_t>(stats.capturedFps + 0.5);
                 overlayTotal = static_cast<uint32_t>(stats.presentedFps + 0.5);
@@ -1828,14 +1703,9 @@ struct Engine::Impl {
                     }
                 }
                 stats.alsrActive = pendingAlsr || pendingAlsrAfterNeural || (useAlsr && pendingPreScaled);
-                stats.alsr = alsr ? alsr->LearningStatus() : AlsrLearningStatus{};
                 stats.alsrNote.clear();
-                if (settings.enabled && settings.scaler == ScalerKind::MoonALSR) {
-                    if (alsrFailed || fgCreateFailed)
-                        stats.alsrNote = L"Moon ALSR could not start on this GPU (see the log). Lanczos-3 is used instead.";
-                    else if (stats.alsrActive && !stats.alsr.learningScaleSupported)
-                        stats.alsrNote = L"Adaptive learning is available above 1.01x and up to 1.75x on each axis. Temporal reconstruction remains active.";
-                }
+                if (settings.enabled && settings.scaler == ScalerKind::MoonALSR && (alsrFailed || fgCreateFailed))
+                    stats.alsrNote = L"MoonSR could not start on this GPU (see the log). Lanczos-3 is used instead.";
                 stats.frameGenCoverage = windowReal ? static_cast<double>(windowRealWithGen) / windowReal : 0.0;
                 stats.frameGenNote.clear();
                 if (fgRequested > 1) {
@@ -1938,8 +1808,6 @@ bool Engine::Start(const EngineConfig& config, std::wstring& error) {
         impl_->liveAlsr = config.alsr;
         impl_->livePicture = config.pictureSettings;
         impl_->pendingNeuralChange.reset();
-        impl_->alsrResetRequested = false;
-        impl_->fgLearningResetRequested = false;
         // The user-selected model is driven only through the optional, separately built bridge.
         impl_->stats.neuralRenderingActive = false;
         impl_->stats.neuralRenderingNote = config.neuralRendering
@@ -2028,16 +1896,6 @@ PipelineOrder Engine::NormalizeOrder(const PipelineOrder& order) {
 void Engine::SetAlsrSettings(const AlsrSettings& settings) {
     std::lock_guard lock(impl_->mutex);
     impl_->liveAlsr = settings;
-}
-
-void Engine::ResetAlsrLearning() {
-    std::lock_guard lock(impl_->mutex);
-    impl_->alsrResetRequested = true;
-}
-
-void Engine::ResetFrameGenLearning() {
-    std::lock_guard lock(impl_->mutex);
-    impl_->fgLearningResetRequested = true;
 }
 
 void Engine::SetPipelineOrder(const PipelineOrder& order) {

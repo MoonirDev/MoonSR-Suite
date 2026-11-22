@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <commctrl.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -30,6 +31,13 @@ namespace {
 
 constexpr int kCountdownSeconds = 5;
 constexpr UINT kPollMs = 250;
+constexpr UINT WM_APP_TRAY = WM_APP + 4;  // notification-area icon callback (NOTIFYICON_VERSION_4)
+constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kTrayCmdOpen = 1, kTrayCmdToggle = 2, kTrayCmdExit = 3;
+UINT TaskbarCreatedMessage() {
+    static const UINT m = RegisterWindowMessageW(L"TaskbarCreated");
+    return m;
+}
 constexpr UINT WM_APP_TEST_LATE = WM_APP + 1;
 constexpr UINT WM_APP_MODELS_DONE = WM_APP + 2;
 constexpr wchar_t kFp16RuntimeHash[] = L"cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed";
@@ -234,6 +242,7 @@ TestOptions ParseTestOptions() {
         else if (a == L"--test-import-model") t.importModel = next();
         else if (a == L"--test-models-dir") t.modelsDir = next();
         else if (a == L"--test-order") t.order = next();
+        else if (a == L"--test-close-to-tray") t.closeToTray = _wtoi(next().c_str()) != 0 ? 1 : 0;
         else if (a == L"--test-scaler") t.scaler = next();
         else if (a == L"--test-drag") {
             const std::wstring v = next();
@@ -354,6 +363,10 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == TaskbarCreatedMessage() && msg != 0) {  // Explorer restarted: its notification area lost our icon
+        if (trayIconShown_) AddTrayIcon();
+        return 0;
+    }
     switch (msg) {
     case WM_CREATE:
         OnCreate();
@@ -435,11 +448,19 @@ LRESULT MainWindow::Dispatch(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) view_.OnWindowDeactivated();
-        UpdateLauncherZOrder(LOWORD(wp) != WA_INACTIVE ||
-            (lp && GetAncestor(reinterpret_cast<HWND>(lp), GA_ROOTOWNER) == hwnd_));
         break;
     case WM_CLOSE:
+        if (!exiting_ && CloseToTrayEnabled()) {
+            HideToTray();
+            return 0;
+        }
         OnClose();
+        return 0;
+    case WM_APP_TRAY:
+        OnTrayMessage(wp, lp);
+        return 0;
+    case WM_APP_RESTORE:
+        RestoreFromTray();
         return 0;
     case WM_ENDSESSION:
         if (wp) {
@@ -628,11 +649,7 @@ void MainWindow::WireHandlers() {
         else SetNeuralMessage(L"The local model file is unavailable.", Severity::Error);
     };
     ui_.openModels->onChange = [this] { OpenModelsFolder(); };
-    ui_.alsrLearn->onChange = [this] { OnLiveChange(); };
-    ui_.alsrUseLearned->onChange = [this] { OnLiveChange(); };
     ui_.alsrHistory->onChange = [this] { OnLiveChange(); };
-    ui_.alsrReset->onChange = [this] { ConfirmAlsrReset(); };
-    ui_.alsrProfiles->onChange = [this] { OpenProfilesFolder(); };
     for (int i = 0; i < AppUi::kModelRows; ++i) {
         ui_.modelVerify[i]->onChange = [this, i] { BeginVerify(static_cast<size_t>(i)); };
         ui_.modelRemove[i]->onChange = [this, i] { ConfirmRemove(static_cast<size_t>(i)); };
@@ -693,9 +710,6 @@ void MainWindow::WireHandlers() {
     ui_.counter->onChange = [this] { OnLiveChange(); };
     ui_.fgFlow->onChange = [this] { OnLiveChange(); };
     ui_.fgHud->onChange = [this] { OnLiveChange(); };
-    ui_.fgLearning->onChange = [this] { OnLiveChange(); };
-    ui_.fgLearningReset->onChange = [this] { ConfirmFrameGenLearningReset(); };
-    ui_.fgLearningProfiles->onChange = [this] { OpenProfilesFolder(); };
     ui_.frameGen->onChange = [this] { OnFrameGenToggled(); };
     ui_.fgMultiplier->onChange = [this] { OnFrameGenMultiplier(); };
 }
@@ -792,6 +806,7 @@ void MainWindow::ApplySettingsToUi() {
     ui_.useForeground->SetChecked(settings_.useForeground);
     ui_.vsync->SetChecked(settings_.vsync);
     ui_.cursor->SetChecked(settings_.showCursor);
+    ui_.closeToTray->SetChecked(settings_.closeToTray);
     ui_.counter->SetChecked(settings_.showFrameCounter);
     ui_.upscaling->SetChecked(settings_.upscaling);
 
@@ -827,7 +842,9 @@ void MainWindow::ApplySettingsToUi() {
     int scalerSel = 0;
     bool found = false;
     for (size_t i = 0; i < scalers_.size() && !found; ++i) {
-        if (!settings_.scalerName.empty() && settings_.scalerName == scalers_[i].name) {
+        // The temporal scaler was saved as "Moon ALSR (experimental)" before it was renamed to MoonSR.
+        const bool legacyAlsr = scalers_[i].kind == ScalerKind::MoonALSR && settings_.scalerName.rfind(L"Moon ALSR", 0) == 0;
+        if (!settings_.scalerName.empty() && (settings_.scalerName == scalers_[i].name || legacyAlsr)) {
             scalerSel = static_cast<int>(i);
             found = true;
         }
@@ -847,10 +864,7 @@ void MainWindow::ApplySettingsToUi() {
     ui_.fgMultiplier->SetSelected(lastMultiplier_ - 2);
     ui_.fgFlow->SetValue(std::clamp(settings_.frameGenFlowPercent, 25, 100));
     ui_.fgHud->SetChecked(settings_.frameGenHudProtection);
-    ui_.fgLearning->SetChecked(settings_.frameGenAdaptiveLearning);
 
-    ui_.alsrLearn->SetChecked(settings_.alsrLearning);
-    ui_.alsrUseLearned->SetChecked(settings_.alsrUseLearned);
     ui_.alsrHistory->SetValue(std::clamp(settings_.alsrHistoryPercent, 50, 95));
     neuralWanted_ = settings_.neuralRendering;
     selectedModelId_ = settings_.neuralModelId;
@@ -880,6 +894,7 @@ AppSettings MainWindow::CaptureSettings() const {
     s.useForeground = ui_.useForeground->checked();
     s.vsync = ui_.vsync->checked();
     s.showCursor = ui_.cursor->checked();
+    s.closeToTray = ui_.closeToTray->checked();
     s.showFrameCounter = ui_.counter->checked();
     s.upscaling = ui_.upscaling->checked();
     s.fitMode = std::max(0, ui_.fit->Selected());
@@ -890,11 +905,8 @@ AppSettings MainWindow::CaptureSettings() const {
         s.frameGenLastMultiplier = lastMultiplier_;
         s.frameGenFlowPercent = ui_.fgFlow->value();
         s.frameGenHudProtection = fg.settings.hudProtection;
-        s.frameGenAdaptiveLearning = fg.adaptiveLearning;
     }
 
-    s.alsrLearning = ui_.alsrLearn->checked();
-    s.alsrUseLearned = ui_.alsrUseLearned->checked();
     s.alsrHistoryPercent = ui_.alsrHistory->value();
     s.neuralRendering = neuralWanted_;
     s.neuralModelId = selectedModelId_;
@@ -959,6 +971,7 @@ void MainWindow::OnTimer(UINT_PTR id) {
         KillTimer(hwnd_, IDT_TESTEXIT);
         MSR_LOG_INFO(L"Test run finished; closing");
         WriteTestStatus();
+        exiting_ = true;
         PostMessageW(hwnd_, WM_CLOSE, 0, 0);
     } else if (id == IDT_COUNTDOWN) {
         if (--countdown_ > 0) {
@@ -998,6 +1011,8 @@ void MainWindow::OnFrameGenMultiplier() {
 }
 
 void MainWindow::OnClose() {
+    exiting_ = true;
+    RemoveTrayIcon();
     KillTimer(hwnd_, IDT_POLL);
     KillTimer(hwnd_, IDT_COUNTDOWN);
     KillTimer(hwnd_, IDT_TESTSTATUS);
@@ -1010,6 +1025,119 @@ void MainWindow::OnClose() {
     SaveNow();
     if (worker_.joinable()) worker_.join();  // a model task in flight (hashing) finishes first; its result is dropped
     DestroyWindow(hwnd_);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Close to system tray
+// ---------------------------------------------------------------------------------------------------------------------
+
+bool MainWindow::CloseToTrayEnabled() const {
+    if (test_.closeToTray >= 0) return test_.closeToTray != 0;
+    return ui_.closeToTray && ui_.closeToTray->checked();
+}
+
+bool MainWindow::AddTrayIcon() {
+    if (!trayIcon_) {
+        if (FAILED(LoadIconMetric(instance_, MAKEINTRESOURCEW(IDI_APPICON), LIM_SMALL, &trayIcon_))) trayIcon_ = nullptr;
+    }
+    NOTIFYICONDATAW nid{sizeof(nid)};
+    nid.hWnd = hwnd_;
+    nid.uID = kTrayId;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    nid.uCallbackMessage = WM_APP_TRAY;
+    nid.hIcon = trayIcon_;
+    wcscpy_s(nid.szTip, L"MoonSR");
+    Shell_NotifyIconW(NIM_DELETE, &nid);  // drop a stale entry first (harmless when absent)
+    if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        MSR_LOG_WARN(L"Shell_NotifyIcon(NIM_ADD) failed ({})", GetLastError());
+        return false;
+    }
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    return true;
+}
+
+void MainWindow::RemoveTrayIcon() {
+    if (trayIconShown_) {
+        NOTIFYICONDATAW nid{sizeof(nid)};
+        nid.hWnd = hwnd_;
+        nid.uID = kTrayId;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        trayIconShown_ = false;
+    }
+    if (trayIcon_) {
+        DestroyIcon(trayIcon_);
+        trayIcon_ = nullptr;
+    }
+}
+
+void MainWindow::HideToTray() {
+    view_.CloseDropdown();
+    SaveNow();  // the setting itself is persisted even if the process is later killed
+    if (!AddTrayIcon()) {
+        // Without an icon the user could never get the window back: close normally instead.
+        OnClose();
+        return;
+    }
+    trayIconShown_ = true;
+    ShowWindow(hwnd_, SW_HIDE);
+    MSR_LOG_INFO(L"Window hidden to the notification area");
+}
+
+void MainWindow::RestoreFromTray() {
+    if (trayIconShown_) {
+        RemoveTrayIcon();
+        MSR_LOG_INFO(L"Window restored from the notification area");
+    }
+    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetForegroundWindow(hwnd_);
+}
+
+void MainWindow::OnTrayMessage(WPARAM wp, LPARAM lp) {
+    switch (LOWORD(lp)) {
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case NIN_SELECT:
+    case NIN_KEYSELECT:
+        RestoreFromTray();
+        break;
+    case WM_CONTEXTMENU:
+    case WM_RBUTTONUP: {
+        static ULONGLONG lastMenu = 0;  // WM_RBUTTONUP and WM_CONTEXTMENU may both arrive for one click
+        const ULONGLONG now = GetTickCount64();
+        if (now - lastMenu < 300) break;
+        lastMenu = now;
+        ShowTrayMenu(POINT{GET_X_LPARAM(wp), GET_Y_LPARAM(wp)});
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void MainWindow::ShowTrayMenu(POINT anchor) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    const wchar_t* toggle = engineActive_ ? L"&Stop scaling" : (countdown_ > 0 ? L"&Cancel countdown" : L"&Start scaling (countdown)");
+    AppendMenuW(menu, MF_STRING, kTrayCmdOpen, L"&Open MoonSR");
+    SetMenuDefaultItem(menu, static_cast<UINT>(kTrayCmdOpen), FALSE);
+    AppendMenuW(menu, MF_STRING | (inStart_ ? MF_GRAYED : 0), kTrayCmdToggle, toggle);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kTrayCmdExit, L"E&xit");
+    SetForegroundWindow(hwnd_);  // required so the menu closes when the user clicks elsewhere
+    const UINT cmd = static_cast<UINT>(
+        TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, anchor.x, anchor.y, hwnd_, nullptr));
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    if (cmd == kTrayCmdOpen) {
+        RestoreFromTray();
+    } else if (cmd == kTrayCmdToggle) {
+        ToggleFromButton();
+    } else if (cmd == kTrayCmdExit) {
+        exiting_ = true;
+        PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1153,7 +1281,6 @@ FrameGenConfig MainWindow::CurrentFrameGen() const {
     fg.settings.quality = FrameGenQuality::Performance;
     fg.settings.flowScale = static_cast<float>(ui_.fgFlow->value()) / 100.0f;
     fg.settings.hudProtection = ui_.fgHud->checked();
-    fg.adaptiveLearning = ui_.fgLearning->checked();
     return fg;
 }
 
@@ -1165,14 +1292,6 @@ void MainWindow::ApplyLiveSettings() {
     engine_.SetFrameGen(CurrentFrameGen());
     engine_.SetAlsrSettings(CurrentAlsr());
     engine_.SetPictureSettings(CurrentPictureSettings());
-}
-
-void MainWindow::UpdateLauncherZOrder(bool active) {
-    const bool aboveOutput = engineActive_ && active;
-    const bool topmost = (GetWindowLongPtrW(hwnd_, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-    if (aboveOutput != topmost)
-        SetWindowPos(hwnd_, aboveOutput ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void MainWindow::StartScaling(HWND target) {
@@ -1224,7 +1343,6 @@ void MainWindow::StartScaling(HWND target) {
 
     if (ok) {
         engineActive_ = true;
-        UpdateLauncherZOrder(GetForegroundWindow() == hwnd_);
         lastFailed_ = false;
         SetMessage(targetTitle_.empty() ? L"Scaling." : std::format(L"Scaling: {}", targetTitle_));
     } else {
@@ -1250,7 +1368,6 @@ void MainWindow::StopScaling() {
         SetMessage(L"Scaling stopped.");
     }
     engineActive_ = false;
-    UpdateLauncherZOrder(false);
     lastFailed_ = false;
     recording_ = false;
     messageHoldUntil_ = 0;
@@ -1270,7 +1387,6 @@ void MainWindow::PollEngine() {
         engine_.Stop();
         engineActive_ = false;
         KillTimer(hwnd_, IDT_NEURAL_RESOLUTION);
-        UpdateLauncherZOrder(false);
         recording_ = false;
         messageHoldUntil_ = 0;
         lastFailed_ = true;
@@ -1366,9 +1482,6 @@ void MainWindow::ShowStats(const EngineStats& st) {
     status_.scaler = st.scalerName;
     status_.engineOrder = st.pipelineOrderText;
     status_.alsrActive = st.alsrActive;
-    status_.alsrSamples = st.alsr.samples;
-    UpdateAlsrStatus(st);
-    UpdateFrameGenLearningStatus(st);
 }
 
 void MainWindow::ClearStats(const wchar_t* stateText) {
@@ -1378,8 +1491,6 @@ void MainWindow::ClearStats(const wchar_t* stateText) {
     for (size_t i = 0; i < DetCount; ++i) ui_.details->SetValue(i, i == DetState ? stateText : L"-");
     ui_.details->SetVisible(DetStageGpus, false);
     for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote}) bar->SetVisible(false);
-    UpdateAlsrStatus(EngineStats{});
-    UpdateFrameGenLearningStatus(EngineStats{});
     status_ = TestStatus{};
     status_.state = stateText;
 }
@@ -1408,9 +1519,6 @@ void MainWindow::UpdateControlStates() {
     ui_.fgMultiplier->SetEnabled(fg);
     ui_.fgFlow->SetEnabled(fg);
     ui_.fgHud->SetEnabled(fg);
-    ui_.fgLearning->SetEnabled(fg);
-    ui_.fgLearningReset->SetEnabled(fg && ui_.fgLearning->checked() && engineActive_ &&
-                                   engine_.GetStats().frameGenLearning.collecting);
 
     ui_.heroRow->desc = running ? L"Ctrl+Alt+S stops scaling from anywhere."
                         : counting ? L"Switch to your game now. Esc cancels the countdown."
@@ -1523,17 +1631,13 @@ void MainWindow::ApplyTestOptionsLate() {
 
 void MainWindow::WriteTestStatus() {
     if (test_.statusFile.empty()) return;
-    const auto learning = engine_.GetStats().frameGenLearning;
     const std::wstring text =
         std::format(L"state={}\r\ngameFps={:.1f}\r\ndisplayedFps={:.1f}\r\ngeneratedFps={:.1f}\r\nframeGen={}\r\n"
                     L"addedLatencyMs={:.1f}\r\nscaler={}\r\norder={}\r\nengineOrder={}\r\n"
-                    L"alsrActive={}\r\nalsrSamples={}\r\nalsrLearn={}\r\nalsrUseLearned={}\r\nalsrStability={}\r\n"
-                    L"fgLearning={}\r\nfgProfileLoaded={}\r\nfgTraining={}\r\nfgValidation={}\r\nfgFlowEffective={:.0f}\r\nfgQuality={}\r\nmessage={}\r\n",
+                    L"alsrActive={}\r\nalsrStability={}\r\nfgQuality={}\r\nmessage={}\r\n",
                     status_.state, status_.game, status_.displayed, status_.generated, status_.frameGen, status_.latencyMs,
-                    status_.scaler, OrderToString(CurrentOrder()), status_.engineOrder, status_.alsrActive ? 1 : 0, status_.alsrSamples,
-                    ui_.alsrLearn->checked() ? 1 : 0, ui_.alsrUseLearned->checked() ? 1 : 0, ui_.alsrHistory->value(),
-                    ui_.fgLearning->checked() ? 1 : 0, learning.profileLoaded ? 1 : 0, learning.training,
-                    learning.validation, learning.effectiveFlow * 100.0f, static_cast<unsigned>(CurrentFrameGen().settings.quality),
+                    status_.scaler, OrderToString(CurrentOrder()), status_.engineOrder, status_.alsrActive ? 1 : 0,
+                    ui_.alsrHistory->value(), static_cast<unsigned>(CurrentFrameGen().settings.quality),
                     ui_.message->message());
     const int n = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
     std::string utf8(static_cast<size_t>(std::max(n, 0)), '\0');
@@ -1715,15 +1819,6 @@ void MainWindow::UpdateNeuralState() {
                           : L"Add d5c_chain.dll, its shaders and dlssnr-logical.safetensors to the intel-nr folder.";
     else if (models_.empty()) desc = L"Add a model file first";
     else if (!avail) desc = L"Select a DLSS Neural Rendering model first";
-    // NVIDIA's runtime only runs on the GPU that presents (the Upscaling stage's GPU); the engine refuses otherwise.
-    {
-        const AdapterInfo* nrGpu = StageAdapter(PipelineStage::NeuralRendering);
-        const AdapterInfo* upGpu = StageAdapter(PipelineStage::Upscaling);
-        if (!nrGpu) nrGpu = OutputAdapter();
-        if (!upGpu) upGpu = OutputAdapter();
-        if (nrGpu && upGpu && nrGpu->vendor == Vendor::Nvidia && !LuidEqual(nrGpu->luid, upGpu->luid))
-            desc = L"NVIDIA neural rendering must use the same GPU as Upscaling. Change one of them on the Load order page.";
-    }
     ui_.neuralRow->desc = desc;
     view_.Invalidate();
     if (ui_.orderList) RefreshOrderUi();
@@ -1954,7 +2049,7 @@ void MainWindow::ConfirmRemove(size_t index) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Moon ALSR
+// MoonSR temporal upscaler
 // ---------------------------------------------------------------------------------------------------------------------
 
 bool MainWindow::AlsrSelected() const {
@@ -1966,13 +2061,11 @@ bool MainWindow::AlsrSelected() const {
 
 AlsrSettings MainWindow::CurrentAlsr() const {
     AlsrSettings a;
-    a.learning = ui_.alsrLearn->checked();
-    a.useLearned = ui_.alsrUseLearned->checked();
     a.stability = static_cast<float>(ui_.alsrHistory->value()) / 100.0f;
     return a;
 }
 
-// The Moon ALSR card is shown only while the scaler is Moon ALSR.
+// The MoonSR card is shown only while the scaler is MoonSR.
 void MainWindow::UpdateAlsrUi() {
     // Short description of the selected scaler under the "Scaler" row.
     if (ui_.scalerRow) {
@@ -1999,84 +2092,11 @@ void MainWindow::UpdateAlsrUi() {
     const bool alsr = AlsrSelected();
     const bool wasShown = ui_.alsrInfo->visible;
     ui_.alsrInfo->SetVisible(alsr);
-    for (ui::Row* r : {ui_.alsrLearnRow, ui_.alsrUseRow, ui_.alsrHistoryRow, ui_.alsrResetRow, ui_.alsrFolderRow}) r->visible = alsr;
-    for (ui::Control* c : std::initializer_list<ui::Control*>{ui_.alsrLearn, ui_.alsrUseLearned, ui_.alsrHistory, ui_.alsrReset, ui_.alsrProfiles})
-        c->SetVisible(alsr);
-    ui_.alsrStatus->SetVisible(alsr);
-    const bool up = ui_.upscaling->checked();
-    for (ui::Control* c : std::initializer_list<ui::Control*>{ui_.alsrLearn, ui_.alsrUseLearned, ui_.alsrHistory}) c->SetEnabled(up);
-    ui_.alsrReset->SetEnabled(alsr && engineActive_ && up);
+    ui_.alsrHistoryRow->visible = alsr;
+    ui_.alsrHistory->SetVisible(alsr);
+    ui_.alsrHistory->SetEnabled(ui_.upscaling->checked());
     if (!alsr) ui_.alsrNote->SetVisible(false);
     if (wasShown != alsr) view_.RequestLayout();
-}
-
-void MainWindow::UpdateAlsrStatus(const EngineStats& st) {
-    if (!engineActive_ || !st.alsrActive) {
-        ui_.alsrStatus->SetText(engineActive_ ? L"Moon ALSR is not producing the image right now."
-                                              : L"Shown while scaling runs with Moon ALSR.");
-        return;
-    }
-    const AlsrLearningStatus& a = st.alsr;
-    const std::wstring err = a.samples == 0 ? std::wstring(L"-  /  -")
-                                            : std::format(L"generic {:.2f}  /  learned {:.2f}", a.genericError, a.learnedError);
-    ui_.alsrStatus->SetText(std::format(L"Profile: {}\nSamples: {}\nFilter updates: {}\nEligible buckets: {:.0f}%\nLearned filters: {}\nProxy validation error: {}",
-                                        a.profileLoaded ? L"loaded from earlier sessions" : L"new", a.samples, a.solves,
-                                        static_cast<double>(a.coverage) * 100.0, a.learnedFiltersActive ? L"active" : L"not active", err));
-}
-
-void MainWindow::UpdateFrameGenLearningStatus(const EngineStats& st) {
-    if (!engineActive_ || !ui_.frameGen->checked() || !ui_.fgLearning->checked()) {
-        ui_.fgLearningReset->SetEnabled(false);
-        ui_.fgLearningStatus->SetText(L"Enable adaptive learning while frame generation is running to build a game profile.");
-        return;
-    }
-    const auto& learning = st.frameGenLearning;
-    ui_.fgLearningReset->SetEnabled(learning.collecting);
-    if (learning.note.empty()) {
-        ui_.fgLearningStatus->SetText(L"Preparing adaptive learning.");
-        return;
-    }
-    ui_.fgLearningStatus->SetText(std::format(L"{}\nProfile: {}\nSamples: {} training / {} validation\nGame triplets: {} collected, {} evaluated\nSkipped: {} timing, {} motion, {} busy\nFlow: {:.0f}% / {:.0f}% selected",
-        learning.note, learning.profileLoaded ? L"loaded" : (learning.persistent ? L"new" : L"session only"),
-        learning.training, learning.validation, learning.sampler.triplets, learning.sampler.evaluations,
-        learning.sampler.timingRejected, learning.sampler.motionRejected, learning.sampler.expired,
-        learning.effectiveFlow * 100.0f, learning.requestedFlow * 100.0f));
-}
-
-void MainWindow::ConfirmFrameGenLearningReset() {
-    if (!engineActive_ || view_.DialogOpen()) return;
-    ui::ModalDialog::Spec spec;
-    spec.title = L"Reset frame-generation learning?";
-    spec.body = L"This deletes the learned profile for the current game, GPU, resolution and flow settings.";
-    spec.primary = L"Reset";
-    spec.secondary = L"Cancel";
-    spec.onPrimary = [this] { if (engineActive_) engine_.ResetFrameGenLearning(); };
-    view_.ShowDialog(std::move(spec));
-}
-
-void MainWindow::ConfirmAlsrReset() {
-    if (!engineActive_ || view_.DialogOpen()) return;
-    ui::ModalDialog::Spec spec;
-    spec.title = L"Reset what was learned?";
-    spec.body = L"This deletes the learned profile for the game being scaled. It will start learning again from scratch.";
-    spec.primary = L"Reset";
-    spec.secondary = L"Cancel";
-    spec.onPrimary = [this] {
-        if (engineActive_) engine_.ResetAlsrLearning();
-    };
-    view_.ShowDialog(std::move(spec));
-}
-
-void MainWindow::OpenProfilesFolder() {
-    const std::wstring base = AppDataDirectory();
-    if (base.empty()) return;
-    const std::wstring dir = base + L"\\profiles";
-    CreateDirectoriesRecursive(dir);
-    const auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-    if (r <= 32) {
-        MSR_LOG_WARN(L"ShellExecute(open profiles folder) failed ({})", static_cast<long long>(r));
-        SetMessage(L"Could not open the profiles folder.", Severity::Error);
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

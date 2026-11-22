@@ -14,6 +14,10 @@ constexpr wchar_t kTestMutexName[] = L"Local\\MoonSR.SingleInstance.Test";
 void ActivateExistingInstance() {
     HWND existing = FindWindowW(moonsr::app::MainWindow::kClassName, nullptr);
     if (!existing) return;
+    if (!IsWindowVisible(existing)) {  // hidden in the notification area: ask it to restore itself
+        SendMessageTimeoutW(existing, moonsr::app::WM_APP_RESTORE, 0, 0, SMTO_ABORTIFHUNG, 2000, nullptr);
+        return;
+    }
     if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
     SetForegroundWindow(existing);
 }

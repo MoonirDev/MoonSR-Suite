@@ -11,8 +11,8 @@ It is an experimental personal project. Quality and speed claims come only from 
 ## Features
 
 - **Capture:** Windows Graphics Capture of any window, with the cursor drawn in software.
-- **Upscaling:** Nearest, Bilinear, Catmull-Rom, Lanczos-3, MoonSR Spatial (edge-adaptive) and Moon ALSR
-  (temporal, with optional learning per game; experimental), plus sharpening.
+- **Upscaling:** Nearest, Bilinear, Catmull-Rom, Lanczos-3, MoonSR Spatial (edge-adaptive) and MoonSR
+  (temporal reconstruction from estimated motion; experimental), plus sharpening.
 - **Frame generation:** 2X to 6X and an adaptive mode. Motion is estimated from the captured frames only. HUD
   protection and anti-aliasing apply to generated frames.
 - **Neural rendering (optional):** runs a vendor neural-rendering model on the captured frames. You supply the
@@ -56,7 +56,7 @@ Binaries are written to `build\main\bin`:
 | Path | Contents |
 |---|---|
 | `src/core`, `src/gpu`, `src/capture`, `src/present` | Types and logging; Direct3D devices and monitors; capture; output window |
-| `src/upscale`, `src/framegen`, `src/neural` | Scalers and Moon ALSR; frame generation; host side of the neural rendering bridge |
+| `src/upscale`, `src/framegen`, `src/neural` | Scalers and the MoonSR temporal upscaler; frame generation; host side of the neural rendering bridge |
 | `src/engine` | Pipeline thread. `engine.h` is the only API the UI uses |
 | `src/app` | User interface |
 | `shaders/` | HLSL, compiled with `fxc` at build time and embedded |

@@ -4,6 +4,14 @@
 //
 // Threading: the Presenter is created, used and destroyed on one thread (the engine pipeline thread). The output
 // window belongs to that thread, so that thread must call PumpMessages() regularly (at least once per frame).
+// Z-order tracking (keepAbove) runs inside PumpMessages() on that same thread: out-of-context WinEvent hooks
+// installed by Create() are delivered through that thread's message queue, plus a low-rate poll as a safety net.
+//
+// Z-order: by default the output window is an ordinary (non-topmost) borderless popup that keeps itself directly
+// above `keepAbove` (the captured game window). Other applications' windows can be placed over it, alt-tab works,
+// and clicking through the output activates the game, after which the output restacks itself above the game again.
+// While `keepAbove` is minimised, hidden or cloaked (another virtual desktop), the output window is hidden.
+// The output window never takes activation.
 #pragma once
 
 #include "core/types.h"
@@ -19,7 +27,12 @@ struct PresentOptions {
     bool vsync = false;             // true: sync interval 1. false: interval 0, with tearing if supported
     bool clickThrough = true;       // mouse input passes through to the windows underneath
     bool excludeFromCapture = true; // keep the output window out of screen captures (prevents recursion)
-    bool topmost = true;
+    // Top-level window the output stays directly above in z-order (normally the captured game window). Child
+    // windows are resolved to their root. Null: the output is placed once at the top of the non-topmost band and
+    // not tracked.
+    HWND keepAbove = nullptr;
+    // true: legacy behaviour, a WS_EX_TOPMOST window above everything; keepAbove is then ignored.
+    bool topmost = false;
 };
 
 enum class PresentStatus {

@@ -29,21 +29,15 @@ struct AppUi {
     ui::ComboBox *scaler = nullptr, *fit = nullptr;
     ui::Slider* sharpness = nullptr;
     ui::ToggleSwitch *vsync = nullptr, *cursor = nullptr, *counter = nullptr;
-    // Moon ALSR (Upscaling page; shown while the scaler is Moon ALSR)
+    ui::ToggleSwitch* closeToTray = nullptr;  // Diagnostics page, "Application" section
+    // MoonSR temporal upscaler (Upscaling page; shown while the scaler is MoonSR)
     ui::InfoBar *alsrInfo = nullptr, *alsrNote = nullptr;
-    ui::ToggleSwitch *alsrLearn = nullptr, *alsrUseLearned = nullptr;
     ui::Slider* alsrHistory = nullptr;
-    ui::Button* alsrReset = nullptr;
-    ui::LinkButton* alsrProfiles = nullptr;
-    ui::Row *alsrLearnRow = nullptr, *alsrUseRow = nullptr, *alsrHistoryRow = nullptr, *alsrResetRow = nullptr, *alsrFolderRow = nullptr;
-    ui::TextBlock* alsrStatus = nullptr;
+    ui::Row* alsrHistoryRow = nullptr;
     // Frame generation
-    ui::ToggleSwitch *frameGen = nullptr, *fgHud = nullptr, *fgLearning = nullptr;
+    ui::ToggleSwitch *frameGen = nullptr, *fgHud = nullptr;
     ui::ComboBox* fgMultiplier = nullptr;
     ui::Slider* fgFlow = nullptr;
-    ui::Button* fgLearningReset = nullptr;
-    ui::LinkButton* fgLearningProfiles = nullptr;
-    ui::TextBlock* fgLearningStatus = nullptr;
     // Neural rendering
     static constexpr int kModelRows = 8;  // installed models shown (newest first)
     ui::InfoBar *neuralInfo = nullptr, *neuralDev = nullptr, *neuralNote = nullptr, *neuralMsg = nullptr;

@@ -1,19 +1,18 @@
-// Moon ALSR pass 3b (output resolution): single-frame reconstruction where the history is not fully trusted.
+// MoonSR temporal upscaler pass 3b (output resolution): single-frame reconstruction where the history is not fully trusted.
 // Owner: upscaling-engineer. Drawn right after alsr_reproject into its MRT0 (Hw) with ADDITIVE blending on RGB
 // (alpha not written): Hw.rgb += (1 - trust) x base, so that Hw = lerp(base, clipped history, trust) (alsr_reproject
 // wrote trust x clipped history). Pixels with trust >= 1 never run this shader: alsr_reproject writes depth 1 where
 // trust < 1 and 0 elsewhere, and this pass is drawn at z = 0 with an early depth test LESS - with tracked history that
 // is most of the frame, which is the point of this pass (Stage 3 cost cut, see alsr_reproject_ps.hlsl). The trust test
 // below is kept as a safety net.
-//   base = the seed (MoonSR Spatial + learned filters, alsr_seed.hlsli), working space;
+//   base = the seed (MoonSR Spatial, alsr_seed.hlsli), working space;
 //          on the overlay boundary ring (alsr_motion Layer(), any of the 2x2 source pixels around x) the two layers
 //          reconstructed separately (LayerCubic) and composited with the bilinear overlay coverage at x (development
 //          flag 4096: the seed; 8192: the layer of the nearest source pixel only).
-// t0 = trust (alsr_reproject MRT1), t1 = working copy, t2 = layer, t3 = frame (gamma), t4 = filter table.
+// t0 = trust (alsr_reproject MRT1), t1 = working copy, t2 = layer, t3 = frame (gamma).
 // Development flag 131072 (cost measurement only): no seed at all (discard everything).
 #include "upscale/alsr_common.hlsli"
 #define ALSR_SEED_SRC_REG t3
-#define ALSR_SEED_TABLE_REG t4
 #include "upscale/alsr_seed.hlsli"
 
 struct VsOut
@@ -102,8 +101,7 @@ float4 main(VsOut i) : SV_Target
     const int2 p = int2(i.pos.xy);
     const float trust = gTrust.Load(int3(p, 0));
     if (trust >= 1.0 || (gU1.w & 131072u) != 0) discard;
-    float alpha;
-    const float3 spatial = ToWork(saturate(AlsrSeed(uint2(p), alpha)));
+    const float3 spatial = ToWork(saturate(AlsrSeed(uint2(p))));
     float3 base = spatial;
     if (gU0.x != 0 && (gU1.w & 4096u) == 0) {
         const float2 x = i.pos.xy * gScale.zw;

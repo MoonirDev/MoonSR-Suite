@@ -8,6 +8,8 @@ matrix. Evidence, per-claim verification tags and source URLs are in the detaile
 - `research/capture_tools_and_algorithms.md` — Lossless Scaling and other capture-based tools, interpolation and
   upscaling algorithms, licences
 - `research/windows_capture_presentation.md` — WGC, Desktop Duplication, overlay window, swapchain, cursor, multi-GPU
+- `research/alsr_v2.md` — MoonSR v2 audit and plan (target XeSS 2 / FSR 4-class quality at the current cost, learning removed)
+- `research/fg_quality.md` — frame generation base-quality audit and plan
 
 The researchers tagged every claim as verified / press-only / inferred / from memory / unknown. Performance figures
 quoted in those notes are third-party or estimates. None are MoonSR measurements; those live in `BENCHMARKS.md`.

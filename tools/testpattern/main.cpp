@@ -3,7 +3,7 @@
 // static text (HUD stand-in) and a frame counter.
 //
 //   moonsr_testpattern [--width 1280] [--height 720] [--fps 60] [--seconds 0] [--x 100] [--y 100]
-//                      [--learning-pattern 0|1|2] (normal, slow motion, fast motion)
+//                      [--motion-pattern 0|1|2] (normal, slow pan, fast pan)
 //
 // --seconds 0 runs until the window is closed.
 #include <windows.h>
@@ -18,15 +18,15 @@ namespace {
 int g_width = 1280, g_height = 720;
 double g_fps = 60.0;
 uint64_t g_frame = 0;
-int g_learningPattern = 0;
+int g_motionPattern = 0;
 
 void Paint(HDC dc) {
     RECT rc{0, 0, g_width, g_height};
     FillRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 
-    if (g_learningPattern) {
-        // Broad, continuously translating texture for adaptive-learning integration tests.
-        const int shift = static_cast<int>((g_frame * (g_learningPattern == 2 ? 10u : 2u)) % 192u);
+    if (g_motionPattern) {
+        // Broad, continuously translating texture for motion and temporal-reconstruction tests.
+        const int shift = static_cast<int>((g_frame * (g_motionPattern == 2 ? 10u : 2u)) % 192u);
         for (int y = -96; y < g_height + 96; y += 48) {
             for (int x = -192; x < g_width + 192; x += 48) {
                 const int index = (((x + 192) / 48 + (y + 96) / 48 * 3) & 3) * 4;
@@ -102,7 +102,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--height") g_height = _wtoi(argv[i + 1]);
         else if (a == L"--fps") g_fps = _wtof(argv[i + 1]);
         else if (a == L"--seconds") seconds = _wtof(argv[i + 1]);
-        else if (a == L"--learning-pattern") g_learningPattern = _wtoi(argv[i + 1]);
+        else if (a == L"--motion-pattern") g_motionPattern = _wtoi(argv[i + 1]);
         else if (a == L"--x") posX = _wtoi(argv[i + 1]);
         else if (a == L"--y") posY = _wtoi(argv[i + 1]);
     }

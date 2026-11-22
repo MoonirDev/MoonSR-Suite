@@ -139,15 +139,28 @@ Still open:
   supported GPUs (RX 7000, RX 9000, RDNA 3-class APUs).
 
 ## GPU per stage (2026-11-22)
-- NVIDIA neural rendering must use the Upscaling GPU (the GPU that captures and presents); NVIDIA's runtime fails
-  feature creation on a second GPU (see NR_BRIDGE.md). Cause not found: not the cross-GPU copies, the input texture,
-  the feature level, GPU priority, or a second D3D12 device; it did not reproduce outside the engine.
+- NVIDIA neural rendering on another GPU runs in the helper process `MoonSR_NrHost.exe` (see NR_BRIDGE.md). Not
+  tested in the GUI. Per-frame cost of the helper path is not measured.
 - AMD and Intel neural rendering on a GPU other than the Upscaling GPU: allowed but not verified on hardware.
-- Frame generation on another GPU: Moon ALSR then runs its own motion estimator on the main GPU (one extra motion
+- Frame generation on another GPU: MoonSR (formerly Moon ALSR) then runs its own motion estimator on the main GPU (one extra motion
   analysis per real frame); the remote generator's motion field is not shared across GPUs.
-- Adaptive frame-generation learning measures on the main GPU even when frame generation runs on another GPU.
 - Each GPU switch costs one copy per frame (generated frames included), about 1.3-1.8 ms of latency per 1080p BGRA8
   frame on this machine; measured on idle GPUs only, not under game load.
 - Not verified by interaction: reordering stages with the GPU pickers, dropdown placement, narrow windows, and the
   migration of an old single "Processing GPU" setting into the three stage settings (code path read, not run).
 - Software adapters (WARP) are still listed in the GPU pickers, as in the old Processing GPU list.
+
+## NVIDIA neural rendering helper (2026-11-22)
+- Helper log files `%LOCALAPPDATA%\MoonSR\moonsr_nrhost_<pid>.log` accumulate: one per run, no pruning yet.
+- The helper's per-frame cost is not measured.
+- The automatic fallback from in-process to the helper detects the refusal by the error text "create=0xBAD00002". If
+  the runtime changes that text, the fallback does not trigger.
+- Not tested: use in the GUI.
+
+## Output window and tray (2026-11-22)
+- The output window is no longer topmost. It stays directly above the captured game window (WinEvent hooks + 100 ms
+  poll). While another window overlaps it, DWM composes, so independent flip / tearing is unavailable then. A
+  one-frame flash is possible after clicking into the game. Popups owned by the game appear above the output.
+- The taskbar is hidden by Windows itself while the game is foreground (observed shell behaviour, not guaranteed).
+- Not tested: elevated games, a real game.
+- Close to system tray: a scripted test passed. A real mouse click on the icon and an Explorer restart were not tested.

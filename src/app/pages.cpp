@@ -144,33 +144,16 @@ void BuildPages(ui::View& view, AppUi& u) {
 
         u.alsrInfo = p->Make<ui::InfoBar>();
         u.alsrInfo->Set(ui::InfoBar::Severity::Info,
-                        L"Moon ALSR rebuilds detail from several frames and learns each game's look over time. It uses more GPU "
-                        L"time than the other scalers.");
-        u.alsrLearn = p->Make<ToggleSwitch>();
-        u.alsrUseLearned = p->Make<ToggleSwitch>();
+                        L"MoonSR rebuilds detail from several frames using estimated motion. It uses more GPU time than the "
+                        L"other scalers.");
         u.alsrHistory = p->Make<Slider>();
         u.alsrHistory->Setup(50, 95, 5, L"%");
-        u.alsrReset = p->Make<ui::Button>();
-        u.alsrReset->text = L"Reset what was learned for this game";
-        u.alsrProfiles = p->Make<ui::LinkButton>();
-        u.alsrProfiles->text = L"Open profiles folder";
-        u.alsrStatus = p->Make<ui::TextBlock>();
-        u.alsrStatus->title = L"Moon ALSR status";
         u.alsrNote = p->Make<ui::InfoBar>();
         u.alsrNote->visible = false;
         p->AddInfo(u.alsrInfo);
         ui::Card& ac = p->AddCard();
-        u.alsrLearnRow = &p->AddRow(ac, kIconNeural, L"Learn from this game",
-                                    L"Collects samples while you play and refines a profile for this game", {{u.alsrLearn, kToggleW}});
-        u.alsrUseRow = &p->AddRow(ac, kIconQuality, L"Apply learned filters (experimental)",
-                                  L"May improve or reduce image quality; turn off to compare", {{u.alsrUseLearned, kToggleW}});
         u.alsrHistoryRow = &p->AddRow(ac, kIconFlow, L"History strength", L"How strongly earlier frames are trusted",
                                       {{u.alsrHistory, 300.0f}});
-        u.alsrResetRow = &p->AddRow(ac, kIconShield, L"Learned profile",
-                                    L"Deletes what was learned for the game being scaled", {{u.alsrReset, 0.0f}});
-        u.alsrFolderRow = &p->AddRow(ac, kIconFolder, L"Profiles folder", L"Where each game's learned profile is stored",
-                                     {{u.alsrProfiles, 0.0f}});
-        p->AddFree(u.alsrStatus, -1.0f, -1.0f);
         p->AddInfo(u.alsrNote);
 
         p->AddSection(L"Presentation");
@@ -189,13 +172,6 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.fgFlow = p->Make<Slider>();
         u.fgFlow->Setup(25, 100, 5, L"%");
         u.fgHud = p->Make<ToggleSwitch>();
-        u.fgLearning = p->Make<ToggleSwitch>();
-        u.fgLearningReset = p->Make<ui::Button>();
-        u.fgLearningReset->text = L"Reset learning for this game";
-        u.fgLearningProfiles = p->Make<ui::LinkButton>();
-        u.fgLearningProfiles->text = L"Open profiles folder";
-        u.fgLearningStatus = p->Make<ui::TextBlock>();
-        u.fgLearningStatus->title = L"Adaptive learning status";
         for (int m = 2; m <= 6; ++m) u.fgMultiplier->AddItem(std::to_wstring(m) + L"X", m);
         ui::InfoBar* note = p->Make<ui::InfoBar>();
         note->Set(ui::InfoBar::Severity::Info,
@@ -208,13 +184,6 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddRow(c, kIconFlow, L"Flow scale", L"Resolution of the motion analysis", {{u.fgFlow, 300.0f}});
         p->AddRow(c, kIconShield, L"Protect HUD and static overlays", L"Keeps fixed on-screen elements from warping",
                   {{u.fgHud, kToggleW}});
-        p->AddRow(c, kIconNeural, L"Adaptive learning (experimental)", L"Tests lower flow settings against real frames from this game",
-                  {{u.fgLearning, kToggleW}});
-        p->AddRow(c, kIconShield, L"Learned profile", L"Reset learning for the current game and settings",
-                  {{u.fgLearningReset, 0.0f}});
-        p->AddRow(c, kIconFolder, L"Profiles folder", L"Where per-game learning profiles are stored",
-                  {{u.fgLearningProfiles, 0.0f}});
-        p->AddFree(u.fgLearningStatus, -1.0f, -1.0f);
         p->AddInfo(note);
         p->AddSection(L"Presentation");
         ui::Card& presentation = p->AddCard();
@@ -414,6 +383,12 @@ void BuildPages(ui::View& view, AppUi& u) {
         k2->keycap = true;
         ui::TextLabel* ver = p->Make<ui::TextLabel>();
         ver->text = L"0.1.0";
+        u.closeToTray = p->Make<ToggleSwitch>();
+
+        p->AddSection(L"Application");
+        ui::Card& app = p->AddCard();
+        p->AddRow(app, kIconWindow, L"Close to system tray",
+                  L"Closing the window keeps MoonSR running in the notification area.", {{u.closeToTray, kToggleW}});
 
         p->AddSection(L"Recording");
         ui::Card& rec = p->AddCard();

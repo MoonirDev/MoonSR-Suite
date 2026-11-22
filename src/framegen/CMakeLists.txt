@@ -2,14 +2,6 @@
 add_library(moonsr_framegen STATIC
     frame_generator.cpp
     frame_generator.h
-    adaptive_policy.cpp
-    adaptive_policy.h
-    adaptive_profile.cpp
-    adaptive_profile.h
-    adaptive_sampler.cpp
-    adaptive_sampler.h
-    adaptive_controller.cpp
-    adaptive_controller.h
 )
 target_link_libraries(moonsr_framegen PUBLIC moonsr_gpu PRIVATE moonsr_shaders)
 if(TARGET MoonSR_HardwareFlow)
