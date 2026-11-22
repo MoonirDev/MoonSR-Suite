@@ -7,7 +7,6 @@ namespace {
 constexpr wchar_t kIconHome = 0xE80F;
 constexpr wchar_t kIconUpscale = 0xE740;
 constexpr wchar_t kIconFrames = 0xE786;
-constexpr wchar_t kIconOutput = 0xE7F4;
 constexpr wchar_t kIconDiag = 0xE9D9;
 constexpr wchar_t kIconWindow = 0xE8A7;
 constexpr wchar_t kIconForeground = 0xE73F;
@@ -19,7 +18,6 @@ constexpr wchar_t kIconSync = 0xE895;
 constexpr wchar_t kIconCursor = 0xE7C9;
 constexpr wchar_t kIconCounter = 0xE9D2;
 constexpr wchar_t kIconMonitor = 0xE7F4;
-constexpr wchar_t kIconGpu = 0xE950;
 constexpr wchar_t kIconMult = 0xE762;
 constexpr wchar_t kIconQuality = 0xE734;
 constexpr wchar_t kIconFlow = 0xE9F5;
@@ -67,6 +65,7 @@ void BuildPages(ui::View& view, AppUi& u) {
     {
         ui::Page* p = view.AddPage(L"Home", kIconHome, L"Home");
         u.window = p->Make<ComboBox>();
+        u.monitor = p->Make<ComboBox>();
         u.refresh = p->Make<ui::Button>();
         u.refresh->text = L"Refresh";
         u.useForeground = p->Make<ToggleSwitch>();
@@ -84,6 +83,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Card& src = p->AddCard();
         p->AddRow(src, kIconWindow, L"Game window", L"The window to capture and scale",
                   {{u.window, 340.0f}, {u.refresh, 88.0f}});
+        p->AddRow(src, kIconMonitor, L"Monitor", L"Where the scaled image is shown", {{u.monitor, 340.0f}});
         p->AddRow(src, kIconForeground, L"Use the foreground window when scaling starts",
                   L"Picks whatever you are playing when the countdown ends", {{u.useForeground, kToggleW}});
 
@@ -116,7 +116,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddTiles({u.tGame, u.tDisplayed, u.tGenerated, u.tFrameGen, u.tFgDelay, u.tLatency, u.tInput, u.tOutput});
 
         p->AddSection(L"Details");
-        u.details = p->AddDetails({L"GPU", L"Capture method", L"Scaler", L"Processing order", L"CPU per frame", L"Frames dropped",
+        u.details = p->AddDetails({L"GPU", L"GPU per stage", L"Capture method", L"Scaler", L"Processing order", L"CPU per frame", L"Frames dropped",
                                    L"Generated frames: scheduler late / skipped", L"State"});
         p->AddFree(u.diagnosticsLink, 0.0f, 24.0f);
     }
@@ -364,36 +364,35 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.orderNote = p->Make<ui::InfoBar>();
         u.orderNote->visible = false;
         u.orderList = p->Make<ui::OrderList>();
+        u.gpuNote = p->Make<ui::InfoBar>();
+        u.gpuNote->Set(ui::InfoBar::Severity::Info, L"GPU choices can be changed again after scaling is stopped.");
+        u.gpuNote->visible = false;
+        for (ui::ComboBox*& gpu : u.stageGpu) gpu = p->Make<ComboBox>();
         u.orderReset = p->Make<ui::Button>();
         u.orderReset->text = L"Reset to default order";
         u.orderExplain = p->Make<ui::TextBlock>();
         u.addonsEmpty = p->Make<ui::TextBlock>();
         u.addonsEmpty->text = L"No addons installed. Addons will appear here and can be placed anywhere in the order.";
 
+        u.gpuHelp = p->Make<ui::InfoBar>();
+        u.gpuHelp->Set(ui::InfoBar::Severity::Info,
+                       L"Choose the GPU for each stage; Auto is the GPU that drives the monitor. Capture and presentation "
+                       L"use the Upscaling GPU. When two consecutive stages use different GPUs, every frame is copied "
+                       L"between them. GPU choices apply when scaling starts.");
         p->AddInfo(u.orderInfo);
+        p->AddInfo(u.gpuHelp);
         p->AddInfo(u.orderNow);
         p->AddInfo(u.orderNote);
         p->AddFree(u.orderList, -1.0f, -1.0f);
+        for (ui::ComboBox* gpu : u.stageGpu) {
+            p->AddChild(gpu);  // the list positions and draws them next to their stage
+        }
+        p->AddInfo(u.gpuNote);
         p->AddFree(u.orderReset, 0.0f, 32.0f);
         p->AddSection(L"What this order does");
         p->AddFree(u.orderExplain, -1.0f, -1.0f);
         p->AddSection(L"Addons");
         p->AddFree(u.addonsEmpty, -1.0f, -1.0f);
-    }
-
-    // ---------------------------------------------------------------- Output
-    {
-        ui::Page* p = view.AddPage(L"Output", kIconOutput, L"Output");
-        u.monitor = p->Make<ComboBox>();
-        u.adapter = p->Make<ComboBox>();
-        u.outputNote = p->Make<ui::InfoBar>();
-        u.outputNote->Set(ui::InfoBar::Severity::Info, L"These settings can be changed again after scaling is stopped.");
-        u.outputNote->visible = false;
-
-        ui::Card& c = p->AddCard();
-        p->AddRow(c, kIconMonitor, L"Monitor", L"Where the scaled image is shown", {{u.monitor, 400.0f}});
-        p->AddRow(c, kIconGpu, L"Processing GPU", L"The graphics card that does the scaling", {{u.adapter, 400.0f}});
-        p->AddInfo(u.outputNote);
     }
 
     // ---------------------------------------------------------------- Diagnostics

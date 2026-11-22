@@ -115,6 +115,19 @@ OrderList::Hit OrderList::HitAt(float x, float y, int* row) const {
     return Hit::Row;
 }
 
+float OrderList::ComboWidth() const { return (bounds.right - bounds.left) >= 860.0f ? 210.0f : 160.0f; }
+
+Rect OrderList::ComboRect(float rowTop) const {
+    const float cy = rowTop + kRowH * 0.5f;
+    const float right = bounds.right - kBtnRight - kBtn - 8.0f - kBtn - kComboGap;
+    return Rect{right - ComboWidth(), cy - metric::kControlHeight * 0.5f, right, cy + metric::kControlHeight * 0.5f};
+}
+
+void OrderList::SyncCombos() {
+    for (size_t i = 0; i < entries.size(); ++i)
+        if (entries[i].combo) entries[i].combo->bounds = ComboRect(bounds.top + static_cast<float>(i) * kRowH);
+}
+
 int OrderList::DropIndex() const {
     const int n = static_cast<int>(entries.size());
     return std::clamp(static_cast<int>(std::floor(dragY_ / kRowH)), 0, std::max(0, n - 1));
@@ -212,6 +225,7 @@ void OrderList::Draw(Canvas& c, const Palette& p) {
     c.FillRound(bounds, metric::kCardRadius, p.cardFill);
     c.StrokeRound(bounds, metric::kCardRadius, p.cardStroke);
     const int n = static_cast<int>(entries.size());
+    SyncCombos();
     const bool focusRow = focused;
     const int dragFrom = dragging_ ? pressRow_ : -1;
 
@@ -267,8 +281,16 @@ void OrderList::Draw(Canvas& c, const Palette& p) {
             }
             c.Chevron((rr.left + rr.right) * 0.5f, cy, 5.0f, can ? p.text : p.textDisabled, up);
         }
-        // Badges, right to left, before the buttons.
+        // The stage's GPU combo box sits left of the buttons; it is drawn here so it follows the row (animation, drag).
         float edge = UpRect(i).left - 12.0f;
+        if (e.combo) {
+            const Rect rest = e.combo->bounds;
+            e.combo->bounds = ComboRect(top);
+            if (e.combo->visible) e.combo->Draw(c, p);
+            e.combo->bounds = rest;
+            edge = ComboRect(top).left - kComboGap;
+        }
+        // Badges, right to left, before the combo box.
         const float textMin = tx + 150.0f;
         if (!e.badge.empty()) {
             const float w = g.MeasureWidth(e.badge, Font::Caption) + 18.0f;

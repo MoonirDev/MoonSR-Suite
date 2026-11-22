@@ -609,7 +609,9 @@ void MainWindow::OnCreate() {
 }
 
 void MainWindow::WireHandlers() {
-    ui_.adapter->onChange = [this] { UpdateNeuralState(); };
+    for (ui::ComboBox* gpu : ui_.stageGpu) gpu->onChange = [this] { UpdateNeuralState(); };
+    ui_.monitor->onChange = [this] { UpdateNeuralState(); };
+    ui_.window->onChange = [this] { UpdateNeuralState(); };
     view_.onDefaultAction = [this] { ToggleFromButton(); };
     view_.defaultActionPage = PageHome;
     ui_.start->onChange = [this] { ToggleFromButton(); };
@@ -756,8 +758,10 @@ void MainWindow::PopulateAdapters() {
         intelPresent_ |= a.vendor == Vendor::Intel;
     }
 
-    ui_.adapter->Clear();
-    ui_.adapter->AddItem(L"Auto (GPU driving the output monitor)", 0);
+    for (ui::ComboBox* combo : ui_.stageGpu) {
+        combo->Clear();
+        combo->AddItem(L"Auto", 0); // the GPU that drives the output monitor (explained on the page)
+    }
     for (size_t i = 0; i < adapters_.size(); ++i) {
         const AdapterInfo& a = adapters_[i];
         std::wstring text = a.name.empty() ? L"Unknown adapter" : a.name;
@@ -768,9 +772,9 @@ void MainWindow::PopulateAdapters() {
         } else {
             text += L" (shared memory)";
         }
-        ui_.adapter->AddItem(text, static_cast<long long>(i + 1));
+        for (ui::ComboBox* combo : ui_.stageGpu) combo->AddItem(text, static_cast<long long>(i + 1));
     }
-    ui_.adapter->SetSelected(0);
+    for (ui::ComboBox* combo : ui_.stageGpu) combo->SetSelected(0);
 }
 
 void MainWindow::PopulateScalers() {
@@ -803,19 +807,21 @@ void MainWindow::ApplySettingsToUi() {
     }
     ui_.monitor->SetSelected(monitorSel);
 
-    // Adapter: by vendorId + deviceId + name; falls back to Auto.
-    int adapterSel = 0;
-    if (settings_.adapterVendorId != 0 || settings_.adapterDeviceId != 0 || !settings_.adapterName.empty()) {
-        for (size_t i = 0; i < adapters_.size(); ++i) {
-            const AdapterInfo& a = adapters_[i];
-            if (a.vendorId == settings_.adapterVendorId && a.deviceId == settings_.adapterDeviceId &&
-                a.name == settings_.adapterName) {
-                adapterSel = static_cast<int>(i + 1);
-                break;
+    // GPU per stage: by vendorId + deviceId + name; unknown or missing adapters fall back to Auto.
+    for (int st = 0; st < StageGpuCount; ++st) {
+        const GpuPref& pref = settings_.stageGpu[st];
+        int adapterSel = 0;
+        if (!pref.IsAuto()) {
+            for (size_t i = 0; i < adapters_.size(); ++i) {
+                const AdapterInfo& a = adapters_[i];
+                if (a.vendorId == pref.vendorId && a.deviceId == pref.deviceId && a.name == pref.name) {
+                    adapterSel = static_cast<int>(i + 1);
+                    break;
+                }
             }
         }
+        ui_.stageGpu[st]->SetSelected(adapterSel);
     }
-    ui_.adapter->SetSelected(adapterSel);
 
     // Scaler: by name; falls back to bilinear, then the first available.
     int scalerSel = 0;
@@ -900,14 +906,15 @@ AppSettings MainWindow::CaptureSettings() const {
     const int m = ui_.monitor->Selected();
     if (m > 0 && static_cast<size_t>(m) <= monitors_.size()) s.monitorDevice = monitors_[static_cast<size_t>(m) - 1].deviceName;
 
-    s.adapterVendorId = s.adapterDeviceId = 0;
-    s.adapterName.clear();
-    const int a = ui_.adapter->Selected();
-    if (a > 0 && static_cast<size_t>(a) <= adapters_.size()) {
-        const AdapterInfo& info = adapters_[static_cast<size_t>(a) - 1];
-        s.adapterVendorId = info.vendorId;
-        s.adapterDeviceId = info.deviceId;
-        s.adapterName = info.name;
+    for (int st = 0; st < StageGpuCount; ++st) {
+        s.stageGpu[st] = GpuPref{};
+        const int a = ui_.stageGpu[st]->Selected();
+        if (a > 0 && static_cast<size_t>(a) <= adapters_.size()) {
+            const AdapterInfo& info = adapters_[static_cast<size_t>(a) - 1];
+            s.stageGpu[st].vendorId = info.vendorId;
+            s.stageGpu[st].deviceId = info.deviceId;
+            s.stageGpu[st].name = info.name;
+        }
     }
 
     const int sc = ui_.scaler->Selected();
@@ -1198,8 +1205,8 @@ void MainWindow::StartScaling(HWND target) {
             }
         }
     }
-    const int a = ui_.adapter->Selected();
-    if (a > 0 && static_cast<size_t>(a) <= adapters_.size()) cfg.processingAdapter = adapters_[static_cast<size_t>(a) - 1].luid;
+    for (PipelineStage st : {PipelineStage::NeuralRendering, PipelineStage::FrameGeneration, PipelineStage::Upscaling})
+        if (const AdapterInfo* a = StageAdapter(st)) cfg.stageAdapters.For(st) = a->luid;
 
     targetTitle_ = Ellipsize(WindowTitle(target), 60);
     lastRecordingDirSeen_ = engine_.GetStats().lastRecordingDir;
@@ -1330,6 +1337,8 @@ void MainWindow::ShowStats(const EngineStats& st) {
     ui_.tLatency->SetValue(st.latencyMs > 0.0 ? std::format(L"{:.1f}", st.latencyMs) : std::wstring(L"-"),
                            st.latencyMs > 0.0 ? L"ms" : L"");
     ui_.details->SetValue(DetGpu, orDash(st.adapterName));
+    ui_.details->SetValue(DetStageGpus, st.stageGpuText);
+    ui_.details->SetVisible(DetStageGpus, !st.stageGpuText.empty());
     ui_.details->SetValue(DetCapture, orDash(st.captureMethod));
     ui_.details->SetValue(DetScaler, orDash(st.scalerName));
     ui_.details->SetValue(DetOrder, orDash(st.pipelineOrderText));
@@ -1367,6 +1376,7 @@ void MainWindow::ClearStats(const wchar_t* stateText) {
                         ui_.tOutput})
         t->SetValue(L"-");
     for (size_t i = 0; i < DetCount; ++i) ui_.details->SetValue(i, i == DetState ? stateText : L"-");
+    ui_.details->SetVisible(DetStageGpus, false);
     for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote}) bar->SetVisible(false);
     UpdateAlsrStatus(EngineStats{});
     UpdateFrameGenLearningStatus(EngineStats{});
@@ -1385,9 +1395,9 @@ void MainWindow::UpdateControlStates() {
     ui_.refresh->SetEnabled(idle);
     ui_.useForeground->SetEnabled(idle);
     ui_.monitor->SetEnabled(idle);
-    ui_.adapter->SetEnabled(idle);
+    for (ui::ComboBox* gpu : ui_.stageGpu) gpu->SetEnabled(idle);
     ui_.cursor->SetEnabled(idle);
-    ui_.outputNote->SetVisible(running);
+    ui_.gpuNote->SetVisible(running);
 
     // Dependent groups follow their master switch.
     const bool up = ui_.upscaling->checked();
@@ -1449,7 +1459,7 @@ void MainWindow::ApplyTestOptionsEarly() {
     if (!test_.page.empty()) {
         static const struct { const wchar_t* name; int page; } kPages[] = {
             {L"home", PageHome}, {L"upscaling", PageUpscaling}, {L"framegen", PageFrameGen},
-            {L"output", PageOutput}, {L"diagnostics", PageDiagnostics}, {L"neural", PageNeural},
+            {L"diagnostics", PageDiagnostics}, {L"neural", PageNeural},
             {L"loadorder", PageLoadOrder}};
         for (const auto& p : kPages)
             if (EqualNoCase(test_.page, p.name)) view_.Navigate(p.page);
@@ -1548,11 +1558,34 @@ const ModelInfo* MainWindow::SelectedModel() const {
     return nullptr;
 }
 
+const AdapterInfo* MainWindow::StageAdapter(PipelineStage stage) const {
+    const ui::ComboBox* combo = ui_.stageGpu[static_cast<int>(stage)];
+    const int index = combo ? combo->Selected() : 0;
+    if (index > 0 && static_cast<size_t>(index) <= adapters_.size()) return &adapters_[static_cast<size_t>(index) - 1];
+    return nullptr;
+}
+
+const AdapterInfo* MainWindow::OutputAdapter() const {
+    const MonitorInfo* mon = nullptr;
+    const int m = ui_.monitor->Selected();
+    if (m > 0 && static_cast<size_t>(m) <= monitors_.size()) {
+        mon = &monitors_[static_cast<size_t>(m) - 1];
+    } else if (const HWND game = SelectedWindow()) {
+        // Auto: the monitor the game window is on.
+        const HMONITOR hm = MonitorFromWindow(game, MONITOR_DEFAULTTONEAREST);
+        for (const MonitorInfo& mi : monitors_)
+            if (mi.handle == hm) mon = &mi;
+    }
+    if (!mon) return nullptr;
+    for (const AdapterInfo& a : adapters_)
+        if (LuidEqual(a.luid, mon->adapterLuid)) return &a;
+    return nullptr;
+}
+
 Vendor MainWindow::NeuralAdapterVendor() const {
-    if (engineActive_) return engine_.GetStats().adapterVendor;
-    const int index = ui_.adapter->Selected();
-    if (index > 0 && static_cast<size_t>(index) <= adapters_.size())
-        return adapters_[static_cast<size_t>(index) - 1].vendor;
+    // The GPU that matters is the one chosen for the Neural rendering stage; Auto means the monitor's GPU.
+    if (const AdapterInfo* a = StageAdapter(PipelineStage::NeuralRendering)) return a->vendor;
+    if (const AdapterInfo* a = OutputAdapter()) return a->vendor;
     const int capable = (amdPresent_ ? 1 : 0) + (nvidiaPresent_ ? 1 : 0) + (intelPresent_ ? 1 : 0);
     if (capable == 1) return amdPresent_ ? Vendor::Amd : nvidiaPresent_ ? Vendor::Nvidia : Vendor::Intel;
     return Vendor::Unknown;
@@ -1642,7 +1675,7 @@ void MainWindow::RefreshModels() {
 void MainWindow::UpdateNeuralState() {
     const bool running = engineActive_;
     const Vendor vendor = NeuralAdapterVendor();
-    const bool automatic = !running && ui_.adapter->Selected() == 0 && vendor == Vendor::Unknown;
+    const bool automatic = !running && StageAdapter(PipelineStage::NeuralRendering) == nullptr && vendor == Vendor::Unknown;
     const bool canUseAmd = vendor == Vendor::Amd || (automatic && amdPresent_);
     const bool canUseNvidia = vendor == Vendor::Nvidia || (automatic && nvidiaPresent_);
     const bool canUseIntel = vendor == Vendor::Intel || (automatic && intelPresent_);
@@ -1671,9 +1704,9 @@ void MainWindow::UpdateNeuralState() {
     }
     const wchar_t* desc = L"Enhances frames with the selected model. RTX 20, 30 and 40 series require the patched FP16 model.";
     const int capableCount = (canUseAmd ? 1 : 0) + (canUseIntel ? 1 : 0) + (canUseNvidia ? 1 : 0);
-    if (capableCount == 0) desc = L"Select an AMD, Intel or NVIDIA processing GPU.";
+    if (capableCount == 0) desc = L"Select an AMD, Intel or NVIDIA GPU for this stage on the Load order page.";
     else if (capableCount > 1 && (amdReady || intelReady))
-        desc = L"Uses AMDNR on AMD, DLSS5_INTEL on Intel, or the selected model on NVIDIA. Choose the processing GPU in Output.";
+        desc = L"Uses AMDNR on AMD, DLSS5_INTEL on Intel, or the selected model on NVIDIA. Choose the GPU for this stage on the Load order page.";
     else if (canUseAmd && !canUseNvidia && !canUseIntel)
         desc = amdReady ? L"AMDNR runtime · up to 3 passes. Original uses the full network."
                         : L"Add the AMDNR runtime DLL and model pack to the amd-nr folder.";
@@ -1682,6 +1715,15 @@ void MainWindow::UpdateNeuralState() {
                           : L"Add d5c_chain.dll, its shaders and dlssnr-logical.safetensors to the intel-nr folder.";
     else if (models_.empty()) desc = L"Add a model file first";
     else if (!avail) desc = L"Select a DLSS Neural Rendering model first";
+    // NVIDIA's runtime only runs on the GPU that presents (the Upscaling stage's GPU); the engine refuses otherwise.
+    {
+        const AdapterInfo* nrGpu = StageAdapter(PipelineStage::NeuralRendering);
+        const AdapterInfo* upGpu = StageAdapter(PipelineStage::Upscaling);
+        if (!nrGpu) nrGpu = OutputAdapter();
+        if (!upGpu) upGpu = OutputAdapter();
+        if (nrGpu && upGpu && nrGpu->vendor == Vendor::Nvidia && !LuidEqual(nrGpu->luid, upGpu->luid))
+            desc = L"NVIDIA neural rendering must use the same GPU as Upscaling. Change one of them on the Load order page.";
+    }
     ui_.neuralRow->desc = desc;
     view_.Invalidate();
     if (ui_.orderList) RefreshOrderUi();
@@ -2057,6 +2099,7 @@ void MainWindow::SetOrderUi(const PipelineOrder& order) {
         e.icon = StageIcon(st);
         e.name = Engine::StageName(st);
         e.desc = Engine::StageDescription(st);
+        e.combo = ui_.stageGpu[static_cast<int>(st)];  // the GPU choice belongs to the stage, not to the slot
         entries.push_back(std::move(e));
     }
     RefreshOrderUi();

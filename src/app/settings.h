@@ -6,14 +6,24 @@
 
 namespace moonsr::app {
 
+// A GPU choice, matched by vendorId + deviceId + name. All empty / zero = Auto (the GPU driving the output monitor).
+struct GpuPref {
+    unsigned vendorId = 0;
+    unsigned deviceId = 0;
+    std::wstring name;
+    bool IsAuto() const { return vendorId == 0 && deviceId == 0 && name.empty(); }
+};
+
+// Indexes of AppSettings::stageGpu; the values match moonsr::PipelineStage.
+enum StageGpuIndex { StageGpuNeural = 0, StageGpuFrameGen = 1, StageGpuUpscaling = 2, StageGpuCount = 3 };
+
 struct AppSettings {
     // Source
     bool useForeground = true;
-    // Output: monitors are matched by device name, adapters by vendorId + deviceId + name. Empty / zero = Auto.
+    // Output: monitors are matched by device name. Empty = Auto.
     std::wstring monitorDevice;
-    unsigned adapterVendorId = 0;
-    unsigned adapterDeviceId = 0;
-    std::wstring adapterName;
+    // GPU per stage (the old single processing GPU is migrated into all three when reading an old settings.ini).
+    GpuPref stageGpu[StageGpuCount];
     // Scaling
     bool upscaling = true;    // false = upscaling off: the image is shown 1:1 (frame generation can still run)
     std::wstring scalerName;  // empty = default

@@ -22,6 +22,15 @@ void Details::SetValue(size_t i, const std::wstring& v) {
     if (view) view->Invalidate();
 }
 
+void Details::SetVisible(size_t i, bool visible) {
+    if (i >= hidden.size() || (hidden[i] == 0) == visible) return;
+    hidden[i] = visible ? 0 : 1;
+    if (view) {
+        view->RequestLayout();
+        view->Invalidate();
+    }
+}
+
 void Page::AddSection(const std::wstring& text) {
     Item& it = items_.emplace_back();
     it.kind = Item::Kind::Section;
@@ -63,6 +72,7 @@ Details* Page::AddDetails(std::vector<std::wstring> labels) {
     it.kind = Item::Kind::Details;
     it.details.view = &view_;
     it.details.values.assign(labels.size(), L"-");
+    it.details.hidden.assign(labels.size(), 0);
     it.details.labels = std::move(labels);
     return &it.details;
 }
@@ -113,7 +123,11 @@ float Page::Layout(const Gfx& g, float width) {
             break;
         }
         case Item::Kind::Details:
-            it.h = static_cast<float>(it.details.labels.size()) * kDetailLineHeight;
+            {
+                size_t shown = 0;
+                for (char h : it.details.hidden) shown += h ? 0 : 1;
+                it.h = static_cast<float>(shown) * kDetailLineHeight;
+            }
             y += it.h + metric::kItemGap;
             break;
         case Item::Kind::Free: {
@@ -219,9 +233,11 @@ void Page::DrawDetails(Canvas& c, const Palette& p, const Gfx& g, const Item& it
     float labelW = 0.0f;
     for (const auto& l : it.details.labels) labelW = std::max(labelW, g.MeasureWidth(l, Font::Body));
     const float vx = kRowPadX + labelW + 24.0f;
+    size_t line = 0;
     for (size_t i = 0; i < it.details.labels.size(); ++i) {
-        const float top = it.y + static_cast<float>(i) * kDetailLineHeight;
-        if (i > 0) c.Line(1.0f, top, it.w - 1.0f, top, p.divider, 1.0f);
+        if (it.details.hidden[i]) continue;
+        const float top = it.y + static_cast<float>(line) * kDetailLineHeight;
+        if (line++ > 0) c.Line(1.0f, top, it.w - 1.0f, top, p.divider, 1.0f);
         c.Text(it.details.labels[i], Rect{kRowPadX, top, kRowPadX + labelW + 8.0f, top + kDetailLineHeight}, Font::Body, p.text);
         c.Text(it.details.values[i], Rect{vx, top, it.w - kRowPadX, top + kDetailLineHeight}, Font::Body, p.textSecondary,
                HAlign::Right);

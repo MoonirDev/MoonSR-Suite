@@ -51,10 +51,24 @@ struct PipelineOrder {
     bool operator==(const PipelineOrder&) const = default;
 };
 
+// The GPU that runs each pipeline stage. A zero LUID means Auto: the adapter that drives the output monitor.
+// Capture runs on the GPU of the first stage in the load order; the finished image is presented by the monitor's GPU.
+// Wherever two consecutive steps run on different GPUs the engine copies the frame between them (one cross-GPU copy
+// per frame and hop, generated frames included). Applied when scaling starts; not changed live.
+struct StageAdapters {
+    LUID neuralRendering{}, frameGeneration{}, upscaling{};
+    LUID& For(PipelineStage s) {
+        return s == PipelineStage::NeuralRendering ? neuralRendering
+             : s == PipelineStage::FrameGeneration ? frameGeneration : upscaling;
+    }
+    const LUID& For(PipelineStage s) const { return const_cast<StageAdapters*>(this)->For(s); }
+    void SetAll(const LUID& luid) { neuralRendering = frameGeneration = upscaling = luid; }
+};
+
 struct EngineConfig {
     HWND targetWindow = nullptr;   // window to capture (required)
     HMONITOR outputMonitor = nullptr; // null = the monitor the target window is on
-    LUID processingAdapter{};      // zero = the adapter that drives the output monitor
+    StageAdapters stageAdapters;   // per-stage GPU; all zero = everything on the monitor's GPU
     ScaleSettings scale;
     bool vsync = false;
     CursorMode cursor = CursorMode::Software;
@@ -112,6 +126,9 @@ struct EngineStats {
     // note when the requested order could not be honoured or has a cost the user should know about.
     std::wstring pipelineOrderText;
     std::wstring pipelineOrderNote;
+    // Which GPU runs each stage and how frames cross between GPUs, e.g. "Frame generation: RTX A400 (copy: D3D12
+    // cross-adapter heap) > Upscaling: RTX 5060". Empty while idle.
+    std::wstring stageGpuText;
     // Moon ALSR: true while it is producing the displayed image. `alsrNote` explains when it was requested but
     // is not in use. `alsr` is the per-game learning status.
     bool alsrActive = false;

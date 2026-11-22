@@ -22,6 +22,9 @@ It is an experimental personal project. Quality and speed claims come only from 
   - Intel: the DLSS5_INTEL runtime (experimental and far from real time).
 
   See [documentation/NR_BRIDGE.md](documentation/NR_BRIDGE.md).
+- **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling) can run on
+  its own GPU; frames are copied between GPUs where consecutive stages differ. NVIDIA neural rendering must share the
+  upscaling GPU.
 - **Scheduling:** MoonSR runs at the realtime GPU scheduling class, so its work goes ahead of the game's on a busy
   GPU.
 

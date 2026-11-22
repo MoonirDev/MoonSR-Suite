@@ -95,7 +95,7 @@ int wmain(int argc, wchar_t** argv) {
         if (adapter.vendor == vendor && !adapter.isSoftware &&
             (!foundAdapter || adapter.dedicatedVideoMemory > largestMemory)) {
             foundAdapter = true;
-            largestMemory = adapter.dedicatedVideoMemory; cfg.processingAdapter = adapter.luid;
+            largestMemory = adapter.dedicatedVideoMemory; cfg.stageAdapters.SetAll(adapter.luid);
         }
     }
     if (!foundAdapter) {

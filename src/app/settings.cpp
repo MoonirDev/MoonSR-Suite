@@ -74,9 +74,24 @@ AppSettings LoadSettings() {
 
     s.useForeground = ReadInt(path, L"Source", L"UseForeground", 1) != 0;
     s.monitorDevice = ReadString(path, L"Output", L"MonitorDevice");
-    s.adapterVendorId = static_cast<unsigned>(ReadInt(path, L"Output", L"AdapterVendorId", 0));
-    s.adapterDeviceId = static_cast<unsigned>(ReadInt(path, L"Output", L"AdapterDeviceId", 0));
-    s.adapterName = ReadString(path, L"Output", L"AdapterName");
+    {
+        auto read = [&](const wchar_t* section, const wchar_t* prefix) {
+            const std::wstring p = prefix;
+            GpuPref g;
+            g.vendorId = static_cast<unsigned>(ReadInt(path, section, (p + L"VendorId").c_str(), 0));
+            g.deviceId = static_cast<unsigned>(ReadInt(path, section, (p + L"DeviceId").c_str(), 0));
+            g.name = ReadString(path, section, (p + L"Name").c_str());
+            return g;
+        };
+        if (ReadInt(path, L"Gpu", L"PerStage", 0) != 0) {
+            static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling"};
+            for (int i = 0; i < StageGpuCount; ++i) s.stageGpu[i] = read(L"Gpu", kPrefix[i]);
+        } else {
+            // Older file: one processing GPU for everything.
+            const GpuPref legacy = read(L"Output", L"Adapter");
+            for (GpuPref& g : s.stageGpu) g = legacy;
+        }
+    }
     s.upscaling = ReadInt(path, L"Scaling", L"Enabled", 1) != 0;
     s.scalerName = ReadString(path, L"Scaling", L"Scaler");
     s.fitMode = std::clamp(ReadInt(path, L"Scaling", L"FitMode", 0), 0, 2);
@@ -138,9 +153,16 @@ bool SaveSettings(const AppSettings& s) {
     bool ok = true;
     ok &= WriteInt(path, L"Source", L"UseForeground", s.useForeground ? 1 : 0);
     ok &= WriteString(path, L"Output", L"MonitorDevice", s.monitorDevice);
-    ok &= WriteInt(path, L"Output", L"AdapterVendorId", s.adapterVendorId);
-    ok &= WriteInt(path, L"Output", L"AdapterDeviceId", s.adapterDeviceId);
-    ok &= WriteString(path, L"Output", L"AdapterName", s.adapterName);
+    ok &= WriteInt(path, L"Gpu", L"PerStage", 1);
+    {
+        static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling"};
+        for (int i = 0; i < StageGpuCount; ++i) {
+            const std::wstring p = kPrefix[i];
+            ok &= WriteInt(path, L"Gpu", (p + L"VendorId").c_str(), s.stageGpu[i].vendorId);
+            ok &= WriteInt(path, L"Gpu", (p + L"DeviceId").c_str(), s.stageGpu[i].deviceId);
+            ok &= WriteString(path, L"Gpu", (p + L"Name").c_str(), s.stageGpu[i].name);
+        }
+    }
     ok &= WriteInt(path, L"Scaling", L"Enabled", s.upscaling ? 1 : 0);
     ok &= WriteString(path, L"Scaling", L"Scaler", s.scalerName);
     ok &= WriteInt(path, L"Scaling", L"FitMode", s.fitMode);

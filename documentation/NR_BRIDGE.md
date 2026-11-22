@@ -49,7 +49,7 @@ MoonSR uses a model supplied by the user. For RTX 20, 30, and 40 series, select 
 ## AMDNR
 
 The AMD path uses the lmxxf C ABI and character-mask mapping from the supplied AMDNR OptiScaler source.
-MoonSR calls the runtime on its own Direct3D 12 queue on the selected processing GPU. It converts the SDR
+MoonSR calls the runtime on its own Direct3D 12 queue on the GPU chosen for Neural rendering. It converts the SDR
 capture to linear colour, queues HIP inference, and composes the result for the same captured frame.
 The bridge uses AMDNR's colour-only frame path on Radeon RX 7000, RX 9000, and the RDNA 3-class APUs
 supported by that runtime. RX 6000 support requires a different runtime.
@@ -59,7 +59,7 @@ are available on NVIDIA. The remaining supported controls and picture adjustment
 Install the matching `LmxxfNrRuntime.dll` and `LmxxfNrRuntime.pak` from
 [`AMDNR-v0.3.5.6.zip`](https://github.com/3zwr1/AMD-NR---OptiScaler/releases/tag/Alpha0.3.5.6) in `amd-nr` beside
 `MoonSR.exe`. Keep any runtime DLL dependencies from that release beside the runtime and follow its GPU
-and HIP driver requirements. Choose the Radeon processing GPU in **Output**, then enable **Neural rendering**.
+and HIP driver requirements. On the **Load order** page choose the Radeon GPU for Neural rendering, then enable **Neural rendering**.
 The AMD backend takes its model from the AMDNR pack. The MoonSR **Active model file** picker serves NVIDIA.
 
 With a supported Radeon GPU, run `MoonSR_NrBridgeSmoke.exe --amd "path\to\LmxxfNrRuntime.dll"`
@@ -67,7 +67,7 @@ to exercise frame processing, live resolution changes, and picture adjustment. T
 
 ## Intel (DLSS5_INTEL)
 
-On an Intel processing GPU the bridge drives the DLSS5_INTEL runtime, `d5c_chain.dll` from
+On an Intel GPU the bridge drives the DLSS5_INTEL runtime, `d5c_chain.dll` from
 [github.com/geladons/DLSS5_INTEL](https://github.com/geladons/DLSS5_INTEL) (Apache-2.0, reference commit `7e8e039`).
 That runtime runs the DLSS NR network on Vulkan cooperative matrices (`VK_KHR_cooperative_matrix`, XMX on Arc).
 MoonSR bundles none of it: build `dlss5/chain` yourself (it needs the Vulkan SDK) or take `d5c_chain.dll` and its
@@ -80,7 +80,7 @@ Install into an `intel-nr` folder beside `MoonSR.exe`:
 - `dlssnr-logical.safetensors`: the weights in that project's logical layout, extracted from your own
   `nvngx_dlssnr.dll` (see its `docs/weights-format.md`; NVIDIA's data, never redistributed)
 
-Then choose the Intel GPU as the processing GPU in **Output** and enable **Neural rendering**. The bridge
+Then choose the Intel GPU for Neural rendering on the **Load order** page and enable **Neural rendering**. The bridge
 (`addons/moonsr_nr_bridge/intel_model.cpp`) works like this:
 
 - **One pass, one network.** Working resolution maps to the runtime's scale (33-100 %) and changes live.
@@ -96,3 +96,17 @@ Then choose the Intel GPU as the processing GPU in **Output** and enable **Neura
   Arc Pro B50. Use a low working resolution. MoonSR has not measured it (no Intel GPU on the development machine).
 
 `MoonSR_IntelNrSmoke.exe` tests the bridge path with a stand-in runtime (`MoonSR_IntelNrFixture.dll`) on any GPU.
+
+## Neural rendering on a different GPU
+
+The **Load order** page sets a GPU per stage. Neural rendering can run on a GPU other than the Upscaling GPU (the GPU
+that captures and presents); each frame and its optical-flow guide are then copied to that GPU and the result copied
+back (`src/engine/remote_stages.cpp`).
+
+**NVIDIA:** not possible. Measured 2026-11-22 on an RTX 5060 + RTX A400 (driver 621.14): NVIDIA's runtime creates its
+model on the GPU that captures and presents (all stages on the 5060, or all on the A400), but feature creation fails
+with NGX `FAIL_PlatformError` (`0xBAD00002`) on the other NVIDIA GPU, in both directions. Running the bridge alone on
+either GPU, also with cross-GPU copies and a second NVIDIA D3D12 device in the process, works. The engine therefore
+refuses NVIDIA neural rendering on a GPU other than the Upscaling GPU with a clear message, and the Neural rendering
+page shows the same hint. AMD and Intel runtimes are allowed on another GPU; that path is not verified (no supported
+AMD GPU or Intel GPU here).

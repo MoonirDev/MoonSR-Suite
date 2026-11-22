@@ -31,7 +31,7 @@ struct TestOptions {
     std::wstring statusFile;         // --test-status-file
     int theme = -1;                  // --test-theme light|dark (0 / 1)
     int dpi = 0;                     // --test-dpi
-    std::wstring page;               // --test-page home|upscaling|framegen|output|diagnostics
+    std::wstring page;               // --test-page home|upscaling|framegen|neural|loadorder|diagnostics
     bool openDropdown = false;       // --test-open-dropdown
     int clientWidth = 0;             // --test-size W,H (client size in DIPs)
     int clientHeight = 0;
@@ -109,6 +109,8 @@ private:
     void RunModelTask(std::function<std::function<void()>()> work);
     void OnModelTasksDone();
     Vendor NeuralAdapterVendor() const;
+    const AdapterInfo* StageAdapter(PipelineStage stage) const;  // null = Auto (the monitor's GPU)
+    const AdapterInfo* OutputAdapter() const;                    // the GPU driving the monitor that will show the image
     const ModelInfo* SelectedModel() const;
     NeuralSettings CurrentNeuralSettings() const;
     PictureSettings CurrentPictureSettings() const;

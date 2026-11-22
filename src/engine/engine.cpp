@@ -1,6 +1,7 @@
 #include "engine/engine.h"
 #include "engine/frame_pacing.h"
 #include "engine/gpu_priority.h"
+#include "engine/remote_stages.h"
 
 #include "capture/capture_source.h"
 #include "core/game_profile.h"
@@ -72,7 +73,41 @@ struct Engine::Impl {
 
     // Pipeline-thread state.
     EngineConfig config;
+    // Main device: the Upscaling stage's GPU. It captures, upscales and presents. Frame generation and neural
+    // rendering run on fgDevice / nrDevice when the user chose another GPU for them (null = the main device), through
+    // the cross-GPU wrappers in engine/remote_stages.h. extraDevices owns those other devices.
     std::unique_ptr<GpuDevice> device;
+    std::vector<std::unique_ptr<GpuDevice>> extraDevices;
+    GpuDevice* fgDevice = nullptr;
+    GpuDevice* nrDevice = nullptr;
+    bool fgIsRemote = false;
+    GpuDevice& NrDevice() { return nrDevice ? *nrDevice : *device; }
+
+    // Creates the frame generator. It runs on the frame-generation GPU only when it generates frames; when it exists
+    // just as Moon ALSR's motion estimator (multiplier 1) it stays on the main device next to ALSR.
+    std::unique_ptr<FrameGenerator> CreateGenerator(bool generating, std::wstring& error) {
+        fgIsRemote = fgDevice && generating;
+        return fgIsRemote ? CreateRemoteFrameGenerator(*device, *fgDevice, error) : FrameGenerator::Create(*device, error);
+    }
+
+    // The generator whose motion field Moon ALSR reads for this real frame. A remote generator does not share its
+    // motion field across GPUs, so the frame is also pushed into a local motion estimator on the main device.
+    FrameGenerator* LocalMotionSource(ID3D11Texture2D* input, const RectI& rect, int64_t qpc) {
+        if (!fgIsRemote) return fg.get();
+        if (!alsrMotion && !alsrMotionFailed) {
+            std::wstring e;
+            alsrMotion = FrameGenerator::Create(*device, e);
+            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"Moon ALSR motion estimator unavailable: {}", e); }
+        }
+        return alsrMotion && alsrMotion->PushFrame(input, rect, qpc) ? alsrMotion.get() : nullptr;
+    }
+
+    bool AnyDeviceLost() const {
+        if (device && device->DeviceStatus() != S_OK) return true;
+        for (const auto& d : extraDevices)
+            if (d->DeviceStatus() != S_OK) return true;
+        return false;
+    }
     std::unique_ptr<Presenter> presenter;
     std::unique_ptr<ICaptureSource> capture;
     std::unique_ptr<ScalePass> scale;
@@ -88,18 +123,32 @@ struct Engine::Impl {
     Size neuralOriginalSize, neuralGuideSize;
 
     bool StartNeural(std::wstring& error) {
+        GpuDevice& nr = NrDevice();
+        // Measured 2026-11-22 (RTX 5060 + RTX A400, driver 621.14): NVIDIA's runtime creates its model on the GPU that
+        // captures and presents, but fails feature creation with NGX FAIL_PlatformError (0xBAD00002) on any other
+        // NVIDIA GPU of the process, in both directions. Refuse that up front instead of failing on the first frame.
+        if (nrDevice && nr.Info().vendor == Vendor::Nvidia) {
+            error = L"NVIDIA neural rendering must run on the same GPU as Upscaling (NVIDIA's runtime refuses a "
+                    L"second GPU). Choose the same GPU for both stages on the Load order page.";
+            return false;
+        }
+        std::unique_ptr<NeuralBridge> bridge;
         // AMD and Intel runtimes carry their own model (amd-nr / intel-nr beside MoonSR.exe): no model id needed.
-        if (device->Info().vendor == Vendor::Amd || device->Info().vendor == Vendor::Intel) {
-            neural = NeuralBridge::Create(*device, {}, config.neuralSettings, error);
-            return neural != nullptr;
+        if (nr.Info().vendor == Vendor::Amd || nr.Info().vendor == Vendor::Intel) {
+            bridge = NeuralBridge::Create(nr, {}, config.neuralSettings, error);
+        } else {
+            bool found = false;
+            for (const auto& model : Engine::Models().List()) {
+                if (model.id != config.neuralModelId || model.kind != ModelKind::DlssNeuralRendering) continue;
+                bridge = NeuralBridge::Create(nr, model.storedPath, config.neuralSettings, error);
+                found = true;
+                break;
+            }
+            if (!found) { error = L"Select an installed DLSS Neural Rendering model."; return false; }
         }
-        for (const auto& model : Engine::Models().List()) {
-            if (model.id != config.neuralModelId || model.kind != ModelKind::DlssNeuralRendering) continue;
-            neural = NeuralBridge::Create(*device, model.storedPath, config.neuralSettings, error);
-            return neural != nullptr;
-        }
-        error = L"Select an installed DLSS Neural Rendering model.";
-        return false;
+        if (bridge && nrDevice) bridge = CreateRemoteNeuralBridge(*device, *nrDevice, std::move(bridge), error);
+        neural = std::move(bridge);
+        return neural != nullptr;
     }
 
     void DisableNeuralAfterChange(const std::wstring& error) {
@@ -113,7 +162,7 @@ struct Engine::Impl {
 
     bool ApplyNeuralChange(const NeuralChange& change) {
         const bool wasEnabled = neural != nullptr;
-        const bool sameModel = device->Info().vendor == Vendor::Amd || device->Info().vendor == Vendor::Intel ||
+        const bool sameModel = NrDevice().Info().vendor == Vendor::Amd || NrDevice().Info().vendor == Vendor::Intel ||
                                config.neuralModelId == change.modelId;
         const bool sameSettings = config.neuralSettings == change.settings;
         if (wasEnabled == change.enabled && sameModel && sameSettings) return false;
@@ -185,7 +234,7 @@ struct Engine::Impl {
     bool NeuralProcess(ID3D11Texture2D*& tex, RectI& rect, int64_t qpc, const PictureSettings& picture,
                        std::wstring& error, bool inputIsOriginal = false) {
         ID3D11Texture2D* guide = nullptr;
-        if (device->Info().vendor == Vendor::Nvidia && !inputIsOriginal) {
+        if (NrDevice().Info().vendor == Vendor::Nvidia && !inputIsOriginal) {
             const Size size{static_cast<uint32_t>(rect.Width()), static_cast<uint32_t>(rect.Height())};
             if (neuralOriginal && neuralOriginalSize == size) {
                 guide = neuralOriginal.Get();
@@ -382,6 +431,9 @@ struct Engine::Impl {
         scale.reset();
         capture.reset();
         presenter.reset();
+        fgDevice = nrDevice = nullptr;
+        fgIsRemote = false;
+        extraDevices.clear(); // after every stage that used them
         device.reset();
     }
 
@@ -393,26 +445,52 @@ struct Engine::Impl {
         HMONITOR monitor = config.outputMonitor;
         if (!monitor) monitor = MonitorFromWindow(config.targetWindow, MONITOR_DEFAULTTONEAREST);
 
-        // Default processing adapter: the one that drives the output monitor. That avoids a cross-adapter copy
-        // at presentation time. An explicit choice (dual-GPU setups) overrides it.
-        const bool userChoseAdapter = !LuidIsZero(config.processingAdapter);
-        LUID adapter = config.processingAdapter;
-        if (!userChoseAdapter) {
-            for (const auto& m : EnumerateMonitors())
-                if (m.handle == monitor) adapter = m.adapterLuid;
-        }
+        // Stage GPUs. Auto (zero) is the adapter that drives the output monitor; that keeps the default free of
+        // cross-GPU copies. The Upscaling stage's GPU is the main device: capture, upscaling and presentation.
+        LUID monitorAdapter{};
         outputRefreshHz = 0.0;
-        for (const auto& m : EnumerateMonitors())
-            if (m.handle == monitor) outputRefreshHz = m.refreshHz;
-
-        device = GpuDevice::Create(LuidIsZero(adapter) ? nullptr : &adapter, error);
-        if (!device && !userChoseAdapter && !LuidIsZero(adapter)) {
+        for (const auto& m : EnumerateMonitors()) {
+            if (m.handle != monitor) continue;
+            monitorAdapter = m.adapterLuid;
+            outputRefreshHz = m.refreshHz;
+        }
+        const auto resolve = [&](const LUID& chosen) { return LuidIsZero(chosen) ? monitorAdapter : chosen; };
+        const LUID mainAdapter = resolve(config.stageAdapters.upscaling);
+        const bool userChoseMain = !LuidIsZero(config.stageAdapters.upscaling);
+        device = GpuDevice::Create(LuidIsZero(mainAdapter) ? nullptr : &mainAdapter, error);
+        if (!device && !userChoseMain && !LuidIsZero(mainAdapter)) {
             // The monitor may be driven by a display-only adapter (indirect / virtual / USB display).
             MSR_LOG_WARN(L"No device on the adapter driving the output monitor ({}); using the default adapter", error);
             error.clear();
             device = GpuDevice::Create(nullptr, error);
         }
         if (!device) return false;
+
+        // Frame generation and neural rendering get their own device only when their GPU differs from the main one.
+        // A stage left on Auto whose monitor adapter cannot run a device (display-only adapter) stays on the main GPU.
+        const auto stageDevice = [&](const LUID& chosen, const wchar_t* stage) -> GpuDevice* {
+            const LUID luid = resolve(chosen);
+            if (LuidIsZero(luid) || LuidEqual(luid, device->Info().luid)) return nullptr;
+            for (const auto& d : extraDevices)
+                if (LuidEqual(d->Info().luid, luid)) return d.get();
+            std::wstring stageError;
+            auto created = GpuDevice::Create(&luid, stageError);
+            if (!created) {
+                if (!LuidIsZero(chosen)) {
+                    error = std::format(L"{}: the selected GPU could not be used ({}).", stage, stageError);
+                    return reinterpret_cast<GpuDevice*>(-1);
+                }
+                MSR_LOG_WARN(L"{}: no device on the monitor's adapter ({}); using the main GPU", stage, stageError);
+                return nullptr;
+            }
+            extraDevices.push_back(std::move(created));
+            return extraDevices.back().get();
+        };
+        GpuDevice* const failed = reinterpret_cast<GpuDevice*>(-1);
+        fgDevice = stageDevice(config.stageAdapters.frameGeneration, L"Frame generation");
+        if (fgDevice == failed) { fgDevice = nullptr; return false; }
+        nrDevice = stageDevice(config.stageAdapters.neuralRendering, L"Neural rendering");
+        if (nrDevice == failed) { nrDevice = nullptr; return false; }
 
         // MoonSR's work goes ahead of the game's on a busy GPU (see engine/gpu_priority.h). Done before any
         // submission and before the neural bridge is created: the bridge's D3D12 queue follows the device priority.
@@ -423,6 +501,7 @@ struct Engine::Impl {
             MSR_LOG_WARN(L"GPU priority: left at normal (MOONSR_GPU_PRIORITY=normal)");
         } else {
             const GpuPriorityResult prio = RaiseGpuPriority(device->Device());
+            for (const auto& d : extraDevices) RaiseGpuPriority(d->Device());
             if (prio.Realtime())
                 MSR_LOG_INFO(L"GPU priority: process class realtime, device thread priority {}", prio.deviceThreadPriority);
             else
@@ -496,8 +575,17 @@ struct Engine::Impl {
         stats.outputSize = presenter->BackBufferSize();
         stats.neuralRenderingActive = false;
         stats.neuralRenderingNote.clear();
-        MSR_LOG_INFO(L"Pipeline initialised: adapter '{}', capture '{}', output {}x{}", stats.adapterName,
-                     stats.captureMethod, stats.outputSize.width, stats.outputSize.height);
+        // Which GPU runs each stage, in load order. Remote stages copy their frames across (see remote_stages.h).
+        stats.stageGpuText.clear();
+        for (const PipelineStage s : Engine::NormalizeOrder(config.order).stages) {
+            const GpuDevice* d = s == PipelineStage::FrameGeneration ? fgDevice
+                               : s == PipelineStage::NeuralRendering ? nrDevice : nullptr;
+            if (!stats.stageGpuText.empty()) stats.stageGpuText += L" > ";
+            stats.stageGpuText += std::format(L"{}: {}{}", Engine::StageName(s), (d ? d : device.get())->Info().name,
+                                              d ? L" (frames copied across GPUs)" : L"");
+        }
+        MSR_LOG_INFO(L"Pipeline initialised: main GPU '{}', capture '{}', output {}x{}; stages: {}", stats.adapterName,
+                     stats.captureMethod, stats.outputSize.width, stats.outputSize.height, stats.stageGpuText);
         return true;
     }
 
@@ -1011,9 +1099,12 @@ struct Engine::Impl {
             // Moon ALSR selected? It needs the generator as its motion estimator even with frame generation off.
             const bool wantAlsr = settings.enabled && settings.scaler == ScalerKind::MoonALSR && !alsrFailed;
             alsrSettings.sharpness = settings.sharpness;
+            // Frame generation on another GPU: the generator moves when it starts or stops generating frames (see
+            // CreateGenerator), once the presents still owed have been shown.
+            if (fg && fgDevice && fgIsRemote != (requested > 1) && pendingIndex >= pendingCount) ResetFrameGen();
             if ((requested > 1 || wantAlsr) && !fg && !fgCreateFailed) {
                 std::wstring fgError;
-                fg = FrameGenerator::Create(*device, fgError);
+                fg = CreateGenerator(requested > 1, fgError);
                 if (!fg) {
                     fgCreateFailed = true;
                     MSR_LOG_ERROR(L"Frame generation unavailable: {}", fgError);
@@ -1257,7 +1348,7 @@ struct Engine::Impl {
                     ps = PresentBackBuffer();
                 }
                 const int64_t t1 = QpcNow();
-                const bool deviceLost = ps == PresentStatus::DeviceLost || device->DeviceStatus() != S_OK;
+                const bool deviceLost = ps == PresentStatus::DeviceLost || AnyDeviceLost();
                 if (deviceLost || ps == PresentStatus::Error) {
                     if (!Recover(deviceLost ? L"device lost" : L"present failure")) {
                         recoveryFailed(L"The graphics device was lost and could not be recovered.");
@@ -1342,7 +1433,7 @@ struct Engine::Impl {
                 // re-composite when the cursor moved, changed shape or appeared / disappeared.
                 if (cursor && sceneValid && !(cursorState == drawnCursor)) {
                     const PresentStatus ps = ComposeAndPresent(cursorState);
-                    const bool deviceLost = ps == PresentStatus::DeviceLost || device->DeviceStatus() != S_OK;
+                    const bool deviceLost = ps == PresentStatus::DeviceLost || AnyDeviceLost();
                     if (deviceLost || ps == PresentStatus::Error) {
                         if (!Recover(deviceLost ? L"device lost" : L"present failure")) {
                             recoveryFailed(L"The graphics device was lost and could not be recovered.");
@@ -1358,7 +1449,7 @@ struct Engine::Impl {
                 lastInputSize = {static_cast<uint32_t>(frame.contentRect.Width()), static_cast<uint32_t>(frame.contentRect.Height())};
                 ID3D11Texture2D* pipelineTexture = frame.texture;
                 RectI pipelineRect = frame.contentRect;
-                if (neural && device->Info().vendor == Vendor::Nvidia) {
+                if (neural && NrDevice().Info().vendor == Vendor::Nvidia) {
                     neuralReset = neuralReset || frame.contentRect != neuralRect ||
                         (neuralSequence && frame.sequence != neuralSequence + 1) ||
                         (neuralQpc && (frame.captureQpc <= neuralQpc || QpcToMs(frame.captureQpc - neuralQpc) > 1000.0));
@@ -1533,9 +1624,12 @@ struct Engine::Impl {
                             const RectI dr = ScalePass::ComputeDestRect(content, presenter->BackBufferSize(), settings.fit);
                             const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
                             const bool alsrAfterNeural = neural && !captureNeuralDone && !upscaleBeforeNeural;
+                            FrameGenerator* motionSource = nullptr;
                             if (alsrAfterNeural && !ds.Empty() && EnsureAlsrTargets(ds)) {
                                 pendingAlsrAfterNeural = true;
-                            } else if (!alsrAfterNeural && !ds.Empty() && EnsureAlsrTargets(ds) && alsr->Render(*fg, alsrOutRtv.Get(), ds, alsrSettings)) {
+                            } else if (!alsrAfterNeural && !ds.Empty() && EnsureAlsrTargets(ds) &&
+                                       (motionSource = LocalMotionSource(fgInput, fgRect, frame.captureQpc)) != nullptr &&
+                                       alsr->Render(*motionSource, alsrOutRtv.Get(), ds, alsrSettings)) {
                                 pendingAlsr = true;
                             } else {
                                 MSR_LOG_ERROR(L"Moon ALSR failed to render; switching to Lanczos-3 for this session");
@@ -1543,7 +1637,7 @@ struct Engine::Impl {
                             }
                         }
                     }
-                    if (device->DeviceStatus() != S_OK) {
+                    if (AnyDeviceLost()) {
                         capture->ReleaseFrame();
                         if (!Recover(L"device lost")) {
                             recoveryFailed(L"The graphics device was lost and could not be recovered.");
@@ -1622,7 +1716,7 @@ struct Engine::Impl {
                 capture->ReleaseFrame();
                 const int64_t t1 = QpcNow();
 
-                const bool deviceLost = ps == PresentStatus::DeviceLost || device->DeviceStatus() != S_OK;
+                const bool deviceLost = ps == PresentStatus::DeviceLost || AnyDeviceLost();
                 if (deviceLost || ps == PresentStatus::Error) {
                     if (!Recover(deviceLost ? L"device lost" : L"present failure")) {
                         recoveryFailed(L"The graphics device was lost and could not be recovered.");

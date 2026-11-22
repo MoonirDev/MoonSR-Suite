@@ -7,6 +7,7 @@
 //              [--flowscale 0.25..1] [--record <frames> <directory>] (starts recording 2 s into the run)
 //              [--fg-learn] [--fg-reset-at N] [--fg-disable-at N] (diagnostics, seconds)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
+//              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
 //
 // --cycle switches through every available scaler during the run (exercises live setting changes).
 #include "core/log.h"
@@ -75,7 +76,7 @@ int wmain(int argc, wchar_t** argv) {
     float flowScale = 0.5f;
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
-    std::wstring recordDir, neuralModel;
+    std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
@@ -96,6 +97,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--order-switch-at") orderSwitchAt = _wtoi(next().c_str());
         else if (a == L"--nolearn") nolearn = true;
         else if (a == L"--neural") neuralModel = next();
+        else if (a == L"--gpu-nr") gpuNr = next();
+        else if (a == L"--gpu-fg") gpuFg = next();
+        else if (a == L"--gpu-up") gpuUp = next();
         else if (a == L"--cursor") cursorMode = Lower(next());
         else if (a == L"--fg") fgMultiplier = _wtoi(next().c_str());
         else if (a == L"--fg-learn") fgLearn = true;
@@ -169,10 +173,21 @@ int wmain(int argc, wchar_t** argv) {
     if (!adapterName.empty()) {
         for (const auto& a : Engine::ListAdapters())
             if (Contains(a.name, adapterName)) {
-                cfg.processingAdapter = a.luid;
+                cfg.stageAdapters.SetAll(a.luid);
                 break;
             }
     }
+
+    // Per-stage GPUs (adapter name substrings); applied after --adapter, which sets all three.
+    const auto pickGpu = [](const std::wstring& name, LUID& luid) {
+        if (name.empty()) return;
+        for (const auto& a : Engine::ListAdapters())
+            if (Contains(a.name, name)) { luid = a.luid; return; }
+        fwprintf(stderr, L"No adapter matches '%s'\n", name.c_str());
+    };
+    pickGpu(gpuNr, cfg.stageAdapters.neuralRendering);
+    pickGpu(gpuFg, cfg.stageAdapters.frameGeneration);
+    pickGpu(gpuUp, cfg.stageAdapters.upscaling);
 
     Engine engine;
     std::wstring error;
@@ -244,6 +259,7 @@ int wmain(int argc, wchar_t** argv) {
             engine.SetScaleSettings(ss);
         }
     }
+    wprintf(L"GPUs: %s\n", engine.GetStats().stageGpuText.c_str());
     if (!neuralModel.empty()) {
         const EngineStats n = engine.GetStats();
         wprintf(L"Neural rendering: %s, processed %llu frames%s%s\n", n.neuralRenderingActive ? L"active" : L"inactive",

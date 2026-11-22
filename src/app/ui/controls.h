@@ -196,7 +196,7 @@ public:
 };
 
 // The "load order" list: one row per stage with a position number, icon, name, description, state badges and
-// move up / move down buttons. Rows can be dragged (insertion line shown while dragging, Esc cancels) or moved
+// move up / move down buttons and, optionally, a combo box per stage (Entry::combo). Rows can be dragged (insertion line shown while dragging, Esc cancels) or moved
 // with Alt+Up / Alt+Down while the list has keyboard focus (Up / Down select a row). The caller owns the meaning of
 // `id`; the list only keeps the order and reports it through onChange. Threading: UI thread only.
 class OrderList : public Control {
@@ -208,8 +208,11 @@ public:
         std::wstring badge;  // state ("On" / "Off")
         bool badgeOn = false;
         std::wstring note;   // optional second badge (warning colour), e.g. "Not active yet"
+        ComboBox* combo = nullptr;  // optional per-stage combo box (owned by the page); the list positions and draws it
+                                    // in this row, so it moves with the stage when the order changes
     };
     static constexpr float kRowH = 72.0f;
+    static constexpr float kComboGap = 12.0f;
 
     std::vector<Entry> entries;  // current order, top to bottom
     void SetBadge(int id, const std::wstring& badge, bool on, const std::wstring& note);
@@ -235,6 +238,9 @@ private:
     Rect UpRect(int row) const;
     Rect DownRect(int row) const;
     int DropIndex() const;
+    float ComboWidth() const;
+    Rect ComboRect(float rowTop) const;  // where an entry's combo box sits in a row whose top edge is rowTop
+    void SyncCombos();                   // puts every combo at its resting position (hit testing uses these)
 
     int sel_ = 0;
     Hit pressHit_ = Hit::None;

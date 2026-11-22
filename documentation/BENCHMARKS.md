@@ -772,3 +772,40 @@ Live pipeline (`moonsr_testpattern --fps 120` 1280x720, `moonsr_cli --scaler lan
 With priority the competing load lost 26 % of its throughput: the game pays for MoonSR's work, as intended.
 Remaining cost under load: about 0.85 ms per NR frame, mostly in the optical-flow stage (NVOFA runs on a
 driver-owned queue whose priority MoonSR does not set).
+
+## GPU per stage: cross-GPU copies, 2026-11-22
+
+Machine: Ryzen 9 7900X, RTX 5060 and RTX A400 (driver 621.14 / 32.0.16.2114), integrated AMD Radeon(TM) Graphics
+(31.0.24002.92), Windows 11 26300, base commit `2689927` plus this change, RelWithDebInfo, GPUs otherwise idle.
+
+`CrossAdapterLink` (`src/gpu/cross_adapter.cpp`), `moonsr_cross_adapter_smoke --bench`, 1920x1080, 300 iterations,
+medians in ms. Measured by the gpu-rendering-engineer; the lead re-ran it and reproduced the Radeon -> A400 row
+(GPU ready 2.237 vs 2.231, pipelined 1.332 vs 1.334). "Call" = CPU time of Transfer when the previous one has
+finished; "ready" = until the destination can read the frame; "pipe" = back-to-back throughput per frame.
+
+| Pair | Format | GPU path call | GPU ready (p95) | GPU pipe | CPU staging call | CPU ready (p95) | CPU pipe |
+|---|---|---|---|---|---|---|---|
+| 5060 -> A400 | BGRA8 | 0.140 | 1.639 (1.691) | 1.326 | 0.840 | 2.193 (2.275) | 1.322 |
+| A400 -> 5060 | BGRA8 | 0.128 | 1.742 (1.788) | 1.332 | 1.797 | 2.127 (2.195) | 1.843 |
+| 5060 -> Radeon | BGRA8 | 0.135 | 1.023 (1.218) | 0.781 | 0.857 | 1.670 (1.927) | 1.388 |
+| Radeon -> 5060 | BGRA8 | 0.136 | 1.508 (1.647) | 1.208 | 1.880 | 2.210 (2.364) | 1.741 |
+| A400 -> Radeon | BGRA8 | 0.137 | 1.875 (1.950) | 1.306 | 1.820 | 2.801 (2.931) | 1.869 |
+| Radeon -> A400 | BGRA8 | 0.145 | 2.231 (2.359) | 1.334 | 2.109 | 3.464 (3.598) | 1.407 |
+
+The GPU path (D3D12 cross-adapter heap in system memory, shared fences) was chosen automatically for all six pairs.
+RGBA16F costs about twice BGRA8 and 3840x2160 about four times 1080p (5060 -> A400 BGRA8 at 4K: 5.95 ms ready, 5.24 ms pipe).
+The A400 pairs top out near 1.3 ms per 1080p BGRA8 frame, likely the A400's PCIe link.
+
+Live (`moonsr_testpattern` 1280x720 at 30 fps, `moonsr_cli --fg 2 --scaler lanczos --monitor 0 --seconds 10`, output
+1920x1080 at 144 Hz on the 5060's monitor):
+
+| Stage GPUs | Captured / presented | Dropped | Late |
+|---|---|---|---|
+| all Auto (5060) | 304 / 601 | 0 | 0 |
+| Frame generation on A400 | 304 / 601 | 2 | 0 |
+| Upscaling (main) on A400, other stages Auto (5060) | 303 / 600 | 2 | 0 |
+| Frame generation on A400, Moon ALSR | 303 / 599 | 2 | 0 |
+| Frame generation on Radeon iGPU | 296 / 575 | 5 | 1 |
+
+Neural rendering on the A400 with the 5060 presenting: refused (NVIDIA runtime, see NR_BRIDGE.md). All stages on the
+A400 with neural rendering: works (168 captured, 92 presented in 6 s; the A400 is too slow for 30 fps NR).

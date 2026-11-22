@@ -4,6 +4,31 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-22 - Session 5: GPU per pipeline stage; Output page removed
+
+- Owner: remove the Output page, move Monitor to Home, remove the Processing GPU picker, and choose a GPU for each
+  stage next to it in Load order.
+- Lead: contracts `EngineConfig::stageAdapters` / `EngineStats::stageGpuText` (engine.h) and `CrossAdapterLink`
+  (src/gpu/cross_adapter.h). Engine: the Upscaling GPU is the main device (capture, upscaling, presentation);
+  Frame generation and Neural rendering on another GPU run through wrappers (`src/engine/remote_stages.*`) that
+  implement the stage interfaces and copy frames across, so the frame loop is unchanged. Real frames stay local; one
+  copy up per real frame and one back per generated frame. Moon ALSR uses a local motion estimator when frame
+  generation is remote. CLI: `--gpu-nr`, `--gpu-fg`, `--gpu-up`; prints the GPU per stage.
+- gpu-rendering-engineer (Opus): `CrossAdapterLink`. D3D12 cross-adapter heap (system-memory buffer, striped,
+  shared fences, ring of 2), CPU-staging fallback, `MOONSR_XADAPTER_FORCE_CPU`, `MOONSR_XADAPTER_STRIPES`;
+  `moonsr_cross_adapter_smoke` (6 pairs bit-exact, debug layers clean). Reviewed by the lead; benchmark row reproduced.
+- ui-engineer (Sonnet): Output page removed, Monitor on Home, GPU picker per stage inside the order list (follows
+  reordering), locked while scaling, per-stage settings with migration of the old adapter setting, "GPU per stage"
+  in Home details. Lead: "Auto" label shortened, help text extended, NVIDIA hint added. Screenshots reviewed.
+- Found while testing: NVIDIA neural rendering fails on a GPU other than the presenting one (NGX FAIL_PlatformError).
+  Seven eliminations (feature level, priority, input texture, second D3D12 device, link before/after, shared D3D11
+  device, warm-up before links) did not find the cause; the engine now refuses that combination with a clear message.
+- Verified: full build warning-free in MoonSR code; cross-adapter smoke; live runs in BENCHMARKS.md (all Auto, FG on
+  A400, main on A400, FG on A400 with ALSR, FG on Radeon); `tests\ui_fg_test.ps1` through the app PASS; GPU, NR bridge,
+  Intel and NR engine smokes pass; fgbench keeps its one pre-existing failure.
+
+---
+
 ## 2026-11-21 - Session 4d: ls-addon-manager folder folded into the bridge
 
 - Owner: remove the `ls-addon-manager` folder. Its remaining files were the bridge's build inputs, so they moved into

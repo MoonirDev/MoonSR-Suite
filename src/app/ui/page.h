@@ -37,7 +37,9 @@ public:
     View* view = nullptr;
     std::vector<std::wstring> labels;
     std::vector<std::wstring> values;
+    std::vector<char> hidden;  // hidden rows take no space
     void SetValue(size_t i, const std::wstring& v);
+    void SetVisible(size_t i, bool visible);
 };
 
 class Page {
@@ -65,6 +67,9 @@ public:
     Details* AddDetails(std::vector<std::wstring> labels);
     // w = 0: preferred width, w < 0: full page width. h < 0: the control decides (HeightForWidth).
     void AddFree(Control* c, float w, float h);
+    // Adds a control to the keyboard / mouse chain without giving it layout space or drawing it; its owner (e.g. the
+    // OrderList that positions and draws its per-row combo boxes) sets its bounds and draws it. Call after the owner.
+    void AddChild(Control* c) { focusOrder_.push_back(c); }
 
     // Returns the total content height.
     float Layout(const Gfx& g, float width);

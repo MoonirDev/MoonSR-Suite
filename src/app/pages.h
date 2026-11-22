@@ -1,4 +1,4 @@
-// The MoonSR pages (Home, Upscaling, Frame generation, Output, Diagnostics) and the handles to their controls.
+// The MoonSR pages (Home, Upscaling, Frame generation, Neural rendering, Load order, Diagnostics) and the handles to their controls.
 // Pages only build the visual structure; MainWindow wires behaviour (change handlers, engine calls) to the handles.
 // Threading: UI thread only.
 #pragma once
@@ -9,11 +9,11 @@
 
 namespace moonsr::app {
 
-enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageLoadOrder, PageOutput, PageDiagnostics };
+enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageLoadOrder, PageDiagnostics };
 
 struct AppUi {
     // Home
-    ui::ComboBox* window = nullptr;
+    ui::ComboBox *window = nullptr, *monitor = nullptr;
     ui::Button* refresh = nullptr;
     ui::ToggleSwitch* useForeground = nullptr;
     ui::Button* start = nullptr;
@@ -71,11 +71,10 @@ struct AppUi {
     // Load order
     ui::InfoBar *orderInfo = nullptr, *orderNow = nullptr, *orderNote = nullptr;
     ui::OrderList* orderList = nullptr;
+    ui::ComboBox* stageGpu[3] = {};  // GPU choice per stage, indexed by PipelineStage; drawn and moved by orderList
+    ui::InfoBar *gpuHelp = nullptr, *gpuNote = nullptr;  // "GPU choices apply when scaling starts" while running
     ui::Button* orderReset = nullptr;
     ui::TextBlock *orderExplain = nullptr, *addonsEmpty = nullptr;
-    // Output
-    ui::ComboBox *monitor = nullptr, *adapter = nullptr;
-    ui::InfoBar* outputNote = nullptr;
     // Diagnostics
     ui::Button *record = nullptr, *openRecordings = nullptr, *openLog = nullptr;
     ui::InfoBar* hotkeyNote = nullptr;
@@ -83,7 +82,7 @@ struct AppUi {
 };
 
 // Detail rows on the Home page, in display order.
-enum DetailRow { DetGpu, DetCapture, DetScaler, DetOrder, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
+enum DetailRow { DetGpu, DetStageGpus, DetCapture, DetScaler, DetOrder, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
 
 void BuildPages(ui::View& view, AppUi& ui);
 

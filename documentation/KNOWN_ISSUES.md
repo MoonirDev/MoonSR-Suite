@@ -137,3 +137,17 @@ Still open:
 - AMD: the bridge path passes with the AMD fixture on the Radeon 610M. The real AMDNR runtime cannot run on this
   machine: it needs AMD's HIP runtime (`amdhip64_7.dll`, not installed), and the 610M (RDNA 2) is outside AMDNR's
   supported GPUs (RX 7000, RX 9000, RDNA 3-class APUs).
+
+## GPU per stage (2026-11-22)
+- NVIDIA neural rendering must use the Upscaling GPU (the GPU that captures and presents); NVIDIA's runtime fails
+  feature creation on a second GPU (see NR_BRIDGE.md). Cause not found: not the cross-GPU copies, the input texture,
+  the feature level, GPU priority, or a second D3D12 device; it did not reproduce outside the engine.
+- AMD and Intel neural rendering on a GPU other than the Upscaling GPU: allowed but not verified on hardware.
+- Frame generation on another GPU: Moon ALSR then runs its own motion estimator on the main GPU (one extra motion
+  analysis per real frame); the remote generator's motion field is not shared across GPUs.
+- Adaptive frame-generation learning measures on the main GPU even when frame generation runs on another GPU.
+- Each GPU switch costs one copy per frame (generated frames included), about 1.3-1.8 ms of latency per 1080p BGRA8
+  frame on this machine; measured on idle GPUs only, not under game load.
+- Not verified by interaction: reordering stages with the GPU pickers, dropdown placement, narrow windows, and the
+  migration of an old single "Processing GPU" setting into the three stage settings (code path read, not run).
+- Software adapters (WARP) are still listed in the GPU pickers, as in the old Processing GPU list.
