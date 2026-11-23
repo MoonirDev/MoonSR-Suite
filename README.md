@@ -129,6 +129,7 @@ Binaries are written to `build\main\bin`:
 - **MoonDev**: project owner. Defines the goals, tests on real games and makes the design decisions.
 - **Claude** (Anthropic): wrote most of the code, shaders, tests and documentation with MoonDev, as an AI
   coding assistant in Claude Code. Commits it co-wrote carry a `Co-Authored-By: Claude` trailer.
+- **ChatGPT Astra** (OpenAI): contributed code to MoonSR as an AI coding assistant.
 - Third-party code and the projects it comes from are credited in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Licence
