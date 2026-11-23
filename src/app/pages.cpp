@@ -101,7 +101,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.heroRow = &heroRow;
         u.reliefSplit = p->Make<ToggleSwitch>();
         p->AddRow(hero, kIconCompare, L"A/B compare",
-                  L"Left half: the raw game image (nearest, integer scaling). Right half: the final image.",
+                  L"Left half: the raw game image. Right half: the final image.",
                   {{u.reliefSplit, kToggleW}});
         p->AddInfo(u.message);
         u.neuralHomeNote = p->Make<ui::InfoBar>();
@@ -146,7 +146,7 @@ void BuildPages(ui::View& view, AppUi& u) {
 
         ui::Card& c = p->AddCard();
         p->AddRow(c, kIconUpscale, L"Upscaling",
-                  L"Off shows the game at its original size (1:1) - useful for frame generation only",
+                  L"Off shows the game at its original size (1:1)",
                   {{u.upscaling, kToggleW}});
         u.scalerRow = &p->AddRow(c, kIconScaler, L"Scaler", L"The algorithm that enlarges the image", {{u.scaler, 240.0f}});
         p->AddRow(c, kIconFit, L"Fit mode", L"How the image fills the output", {{u.fit, 240.0f}});

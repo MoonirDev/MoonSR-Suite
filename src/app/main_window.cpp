@@ -1165,7 +1165,7 @@ void MainWindow::ApplySettingsToUi() {
     ui_.fgFlow->SetValue(std::clamp(settings_.frameGenFlowPercent, 25, 100));
     ui_.fgHud->SetChecked(settings_.frameGenHudProtection);
 
-    ui_.alsrHistory->SetValue(std::clamp(settings_.alsrHistoryPercent, 50, 95));
+    ui_.alsrHistory->SetValue(85); // fixed default; the History strength control is no longer shown
     neuralWanted_ = settings_.neuralRendering;
     setupCollapsed_ = test_.nrSetupExpand >= 0 ? test_.nrSetupExpand == 0 : settings_.neuralSetupCollapsed;
     selectedModelId_ = settings_.neuralModelId;
@@ -3023,8 +3023,8 @@ void MainWindow::UpdateAlsrUi() {
     const bool alsr = AlsrSelected();
     const bool wasShown = ui_.alsrInfo->visible;
     ui_.alsrInfo->SetVisible(alsr);
-    ui_.alsrHistoryRow->visible = alsr;
-    ui_.alsrHistory->SetVisible(alsr);
+    ui_.alsrHistoryRow->visible = false; // History strength removed from the UI (owner, 2026-11-23); the default 85 % is used
+    ui_.alsrHistory->SetVisible(false);
     ui_.alsrHistory->SetEnabled(ui_.upscaling->checked());
     if (!alsr) ui_.alsrNote->SetVisible(false);
     if (wasShown != alsr) view_.RequestLayout();
