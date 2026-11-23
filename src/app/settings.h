@@ -55,9 +55,9 @@ struct AppSettings {
     // Smart parallax ([Relief], experimental). Files without the section load these defaults (off).
     bool reliefEnabled = false;
     int reliefMode = 0;                // 0 = Shading, 1 = Parallax, 2 = Motion depth (moonsr::ReliefTier - 1)
-    int reliefStrengthPercent = 35;    // 0..100
+    int reliefStrengthPercent = 50;    // 0..100
     int reliefParallaxHundredths = 200; // output pixels x 100, 0..300 (Parallax and Motion depth)
-    int reliefDetailHundredths = 150;  // game pixels x 100, 75..400
+    int reliefDetailHundredths = 200;  // game pixels x 100, 75..400
     bool reliefSplit = false;          // A/B split view (left half off, right half on)
     // Processing order, e.g. "neural,framegen,upscaling"; empty / invalid = default
     std::wstring pipelineOrder;

@@ -43,11 +43,11 @@ enum class ReliefDebugView : uint32_t { None = 0, Height, Normals, Protection, O
 // Every field is clamped by the implementation. Ranges and defaults: research note section 7.2.
 struct ReliefSettings {
     ReliefTier tier = ReliefTier::Off;
-    float strength = 0.35f;       // master 0..1; at 1.0 at most about +-6 % luminance change and parallaxMaxPx of offset
+    float strength = 0.5f;        // master 0..1; luminance change soft-capped at about +-15 %; parallaxMaxPx of offset at 1.0
     float shading = 1.0f;         // 0..1 share of directional relief shading within `strength`
     float cavity = 1.0f;          // 0..1 share of cavity darkening within `strength`
     float parallaxMaxPx = 2.0f;   // output pixels, 0..3; ignored below Parallax
-    float detailScalePx = 1.5f;   // band-pass centre in game pixels, 0.75..4
+    float detailScalePx = 2.0f;   // band-pass centre in game pixels, 0.75..4
     ReliefLight light = ReliefLight::Fixed;
     float lightAzimuthDeg = 135.0f;  // 0 = right, 90 = up (135 = upper-left)
     float lightElevationDeg = 45.0f; // 15..80

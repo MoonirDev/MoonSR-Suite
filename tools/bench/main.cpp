@@ -4,6 +4,7 @@
 #include "gpu_runner.h"
 #include "imageops.h"
 #include "metrics.h"
+#include "relief_bench.h"
 #include "report.h"
 #include "temporal.h"
 
@@ -28,7 +29,9 @@ namespace {
 
 struct Options {
     bool gen = false, selftest = false, quality = false, time = false, listAdapters = false, saveImages = false, verbose = false;
-    bool allAdapters = false, help = false, temporal = false, scalesGiven = false;
+    bool allAdapters = false, help = false, temporal = false, scalesGiven = false, relief = false, reliefNoTime = false;
+    std::vector<float> reliefStrengths;
+    float reliefDetail = -1.0f;
     TemporalOptions tmp;
     uint32_t genW = 1920, genH = 1080;
     std::vector<std::string> adapters;
@@ -83,6 +86,10 @@ Modes (combine freely):
   --time                 GPU timestamp timing of ScalePass::Render per scaler
   --temporal             temporal sequences (moving content, exact ground truth): luma PSNR, SSIM, error flicker,
                          HUD and scene-cut scores and GPU time per frame for the spatial scalers and MoonSR
+  --relief               Smart parallax: synthetic relief scenes with known height (bricks, cobblestones, rock, wood,
+                         painted wall, sky, HUD over bricks, silhouette, stylised); height / shading / false-relief /
+                         halo / flicker metrics, emboss and clarity baselines, self-checks and GPU time
+                         (--relief-strengths 0.5,1  --relief-detail <game px>  --relief-no-time  --save-images writes PNGs to <out>/relief)
   --list-adapters        list adapters and exit
 
 Selection:
@@ -126,6 +133,10 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--time") o.time = true;
         else if (a == "--list-adapters") o.listAdapters = true;
         else if (a == "--temporal") { o.temporal = true; }
+        else if (a == "--relief") o.relief = true;
+        else if (a == "--relief-no-time") o.reliefNoTime = true;
+        else if (a == "--relief-detail") { if (!(v = need(i))) return false; o.reliefDetail = static_cast<float>(atof(v)); }
+        else if (a == "--relief-strengths") { if (!(v = need(i))) return false; for (auto& t : Split(v, ',')) o.reliefStrengths.push_back(static_cast<float>(atof(t.c_str()))); }
         else if (a == "--seqs") { if (!(v = need(i))) return false; o.tmp.seqs = Split(v, ','); }
         else if (a == "--input-modes") { if (!(v = need(i))) return false; o.tmp.modes = Split(v, ','); for (auto& s : o.tmp.modes) if (s != "aliased" && s != "area") { err = "bad --input-modes"; return false; } }
         else if (a == "--methods") { if (!(v = need(i))) return false; for (auto& s : Split(v, ',')) o.tmp.methods.push_back(Lower(s)); }
@@ -542,7 +553,7 @@ int main(int argc, char** argv) {
         PrintHelp();
         return 2;
     }
-    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.listAdapters)) {
+    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.listAdapters)) {
         PrintHelp();
         return o.help ? 0 : 2;
     }
@@ -573,7 +584,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<AdapterInfo> adapters;
-    if (o.selftest || o.quality || o.time || o.temporal) {
+    if (o.selftest || o.quality || o.time || o.temporal || o.relief) {
         adapters = PickAdapters(o, err);
         if (adapters.empty()) {
             if (o.selftest && !o.quality && !o.time) printf("warning: %s; GPU self-checks skipped\n", err.c_str());
@@ -603,6 +614,15 @@ int main(int argc, char** argv) {
         t.saveImages = o.saveImages;
         t.outDir = o.outDir;
         rc |= RunTemporalBench(t, runners, si, "t_" + FileTag(o, si));
+    }
+    if (o.relief && !adapters.empty()) {
+        ReliefBenchOptions r;
+        if (!o.reliefStrengths.empty()) r.strengths = o.reliefStrengths;
+        r.detailScalePx = o.reliefDetail;
+        r.timing = !o.reliefNoTime;
+        r.saveImages = o.saveImages;
+        r.outDir = o.outDir / "relief";
+        for (auto& a : adapters) rc |= RunReliefBench(r, a);
     }
     CoUninitialize();
     return rc;

@@ -200,3 +200,12 @@ Still open:
   not 144 (neural rendering then runs on every displayed frame, about 6.5 ms each on an RTX 5060 at 1080p).
 - The FP16 requirement on RTX 20/30/40 cards is checked in the setup panel by PCI device ID and model hash; the
   "Use the FP16 model" button and the start-time message were not exercised live.
+
+## Smart parallax, relief shading (unreleased, 2026-11-23)
+
+- Shading tier (T1) works; Parallax and Motion depth fall back to shading. Tuned on synthetic scenes only; awaiting
+  the owner's real-game A/B (go/no-go for parallax).
+- Cost on the RTX 5060: 0.15 ms at 720p -> 1080p, 0.28 ms at 1080p -> 1080p (budget 0.25 ms; slightly over).
+- On fine-grained surfaces (synthetic bricks) the effect partly roughens surface grain rather than bevelling borders.
+- The flat-paint protection removes relief from smooth textures (wood coverage about 0.55); HUD protection also
+  removes relief from about 4-5 game pixels of surface around static overlays.

@@ -17,5 +17,7 @@ add_executable(moonsr_bench
     temporal.h
     temporal_seq.cpp
     temporal.cpp
+    relief_bench.cpp
+    relief_bench.h
 )
-target_link_libraries(moonsr_bench PRIVATE moonsr_upscale moonsr_framegen moonsr_gpu moonsr_core windowscodecs ole32 gdi32 user32 advapi32)
+target_link_libraries(moonsr_bench PRIVATE moonsr_upscale moonsr_relief moonsr_framegen moonsr_gpu moonsr_core windowscodecs ole32 gdi32 user32 advapi32)

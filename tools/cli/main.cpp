@@ -12,9 +12,11 @@
 //              [--order <nr,fg,up in any order>] (load order, e.g. fg,nr,up; overrides --upscale-first)
 //              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
 //              [--relief off|shading|parallax|motion] [--relief-strength 0..1] (Smart parallax, experimental)
+//              [--relief-view none|split|height|normals|protection] (Smart parallax debug / A/B view)
 //   moonsr_cli --relief-selftest [--adapter <name substring>]
-//              (Smart parallax pass-through check: Apply on a 1920x1080 noise image through both the copy path and the
-//               shader path, read back and compared byte for byte; prints the measured Apply GPU time of each path)
+//              (Smart parallax identity check: Analyse + Apply at strength 0 on a 1920x1080 noise image into a BGRA8 and
+//               an RGBA8 destination, read back and compared byte for byte (zero change must leave every pixel exact);
+//               prints the measured Analyse and Apply GPU times)
 //
 // --scaler takes a scaler name substring (case-insensitive), or one of the short names nearest, bilinear, bicubic,
 // lanczos, spatial, moonsr (the MoonSR temporal upscaler; `alsr` is accepted as an alias).
@@ -98,7 +100,7 @@ const wchar_t* ReliefTierName(ReliefTier t) {
     }
 }
 
-// Smart parallax pass-through self-test (test tool: allocates and reads back freely). Returns the process exit code.
+// Smart parallax identity self-test (test tool: allocates and reads back freely). Returns the process exit code.
 int ReliefSelfTest(const std::wstring& adapterName) {
     using Microsoft::WRL::ComPtr;
     LUID luid{};
@@ -127,13 +129,15 @@ int ReliefSelfTest(const std::wstring& adapterName) {
         return 1;
     }
     int failures = 0;
-    // Path 1: same format (CopySubresourceRegion). Path 2: RGBA8 destination (fullscreen pass-through shader).
+    // Apply always runs the relief shader; at strength 0 its change is zero and it must return each source pixel exactly
+    // (same format and R/B-swapped RGBA8 destination).
     for (const DXGI_FORMAT dstFormat : {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM}) {
         const bool swapRb = dstFormat == DXGI_FORMAT_R8G8B8A8_UNORM;
         auto pass = ReliefPass::Create(*device, error);
         if (!pass) { fwprintf(stderr, L"ReliefPass::Create: %s\n", error.c_str()); return 1; }
         ReliefSettings rs;
         rs.tier = ReliefTier::Shading;
+        rs.strength = 0.0f;
         pass->SetSettings(rs);
         D3D11_TEXTURE2D_DESC dd = td;
         dd.Format = dstFormat; dd.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -179,9 +183,9 @@ int ReliefSelfTest(const std::wstring& adapterName) {
             Sleep(10);
         }
         const ReliefStats st = pass->Stats();
-        wprintf(L"%s path (%s destination): %llu of %u pixels differ -> %s; Apply GPU time %.4f ms (median of the last 64 timestamped calls, "
-                L"%dx%d); stats: active %d, tier %s, note '%s'\n",
-                swapRb ? L"Shader" : L"Copy", swapRb ? L"R8G8B8A8" : L"B8G8R8A8", mismatched, W * H,
+        wprintf(L"%s destination, strength 0: %llu of %u pixels differ -> %s; Apply GPU time %.4f ms (median of the last 64 "
+                L"timestamped calls, %dx%d); stats: active %d, tier %s, note '%s'\n",
+                swapRb ? L"R8G8B8A8" : L"B8G8R8A8", mismatched, W * H,
                 mismatched ? L"FAIL" : L"exact", st.applyGpuMs, W, H, st.active ? 1 : 0, ReliefTierName(st.tierInEffect),
                 st.reason.c_str());
         if (mismatched) ++failures;
@@ -208,6 +212,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp, orderText;
     std::wstring reliefMode = L"off";
     float reliefStrength = -1.0f; // < 0: the ReliefSettings default
+    std::wstring reliefView = L"none";
     bool reliefSelfTest = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -246,6 +251,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--relief") reliefMode = Lower(next());
         else if (a == L"--relief-strength") reliefStrength = static_cast<float>(_wtof(next().c_str()));
         else if (a == L"--relief-selftest") reliefSelfTest = true;
+        else if (a == L"--relief-view") reliefView = Lower(next());
         else {
             fwprintf(stderr, L"Unknown argument: %s\n", a.c_str());
             return 2;
@@ -344,6 +350,14 @@ int wmain(int argc, wchar_t** argv) {
     cfg.cursor = cursorMode == L"none" ? CursorMode::None : cursorMode == L"captured" ? CursorMode::Captured : CursorMode::Software;
     cfg.relief.tier = reliefTier;
     if (reliefStrength >= 0.0f) cfg.relief.strength = std::clamp(reliefStrength, 0.0f, 1.0f);
+    if (reliefView == L"split") cfg.relief.debugView = ReliefDebugView::Split;
+    else if (reliefView == L"height") cfg.relief.debugView = ReliefDebugView::Height;
+    else if (reliefView == L"normals") cfg.relief.debugView = ReliefDebugView::Normals;
+    else if (reliefView == L"protection") cfg.relief.debugView = ReliefDebugView::Protection;
+    else if (reliefView != L"none") {
+        fwprintf(stderr, L"--relief-view takes none, split, height, normals or protection (got '%s')\n", reliefView.c_str());
+        return 2;
+    }
 
     if (monitorIndex >= 0) {
         const auto monitors = Engine::ListMonitors();

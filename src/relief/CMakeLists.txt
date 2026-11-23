@@ -1,5 +1,5 @@
 # Owner: upscaling-engineer (algorithms), shader-engineer (HLSL under shaders/relief/). Contract header relief_pass.h: lead.
-# Smart parallax (screen-space relief). Groundwork state: a measured pass-through, no relief algorithm yet (milestone M1+).
+# Smart parallax (screen-space relief). State: T1 relief shading, first iteration (M1 + M2); parallax not built.
 add_library(moonsr_relief STATIC
     relief_pass.cpp
     relief_pass.h

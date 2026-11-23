@@ -29,7 +29,12 @@ moonsr_add_shader(upscale/alsr_seed_ps.hlsl        ps_5_0 g_ps_alsr_seed)
 moonsr_add_shader(upscale/alsr_seedblend_ps.hlsl   ps_5_0 g_ps_alsr_seedblend)
 
 # --- upscaling-engineer: Smart parallax (screen-space relief, src/relief) ---
-moonsr_add_shader(relief/relief_passthrough_ps.hlsl ps_5_0 g_ps_relief_passthrough)
+moonsr_add_shader(relief/relief_luma_cs.hlsl        cs_5_0 g_cs_relief_luma)
+moonsr_add_shader(relief/relief_box_cs.hlsl         cs_5_0 g_cs_relief_box1 DEFINES RELIEF_BOX_PASS=1)
+moonsr_add_shader(relief/relief_box_cs.hlsl         cs_5_0 g_cs_relief_box2 DEFINES RELIEF_BOX_PASS=2)
+moonsr_add_shader(relief/relief_gate_cs.hlsl        cs_5_0 g_cs_relief_gate)
+moonsr_add_shader(relief/relief_height_cs.hlsl      cs_5_0 g_cs_relief_height)
+moonsr_add_shader(relief/relief_apply_ps.hlsl       ps_5_0 g_ps_relief_apply)
 
 # --- gpu-rendering-engineer: cursor overlay ---
 moonsr_add_shader(cursor/cursor_vs.hlsl     vs_5_0 g_vs_cursor)
