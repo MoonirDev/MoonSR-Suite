@@ -212,6 +212,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp, orderText;
     std::wstring reliefMode = L"off";
     float reliefStrength = -1.0f; // < 0: the ReliefSettings default
+    bool compare = false;
     std::wstring reliefView = L"none";
     bool reliefSelfTest = false;
 
@@ -252,6 +253,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--relief-strength") reliefStrength = static_cast<float>(_wtof(next().c_str()));
         else if (a == L"--relief-selftest") reliefSelfTest = true;
         else if (a == L"--relief-view") reliefView = Lower(next());
+        else if (a == L"--compare") compare = true;
         else {
             fwprintf(stderr, L"Unknown argument: %s\n", a.c_str());
             return 2;
@@ -349,6 +351,7 @@ int wmain(int argc, wchar_t** argv) {
                                                                 : FrameGenQuality::Balanced;
     cfg.cursor = cursorMode == L"none" ? CursorMode::None : cursorMode == L"captured" ? CursorMode::Captured : CursorMode::Software;
     cfg.relief.tier = reliefTier;
+    cfg.splitView = compare;
     if (reliefStrength >= 0.0f) cfg.relief.strength = std::clamp(reliefStrength, 0.0f, 1.0f);
     if (reliefView == L"split") cfg.relief.debugView = ReliefDebugView::Split;
     else if (reliefView == L"height") cfg.relief.debugView = ReliefDebugView::Height;

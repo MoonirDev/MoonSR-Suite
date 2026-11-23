@@ -60,6 +60,12 @@ struct Engine::Impl {
     AlsrSettings liveAlsr;          // guarded by mutex
     PictureSettings livePicture;    // guarded by mutex
     ReliefSettings liveRelief;      // guarded by mutex
+    bool liveSplit = false;         // guarded by mutex
+    // A/B compare (pipeline thread): the raw capture, nearest + integer scaled to the output size, once per real frame.
+    bool splitView = false, splitValid = false;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> splitTex;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> splitRtv;
+    Size splitSize{};
     struct NeuralChange {
         bool enabled;
         std::wstring modelId;
@@ -977,7 +983,43 @@ struct Engine::Impl {
     }
 
     // Presents the back buffer. When a recording is active the back buffer is saved first, exactly as shown.
+    // A/B compare: draws the raw capture into splitTex (output size, nearest + integer scaling, centred).
+    void RenderSplitRaw(ID3D11Texture2D* raw, const RectI& rect) {
+        splitValid = false;
+        if (!scale || !presenter) return;
+        const Size size = presenter->BackBufferSize();
+        if (!splitTex || splitSize.width != size.width || splitSize.height != size.height) {
+            splitTex.Reset(); splitRtv.Reset();
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = size.width; d.Height = size.height; d.MipLevels = 1; d.ArraySize = 1;
+            d.Format = presenter->BackBufferFormat(); d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET;
+            HRESULT hr = device->Device()->CreateTexture2D(&d, nullptr, &splitTex);
+            if (SUCCEEDED(hr)) hr = device->Device()->CreateRenderTargetView(splitTex.Get(), nullptr, &splitRtv);
+            if (FAILED(hr)) {
+                MSR_LOG_ERROR(L"A/B compare texture {}x{} failed: {}", size.width, size.height, HrToString(hr));
+                splitTex.Reset(); splitRtv.Reset(); return;
+            }
+            splitSize = size;
+        }
+        const float black[4] = {0, 0, 0, 1};
+        device->Context()->ClearRenderTargetView(splitRtv.Get(), black);
+        ScaleSettings s;
+        s.enabled = true; s.scaler = ScalerKind::Nearest; s.fit = FitMode::Integer; s.sharpness = 0.0f;
+        splitValid = scale->Render(raw, rect, splitRtv.Get(), size, s);
+    }
+
+    // A/B compare: replaces the left half of the back buffer with the raw capture.
+    void ApplySplit() {
+        if (!splitView || !splitValid || !splitTex) return;
+        Microsoft::WRL::ComPtr<ID3D11Resource> bbTex;
+        presenter->BackBufferRtv()->GetResource(&bbTex);
+        const D3D11_BOX box{0, 0, 0, splitSize.width / 2, splitSize.height, 1};
+        device->Context()->CopySubresourceRegion(bbTex.Get(), 0, 0, 0, 0, splitTex.Get(), 0, &box);
+    }
+
     PresentStatus PresentBackBuffer() {
+        ApplySplit();
         if (overlayEnabled) {
             if (!overlay && !overlayFailed) {
                 std::wstring overlayError;
@@ -1234,6 +1276,7 @@ struct Engine::Impl {
                 alsrSettings = liveAlsr;
                 pictureSettings = livePicture;
                 reliefSettings = liveRelief;
+                splitView = liveSplit;
                 if (pendingIndex >= pendingCount) neuralChange.swap(pendingNeuralChange);
                 overlayEnabled = liveFrameCounter;
             }
@@ -1585,6 +1628,8 @@ struct Engine::Impl {
                 lastInputSize = {static_cast<uint32_t>(frame.contentRect.Width()), static_cast<uint32_t>(frame.contentRect.Height())};
                 ID3D11Texture2D* pipelineTexture = frame.texture;
                 RectI pipelineRect = frame.contentRect;
+                if (splitView) RenderSplitRaw(frame.texture, frame.contentRect);
+                else if (splitTex) { splitTex.Reset(); splitRtv.Reset(); splitValid = false; splitSize = {}; }
                 if (neural && NrDevice().Info().vendor == Vendor::Nvidia) {
                     neuralReset = neuralReset || frame.contentRect != neuralRect ||
                         (neuralSequence && frame.sequence != neuralSequence + 1) ||
@@ -2139,6 +2184,7 @@ bool Engine::Start(const EngineConfig& config, std::wstring& error) {
         impl_->liveAlsr = config.alsr;
         impl_->livePicture = config.pictureSettings;
         impl_->liveRelief = config.relief;
+        impl_->liveSplit = config.splitView;
         impl_->pendingNeuralChange.reset();
         // The user-selected model is driven only through the optional, separately built bridge.
         impl_->stats.neuralRenderingActive = false;
@@ -2228,6 +2274,11 @@ PipelineOrder Engine::NormalizeOrder(const PipelineOrder& order) {
 void Engine::SetAlsrSettings(const AlsrSettings& settings) {
     std::lock_guard lock(impl_->mutex);
     impl_->liveAlsr = settings;
+}
+
+void Engine::SetSplitView(bool on) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->liveSplit = on;
 }
 
 void Engine::SetReliefSettings(const ReliefSettings& settings) {

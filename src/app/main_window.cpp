@@ -1649,6 +1649,7 @@ void MainWindow::ApplyLiveSettings() {
     if (!engineActive_) return;
     engine_.SetScaleSettings(CurrentScaleSettings());
     engine_.SetVsync(ui_.vsync->checked());
+    engine_.SetSplitView(ui_.reliefSplit->checked());
     engine_.SetFrameCounter(ui_.counter->checked());
     engine_.SetFrameGen(CurrentFrameGen());
     engine_.SetAlsrSettings(CurrentAlsr());
@@ -1674,6 +1675,7 @@ void MainWindow::StartScaling(HWND target) {
     cfg.neuralSettings = CurrentNeuralSettings();
     cfg.pictureSettings = CurrentPictureSettings();
     cfg.relief = CurrentRelief();
+    cfg.splitView = ui_.reliefSplit->checked();
 
     // Re-resolve the monitor handle in case the display configuration changed since the list was built.
     const int m = ui_.monitor->Selected();
@@ -3042,7 +3044,7 @@ ReliefSettings MainWindow::CurrentRelief() const {
     r.strength = static_cast<float>(ui_.reliefStrength->value()) / 100.0f;
     r.parallaxMaxPx = static_cast<float>(ui_.reliefParallax->value()) / 100.0f;
     r.detailScalePx = static_cast<float>(ui_.reliefDetail->value()) / 100.0f;
-    r.debugView = ui_.reliefSplit->checked() ? ReliefDebugView::Split : ReliefDebugView::None;
+    r.debugView = ReliefDebugView::None;
     return r;
 }
 
@@ -3052,7 +3054,6 @@ void MainWindow::UpdateReliefUi() {
     ui_.reliefMode->SetEnabled(on);
     ui_.reliefStrength->SetEnabled(on);
     ui_.reliefDetail->SetEnabled(on);
-    ui_.reliefSplit->SetEnabled(on);
     const bool parallax = mode >= 1;
     const bool layoutChange = ui_.reliefParallaxRow->visible != parallax || ui_.reliefModeNote->visible != (mode == 2);
     ui_.reliefParallaxRow->visible = parallax;

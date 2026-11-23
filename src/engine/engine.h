@@ -102,6 +102,8 @@ struct EngineConfig {
     // displayed frame as the last image operation on the main (Upscaling) GPU, before the software cursor and the frame
     // counter are drawn, so neither is relief-processed.
     ReliefSettings relief;
+    // A/B compare: left half of the output shows the raw capture (nearest, integer scaling), right half the final image.
+    bool splitView = false;
 };
 
 enum class EngineState : uint32_t { Idle, Starting, Running, Recovering, Failed };
@@ -225,6 +227,7 @@ public:
     void SetAlsrSettings(const AlsrSettings& settings);
     // Smart parallax. Turning it on creates the pass on the next frame; turning it off releases it and its resources.
     void SetReliefSettings(const ReliefSettings& settings);
+    void SetSplitView(bool on);
 
     // Default order, display names and one-line descriptions for the UI.
     static PipelineOrder DefaultOrder();

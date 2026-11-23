@@ -99,6 +99,10 @@ void BuildPages(ui::View& view, AppUi& u) {
         heroRow.height = 84.0f;
         heroRow.hero = true;
         u.heroRow = &heroRow;
+        u.reliefSplit = p->Make<ToggleSwitch>();
+        p->AddRow(hero, kIconCompare, L"A/B compare",
+                  L"Left half: the raw game image (nearest, integer scaling). Right half: the final image.",
+                  {{u.reliefSplit, kToggleW}});
         p->AddInfo(u.message);
         u.neuralHomeNote = p->Make<ui::InfoBar>();
         u.neuralHomeNote->visible = false;
@@ -426,7 +430,6 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.reliefDetail->Setup(75, 400, 25, L" px");
         u.reliefDetail->SetDisplayDivisor(100);
         u.reliefDetail->SetValue(200);
-        u.reliefSplit = p->Make<ToggleSwitch>();
 
         p->AddInfo(u.reliefDev);
         p->AddInfo(about);
@@ -442,10 +445,6 @@ void BuildPages(ui::View& view, AppUi& u) {
                                          {{u.reliefParallax, 300.0f}});
         p->AddRow(look, kIconDetail, L"Detail size", L"Size of the surface detail that gets relief, in game pixels",
                   {{u.reliefDetail, 300.0f}});
-        p->AddSection(L"Compare");
-        ui::Card& cmp = p->AddCard();
-        p->AddRow(cmp, kIconCompare, L"A/B split view", L"Left half without, right half with Smart parallax",
-                  {{u.reliefSplit, kToggleW}});
     }
 
     // ---------------------------------------------------------------- Load order
