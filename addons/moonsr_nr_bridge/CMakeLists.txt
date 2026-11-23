@@ -73,7 +73,7 @@ if(MOONSR_EXPERIMENTAL_HARDWARE_FLOW)
     target_compile_definitions(MoonSR_HardwareFlow PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(MoonSR_HardwareFlow PUBLIC d3d11 d3d12 dxgi d3dcompiler)
 endif()
-add_library(MoonSR_NrForwarder SHARED "${NR_SOURCE}/src/model_forwarder.cpp")
+add_library(MoonSR_NrForwarder SHARED "${NR_SOURCE}/src/model_forwarder.cpp" nr_forwarder.rc)
 set_target_properties(MoonSR_NrForwarder PROPERTIES OUTPUT_NAME "NeuralRendering_nvngx" PREFIX "")
 add_dependencies(MoonSR_NrBridge MoonSR_NrForwarder)
 

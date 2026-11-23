@@ -23,6 +23,7 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
   the test pattern verified Motion depth with generation off, on either side of generation, before temporal
   upscaling, and with relief on the A400 and Upscaling on the RTX 5060. Both cross-adapter paths passed.
 - Shading met the 1080p budget in the loaded test. The idle-gap measurement remained above target.
+- The neural rendering forwarder now embeds the version from the same generated header as the other shipped binaries.
 
 ## 2026-11-22 - Session 8: version 1.0.0, installer, Smart parallax groundwork
 

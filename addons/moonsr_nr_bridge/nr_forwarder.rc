@@ -1,0 +1,4 @@
+// Version resource for NeuralRendering_nvngx.dll.
+#include <windows.h>
+#define NR_FILE_DESCRIPTION "MoonSR neural rendering forwarder"
+#include "nr_version.rc.inc"
