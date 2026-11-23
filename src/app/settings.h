@@ -15,14 +15,14 @@ struct GpuPref {
 };
 
 // Indexes of AppSettings::stageGpu; the values match moonsr::PipelineStage.
-enum StageGpuIndex { StageGpuNeural = 0, StageGpuFrameGen = 1, StageGpuUpscaling = 2, StageGpuCount = 3 };
+enum StageGpuIndex { StageGpuNeural = 0, StageGpuFrameGen = 1, StageGpuUpscaling = 2, StageGpuRelief = 3, StageGpuCount = 4 };
 
 struct AppSettings {
     // Source
     bool useForeground = true;
     // Output: monitors are matched by device name. Empty = Auto.
     std::wstring monitorDevice;
-    // GPU per stage (the old single processing GPU is migrated into all three when reading an old settings.ini).
+    // GPU per stage (the old single processing GPU is migrated into every stage when reading an old settings.ini).
     GpuPref stageGpu[StageGpuCount];
     // Scaling
     bool upscaling = true;    // false = upscaling off: the image is shown 1:1 (frame generation can still run)
@@ -59,7 +59,7 @@ struct AppSettings {
     int reliefParallaxHundredths = 200; // output pixels x 100, 0..300 (Parallax and Motion depth)
     int reliefDetailHundredths = 200;  // game pixels x 100, 75..400
     bool reliefSplit = false;          // A/B split view (left half off, right half on)
-    // Processing order, e.g. "neural,framegen,upscaling"; empty / invalid = default
+    // Processing order, e.g. "neural,framegen,upscaling,relief"; empty / invalid = default
     std::wstring pipelineOrder;
     // Window position (top-left, virtual-desktop pixels)
     bool hasWindowPos = false;

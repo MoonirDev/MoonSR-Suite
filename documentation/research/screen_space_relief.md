@@ -1,5 +1,8 @@
 # Screen-space relief: estimated height, relief shading and motion parallax on captured frames
 
+Implementation update (2026-11-23): the current stage can move in Load order and run on its own GPU. Motion depth
+may estimate motion independently. See [Architecture](../ARCHITECTURE.md#smart-parallax) for the current wiring.
+
 Author role: graphics-researcher. Date: 2026-11-22. Repository state read: commit `d25cd7a`.
 Scope: groundwork for the owner's "smart parallax filter for game textures" feature. The owner chose the
 **screen-space relief** interpretation: estimate surface height or depth from the captured picture (plus the camera and

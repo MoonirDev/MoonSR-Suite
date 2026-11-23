@@ -33,7 +33,11 @@ groupshared float2 gsRow[SIDE * TILE]; // horizontal sums: all SIDE rows, TILE c
 [numthreads(TILE, TILE, 1)]
 void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_GroupIndex)
 {
+#ifdef RELIEF_BOX_RADIUS
+    const int r = RELIEF_BOX_RADIUS;
+#else
     const int r = clamp(cRadius, 1, RMAX);
+#endif
     const int2 hi = int2(cHalf) - 1;
     // Only the halo the actual radius needs is loaded (side = TILE + 2r; the arrays are sized for RMAX).
     const uint side = uint(TILE + 2 * r);
@@ -51,6 +55,9 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
     for (uint j = gi; j < side * TILE; j += TILE * TILE) {
         const int row = int(j / TILE), col = int(j % TILE) + r;
         float2 s = 0.0;
+#ifdef RELIEF_BOX_RADIUS
+        [unroll]
+#endif
         for (int k = -r; k <= r; ++k) s += gsIn[row * int(side) + col + k];
         gsRow[j] = s;
     }
@@ -58,6 +65,9 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
     const int2 p = int2(gid.xy) * TILE + int2(gtid.xy);
     if (any(p >= int2(cHalf))) return;
     float2 s = 0.0;
+#ifdef RELIEF_BOX_RADIUS
+    [unroll]
+#endif
     for (int k = -r; k <= r; ++k) s += gsRow[(int(gtid.y) + r + k) * TILE + gtid.x];
     s /= float((2 * r + 1) * (2 * r + 1));
 #if RELIEF_BOX_PASS == 1

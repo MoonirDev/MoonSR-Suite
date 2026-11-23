@@ -37,6 +37,7 @@ RWTexture2D<unorm float2> outCount : register(u3); // half-size (count / 64, LEn
 groupshared float2 gsBD[SIDE * SIDE]; // (B, D)
 groupshared float gsCnt[SIDE * SIDE];
 groupshared float gsG[GS * GS];
+groupshared float3 gsHorizontal[TILE * SIDE]; // horizontal sums of D² and flat samples, and maximum HUD count
 groupshared uint4 gsRed[TILE * TILE];  // (textured, hud, changed, |dL|)
 groupshared uint gsRedY[TILE * TILE];  // sum Y
 groupshared uint gsLast;
@@ -62,6 +63,17 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         const float gy = gsBD[(c.y + 1) * SIDE + c.x].x - gsBD[(c.y - 1) * SIDE + c.x].x;
         gsG[g] = 0.25 * sqrt(gx * gx + gy * gy); // central difference over 2 half texels = 4 game px
     }
+    for (uint j = gi; j < TILE * SIDE; j += TILE * TILE) {
+        const uint first = (j / TILE) * SIDE + j % TILE;
+        float3 row = 0.0;
+        [unroll] for (uint dx = 0; dx < SIDE - TILE + 1; ++dx) {
+            const float v = gsBD[first + dx].y;
+            row.x += v * v;
+            row.y += abs(v) < 0.02 ? 1.0 : 0.0; // about one to two 8-bit code values
+            row.z = max(row.z, gsCnt[first + dx]);
+        }
+        gsHorizontal[j] = row;
+    }
     GroupMemoryBarrierWithGroupSync();
 
     const int2 p = tile0 + int2(gtid.xy);
@@ -69,27 +81,23 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
     uint countY = 0;
     if (all(p < int2(cHalf))) {
         const int2 t = int2(gtid.xy) + HALO;
-        float e = 0.0, flat = 0.0;
-        [unroll] for (int dy = -2; dy <= 2; ++dy)
-            [unroll] for (int dx = -2; dx <= 2; ++dx) {
-                const float v = gsBD[(t.y + dy) * SIDE + t.x + dx].y;
-                e += v * v;
-                flat += abs(v) < 0.02 ? 1.0 : 0.0; // about one to two 8-bit code values
-            }
+        float e = 0.0, flat = 0.0, cmax = 0.0;
+        [unroll] for (uint dy = 0; dy < SIDE - TILE + 1; ++dy) {
+            const float3 row = gsHorizontal[(gtid.y + dy) * TILE + gtid.x];
+            e += row.x;
+            flat += row.y;
+            cmax = max(cmax, row.z);
+        }
         const float sigma = sqrt(e / 25.0);
         // Flat-paint gate: detail that sits between perfectly flat areas (painted patterns, decals, signs, UI art,
         // cel shading) is albedo, not relief. Real surface texture has some detail almost everywhere.
         const float flatGate = 1.0 - smoothstep(0.2, 0.4, flat / 25.0);
         const float texGate = smoothstep(cTexGate.x, cTexGate.y, sigma) * (1.0 - smoothstep(cTexGate.z, cTexGate.w, sigma)) * flatGate;
-        float gmax = 0.0, cmax = 0.0;
+        float gmax = 0.0;
         [unroll] for (int ey = 0; ey < 3; ++ey)
             [unroll] for (int ex = 0; ex < 3; ++ex) {
                 gmax = max(gmax, gsG[(gtid.y + ey) * GS + gtid.x + ex]);
             }
-        // HUD dilation is wider than the edge dilation (5x5 half texels, about 4-5 game px): Apply samples this texture
-        // bilinearly at output resolution, and no output pixel of an overlay may receive a share of an unprotected texel.
-        [unroll] for (int cy = -2; cy <= 2; ++cy)
-            [unroll] for (int cx = -2; cx <= 2; ++cx) cmax = max(cmax, gsCnt[(t.y + cy) * SIDE + t.x + cx]);
         const float edgeGate = (cFlags & RELIEF_F_PROTECT_EDGES) ? 1.0 - smoothstep(cEdgeGate.x, cEdgeGate.y, gmax) : 1.0;
 
         // Change against the previous frame (frame statistics) and the static counter of this texel.
@@ -97,6 +105,10 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         const float l = gsBD[k0].x + gsBD[k0].y;
         const float lPrev = LDec(prevL.SampleLevel(linClamp, (float2(p) * 2.0 + 1.0) / float2(cSize), 0));
         const float dl = abs(l - lPrev);
+        // Log luminance amplifies small code-value changes in shadows. Give prefiltered shadow noise
+        // more room without losing the small changes that identify a slow pan in brighter areas.
+        const float noiseFloor = lerp(0.01, 0.045, saturate((-min(l, lPrev) - 3.0) / 4.0));
+        const bool texelChanged = dl > noiseFloor;
         bool cut = reset || StateGet(RST_CUT) > 0.5; // previous frame's flag (this frame's is written by the last group)
         if (cFlags & RELIEF_F_MOTION_CUT) cut = cut || motionStats.Load(cSceneCutIndex) != 0;
         const float changedSharePrev = reset ? 0.0 : StateGet(RST_CHANGED);
@@ -105,35 +117,51 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         const float lgx = (gsBD[k0 + 1].x + gsBD[k0 + 1].y) - (gsBD[k0 - 1].x + gsBD[k0 - 1].y);
         const float lgy = (gsBD[k0 + SIDE].x + gsBD[k0 + SIDE].y) - (gsBD[k0 - SIDE].x + gsBD[k0 - SIDE].y);
         const bool structured = 0.25 * max(abs(lgx), abs(lgy)) > 0.05 || sigma < cTexGate.x || gmax > cEdgeGate.x;
+        // Keep the anchored HUD comparison strict so a slow drift still clears the counter.
         if (cut || abs(l - cs.y) > 0.02) cs = float2(0.0, l);
         else if (changedSharePrev > cFrameChangedMin && structured) cs.x = min(cs.x + 1.0, 64.0);
         outCount[p] = float2(cs.x / 64.0, LEnc(cs.y));
         cmax = cut ? 0.0 : max(cmax, cs.x);
         const float hudGate = (cFlags & RELIEF_F_PROTECT_HUD) ? 1.0 - smoothstep(6.0, 16.0, cmax) : 1.0;
-        outG[p] = float4(hudGate, edgeGate * texGate, dl > 0.01 ? 1.0 : 0.0, SigmaEnc(sigma));
+        outG[p] = float4(hudGate, edgeGate * texGate, texelChanged ? 1.0 : 0.0, SigmaEnc(sigma));
 
         const uint area = (uint)(min(2, int(cSize.x) - 2 * p.x) * min(2, int(cSize.y) - 2 * p.y)); // pixels covered
-        counts.x = hudGate * edgeGate * texGate > 0.25 ? area : 0u;
+        counts.x = edgeGate * texGate > 0.25 ? area : 0u; // textured share, HUD-protected pixels included
         counts.y = (hudGate < 0.5 && texGate > 0.1) ? area : 0u; // static TEXTURED pixels (menu rule)
-        counts.z = dl > 0.01 ? area : 0u;
+        counts.z = texelChanged ? area : 0u;
         counts.w = (uint)(min(dl, 8.0) * 32.0) * area;
         countY = (uint)(saturate(exp2(l) - kLogEps) * 64.0) * area;
     }
     gsRed[gi] = counts;
     gsRedY[gi] = countY;
     GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint stride = TILE * TILE / 2; stride > 0; stride >>= 1) {
-        if (gi < stride) { gsRed[gi] += gsRed[gi + stride]; gsRedY[gi] += gsRedY[gi + stride]; }
-        GroupMemoryBarrierWithGroupSync();
+    // The first row sums the columns before the group leader combines them. This needs one
+    // barrier between the two sums, independent of wave size and without SM6 wave operations.
+    if (gi < TILE) {
+        uint4 column = gsRed[gi];
+        uint sumY = gsRedY[gi];
+        [unroll] for (uint y = 1; y < TILE; ++y) {
+            column += gsRed[y * TILE + gi];
+            sumY += gsRedY[y * TILE + gi];
+        }
+        gsRed[gi] = column;
+        gsRedY[gi] = sumY;
     }
+    GroupMemoryBarrierWithGroupSync();
     if (gi == 0) {
+        uint4 groupTotals = 0;
+        uint groupY = 0;
+        [unroll] for (uint x = 0; x < TILE; ++x) {
+            groupTotals += gsRed[x];
+            groupY += gsRedY[x];
+        }
         uint dummy;
         const uint slot = RsSlot(gid.xy);
-        stats.InterlockedAdd(RS_ADDR(RS_TEXTURED, slot), gsRed[0].x, dummy);
-        stats.InterlockedAdd(RS_ADDR(RS_HUD, slot), gsRed[0].y, dummy);
-        stats.InterlockedAdd(RS_ADDR(RS_CHANGED, slot), gsRed[0].z, dummy);
-        stats.InterlockedAdd(RS_ADDR(RS_ABSDL, slot), gsRed[0].w, dummy);
-        stats.InterlockedAdd(RS_ADDR(RS_SUMY, slot), gsRedY[0], dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_TEXTURED, slot), groupTotals.x, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_HUD, slot), groupTotals.y, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_CHANGED, slot), groupTotals.z, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_ABSDL, slot), groupTotals.w, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_SUMY, slot), groupY, dummy);
         DeviceMemoryBarrier();
         uint done;
         stats.InterlockedAdd(RS_DONE, 1u, done);

@@ -94,7 +94,7 @@ struct AppUi {
     // Load order
     ui::InfoBar *orderInfo = nullptr, *orderNow = nullptr, *orderNote = nullptr;
     ui::OrderList* orderList = nullptr;
-    ui::ComboBox* stageGpu[3] = {};  // GPU choice per stage, indexed by PipelineStage; drawn and moved by orderList
+    ui::ComboBox* stageGpu[4] = {};  // GPU choice per stage, indexed by PipelineStage; drawn and moved by orderList
     ui::InfoBar *gpuHelp = nullptr, *gpuNote = nullptr;  // "GPU choices apply when scaling starts" while running
     ui::Button* orderReset = nullptr;
     ui::TextBlock *orderExplain = nullptr, *addonsEmpty = nullptr;

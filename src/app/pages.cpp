@@ -399,8 +399,8 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Page* p = view.AddPage(L"Smart parallax (experimental)", kIconReliefNav, L"Smart parallax");
         u.reliefDev = p->Make<ui::InfoBar>();
         u.reliefDev->Set(ui::InfoBar::Severity::Info,
-                         L"First version: relief shading only. Parallax is not built yet; the Parallax and Motion depth "
-                         L"modes show relief shading for now.");
+                         L"Shading adds highlights and shadows to textured surfaces. Parallax also shifts surface detail "
+                         L"by up to a few pixels.");
         ui::InfoBar* about = p->Make<ui::InfoBar>();
         about->Set(ui::InfoBar::Severity::Info,
                    L"Experimental. Smart parallax is designed to estimate surface relief from the captured picture and "
@@ -416,8 +416,8 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.reliefMode->SetSelected(0);
         u.reliefModeNote = p->Make<ui::InfoBar>();
         u.reliefModeNote->Set(ui::InfoBar::Severity::Info,
-                              L"Parallax is not built yet; showing relief shading. Motion depth will also need frame "
-                              L"generation on (it reuses its motion analysis).");
+                              L"Experimental. Motion depth reuses compatible frame-generation motion when available. "
+                              L"Otherwise it estimates motion on the selected Smart parallax GPU.");
         u.reliefModeNote->visible = false;
         u.reliefStrength = p->Make<Slider>();
         u.reliefStrength->Setup(0, 100, 5, L"%");
@@ -436,7 +436,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddInfo(u.reliefNote);
         ui::Card& c = p->AddCard();
         p->AddRow(c, kIconReliefNav, L"Smart parallax", L"Adds estimated depth to textured surfaces", {{u.relief, kToggleW}});
-        p->AddRow(c, kIconPersonalize, L"Mode", L"Shading only, or shading plus a small parallax offset",
+        p->AddRow(c, kIconPersonalize, L"Mode", L"Choose Shading, Parallax, or motion-based depth and protection",
                   {{u.reliefMode, 200.0f}});
         p->AddInfo(u.reliefModeNote);
         ui::Card& look = p->AddCard();

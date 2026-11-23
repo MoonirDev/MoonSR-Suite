@@ -84,7 +84,7 @@ AppSettings LoadSettings() {
             return g;
         };
         if (ReadInt(path, L"Gpu", L"PerStage", 0) != 0) {
-            static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling"};
+            static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief"};
             for (int i = 0; i < StageGpuCount; ++i) s.stageGpu[i] = read(L"Gpu", kPrefix[i]);
         } else {
             // Older file: one processing GPU for everything.
@@ -166,7 +166,7 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteString(path, L"Output", L"MonitorDevice", s.monitorDevice);
     ok &= WriteInt(path, L"Gpu", L"PerStage", 1);
     {
-        static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling"};
+        static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief"};
         for (int i = 0; i < StageGpuCount; ++i) {
             const std::wstring p = kPrefix[i];
             ok &= WriteInt(path, L"Gpu", (p + L"VendorId").c_str(), s.stageGpu[i].vendorId);

@@ -7,10 +7,8 @@
 // relief shading and a small screen-position-dependent parallax offset to textured surfaces. It is an approximation,
 // not shape recovery, and it is off by default.
 //
-// Where it runs (lead decision D1): a two-rate stage at the END of the pipeline, after upscaling and frame generation,
-// outside the user-arranged load order (no PipelineStage entry, so saved load orders are unaffected). It uses the
-// device of the Upscaling GPU (D2: no per-stage GPU). The engine never starts the motion estimator just for relief
-// (D7): MotionDepth falls back to Parallax when no motion field exists.
+// Where it runs: Analyse sees the original capture on the selected GPU. Apply follows the user's load order.
+// The engine provides a compatible motion field from an earlier stage or estimates one for Motion depth.
 //
 // Threading: pipeline thread only (the owner of the GpuDevice immediate context). No per-frame heap allocation;
 // resources are created on first use and recreated only when sizes or formats change.
@@ -60,7 +58,7 @@ struct ReliefSettings {
 struct ReliefStats {              // read with a lag; never stalls the CPU
     bool active = false;
     ReliefTier tierInEffect = ReliefTier::Off; // may be lower than requested (e.g. no motion for MotionDepth)
-    float texturedCoverage = 0.0f; // share of pixels that received relief, 0..1
+    float texturedCoverage = 0.0f; // share of pixels passing the texture and edge gates, before HUD protection, 0..1
     float meanOffsetPx = 0.0f;     // Parallax and above
     bool autoDisabled = false;
     std::wstring reason;           // plain-language reason when not active or reduced; empty otherwise
@@ -84,7 +82,7 @@ public:
     // frame; (0,1) = a generated frame between the previous and the newest real frame (height and protection are
     // warped to that phase). When the effect is off or inactive the engine does not call Apply at all.
     virtual bool Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
-                       const RectI& contentInDst, float phase) = 0;
+                       const RectI& contentInDst, float phase, float outputPixelScale = 1.0f) = 0;
 
     virtual void Reset() = 0;     // scene cut, resize, device recovery
     virtual ReliefStats Stats() const = 0;

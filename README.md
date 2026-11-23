@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.0.2**
+**Version 1.1.0**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -27,12 +27,13 @@ It is an experimental personal project. Quality and speed claims come only from 
   - Intel: the DLSS5_INTEL runtime (experimental and far from real time).
 
   See [documentation/NR_BRIDGE.md](documentation/NR_BRIDGE.md).
-- **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling) can run on
+- **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling, Smart parallax) can run on
   its own GPU; frames are copied between GPUs where consecutive stages differ. NVIDIA neural rendering on a second GPU
   runs in a small helper process (`MoonSR_NrHost.exe`).
-- **Smart parallax (in development):** a planned screen-space relief effect that estimates surface depth from the
-  captured picture and adds subtle relief shading and parallax to textured surfaces. The tab and settings exist; the
-  effect itself is not built yet. Design: [documentation/research/screen_space_relief.md](documentation/research/screen_space_relief.md).
+- **Smart parallax (experimental):** adds surface relief to textured parts of the captured picture. Shading adds
+  highlights and shadows. Parallax also shifts surface detail by up to 3 output pixels. Motion depth reuses compatible
+  frame-generation motion or estimates motion independently, even with frame generation off. See the
+  [Smart parallax design](documentation/research/screen_space_relief.md).
 - **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
   ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.
 - **Output window:** stays directly above the game, so other windows can be placed over it. MoonSR can close to the
@@ -95,6 +96,9 @@ Binaries are written to `build\main\bin`:
 
 ## Releases
 
+- **1.1.0** (2026-11-23): adds experimental Smart parallax with Shading, Parallax and Motion depth. Smart parallax
+  can move in Load order and run on a GPU of its own. Motion depth works with frame generation off. Home adds an
+  A/B comparison of the raw capture and the finished image.
 - **1.0.2** (2026-11-22): fixes. Frame generation with neural rendering and V-Sync on no longer drops to about 95 fps
   (60 fps game, 2X: now 120 fps, the same as with V-Sync off); the output window uses three buffers. The neural
   rendering setup now requires the FP16-patched model on RTX 20, 30 and 40 series cards (identified by hardware ID,
@@ -114,7 +118,7 @@ Binaries are written to `build\main\bin`:
 |---|---|
 | `src/core`, `src/gpu`, `src/capture`, `src/present` | Types and logging; Direct3D devices and monitors; capture; output window |
 | `src/upscale`, `src/framegen`, `src/neural` | Scalers and the MoonSR temporal upscaler; frame generation; host side of the neural rendering bridge |
-| `src/relief` | Smart parallax stage (groundwork) |
+| `src/relief` | Smart parallax stage |
 | `src/engine` | Pipeline thread. `engine.h` is the only API the UI uses |
 | `src/app` | User interface |
 | `shaders/` | HLSL, compiled with `fxc` at build time and embedded |

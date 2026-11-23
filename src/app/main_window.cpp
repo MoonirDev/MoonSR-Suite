@@ -107,6 +107,7 @@ const wchar_t* StageToken(PipelineStage s) {
     switch (s) {
     case PipelineStage::NeuralRendering: return L"neural";
     case PipelineStage::FrameGeneration: return L"framegen";
+    case PipelineStage::Relief: return L"relief";
     default: return L"upscaling";
     }
 }
@@ -115,6 +116,7 @@ wchar_t StageIcon(PipelineStage s) {
     switch (s) {
     case PipelineStage::NeuralRendering: return 0xE9F3;
     case PipelineStage::FrameGeneration: return 0xE786;
+    case PipelineStage::Relief: return ui::kGlyphReliefLayers;
     default: return 0xE740;
     }
 }
@@ -138,7 +140,7 @@ PipelineOrder OrderFromString(const std::wstring& text) {
         if (end == std::wstring::npos) end = text.size();
         std::wstring tok = text.substr(pos, end - pos);
         tok.erase(std::remove(tok.begin(), tok.end(), L' '), tok.end());
-        for (PipelineStage st : {PipelineStage::NeuralRendering, PipelineStage::FrameGeneration, PipelineStage::Upscaling})
+        for (PipelineStage st : PipelineOrder{}.stages)
             if (EqualNoCase(tok, StageToken(st))) o.stages.push_back(st);
         pos = end + 1;
     }
@@ -1689,7 +1691,7 @@ void MainWindow::StartScaling(HWND target) {
             }
         }
     }
-    for (PipelineStage st : {PipelineStage::NeuralRendering, PipelineStage::FrameGeneration, PipelineStage::Upscaling})
+    for (PipelineStage st : PipelineOrder{}.stages)
         if (const AdapterInfo* a = StageAdapter(st)) cfg.stageAdapters.For(st) = a->luid;
 
     targetTitle_ = Ellipsize(WindowTitle(target), 60);
@@ -1851,9 +1853,7 @@ void MainWindow::ShowStats(const EngineStats& st) {
         std::wstring relief = ReliefSummary(&st);
         if (ui_.relief->checked() && st.reliefGpuMs > 0.0) relief += std::format(L" · {:.3f} ms GPU", st.reliefGpuMs);
         ui_.details->SetValue(DetRelief, relief);
-        // The page's warning already says "in development"; show the engine note only when it adds something.
-        const bool extra = ui_.relief->checked() && !st.reliefNote.empty() &&
-                           st.reliefNote != L"Smart parallax is in development: no effect yet.";
+        const bool extra = ui_.relief->checked() && !st.reliefNote.empty();
         if (extra) ui_.reliefNote->Set(Severity::Warning, st.reliefNote);
         ui_.reliefNote->SetVisible(extra);
     }
@@ -3065,9 +3065,15 @@ void MainWindow::UpdateReliefUi() {
 
 std::wstring MainWindow::ReliefSummary(const EngineStats* st) const {
     if (!ui_.relief->checked()) return L"Off";
-    if (st && st->reliefActive) return L"On";
+    if (st && st->reliefActive) {
+        if (st->reliefTier == ReliefTier::MotionDepth) return L"Motion depth";
+        if (st->reliefTier == ReliefTier::Parallax)
+            return CurrentRelief().tier == ReliefTier::MotionDepth ? L"Parallax (fallback)" : L"Parallax";
+        return L"Shading";
+    }
     if (st && !st->reliefNote.empty() && st->reliefTier == ReliefTier::Off) return L"On (could not start)";
-    return L"On (in development: no effect yet)";
+    if (st && !st->reliefNote.empty()) return st->reliefNote;
+    return L"On";
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3105,6 +3111,7 @@ void MainWindow::RefreshOrderUi() {
     badge(PipelineStage::Upscaling, ui_.upscaling->checked());
     badge(PipelineStage::FrameGeneration, ui_.frameGen->checked());
     badge(PipelineStage::NeuralRendering, ui_.neural->checked());
+    badge(PipelineStage::Relief, ui_.relief->checked());
 
     const PipelineOrder o = CurrentOrder();
     std::wstring t = L"Frames move through the enabled stages from top to bottom.";
@@ -3113,7 +3120,8 @@ void MainWindow::RefreshOrderUi() {
     for (size_t i = 0; i < o.stages.size(); ++i) {
         const PipelineStage stage = o.stages[i];
         const bool active = stage == PipelineStage::Upscaling ? ui_.upscaling->checked() :
-                            stage == PipelineStage::FrameGeneration ? ui_.frameGen->checked() : ui_.neural->checked();
+                            stage == PipelineStage::FrameGeneration ? ui_.frameGen->checked() :
+                            stage == PipelineStage::Relief ? ui_.relief->checked() : ui_.neural->checked();
         t += std::format(L"\n\n{}. {}: ", i + 1, Engine::StageName(stage));
         if (!active) {
             t += L"Off; this stage is skipped.";
@@ -3139,6 +3147,10 @@ void MainWindow::RefreshOrderUi() {
                 : L"Enhances each game frame before passing it to the next enabled stage.";
             t += upscaled ? L" It receives the upscaled image." : L" It receives the game-resolution image.";
             t += L" Motion analysis uses the original captured frames.";
+            break;
+        case PipelineStage::Relief:
+            t += generated ? L"Adds relief to real and generated frames." : L"Adds relief to each game frame.";
+            t += L" Motion depth estimates motion when compatible frame-generation motion is unavailable.";
             break;
         }
     }

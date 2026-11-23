@@ -31,7 +31,10 @@ struct Options {
     bool gen = false, selftest = false, quality = false, time = false, listAdapters = false, saveImages = false, verbose = false;
     bool allAdapters = false, help = false, temporal = false, scalesGiven = false, relief = false, reliefNoTime = false;
     std::vector<float> reliefStrengths;
+    bool reliefParallax = false;
+    bool reliefMotionDepth = false;
     float reliefDetail = -1.0f;
+    std::vector<std::string> reliefImages;
     TemporalOptions tmp;
     uint32_t genW = 1920, genH = 1080;
     std::vector<std::string> adapters;
@@ -89,8 +92,11 @@ Modes (combine freely):
   --relief               Smart parallax: synthetic relief scenes with known height (bricks, cobblestones, rock, wood,
                          painted wall, sky, HUD over bricks, silhouette, stylised); height / shading / false-relief /
                          halo / flicker metrics, emboss and clarity baselines, self-checks and GPU time
-                         (--relief-strengths 0.5,1  --relief-detail <game px>  --relief-no-time  --save-images writes PNGs to <out>/relief)
+                         (--relief-image <file> (repeatable; screenshot, static + pan + noisy still)  --relief-strengths 0.5,1
+                          --relief-parallax  --relief-detail <game px>  --relief-no-time
+                          --save-images writes PNGs to <out>/relief)
   --list-adapters        list adapters and exit
+  --relief-motion-depth  test Motion depth with known projective, translational and independent cell motion
 
 Selection:
   --adapter <substr>     adapter name substring (repeatable); default: first hardware adapter
@@ -135,6 +141,9 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--temporal") { o.temporal = true; }
         else if (a == "--relief") o.relief = true;
         else if (a == "--relief-no-time") o.reliefNoTime = true;
+        else if (a == "--relief-parallax") { o.reliefParallax = true; o.relief = true; }
+        else if (a == "--relief-motion-depth") o.reliefMotionDepth = true;
+        else if (a == "--relief-image") { if (!(v = need(i))) return false; o.reliefImages.push_back(v); o.relief = true; }
         else if (a == "--relief-detail") { if (!(v = need(i))) return false; o.reliefDetail = static_cast<float>(atof(v)); }
         else if (a == "--relief-strengths") { if (!(v = need(i))) return false; for (auto& t : Split(v, ',')) o.reliefStrengths.push_back(static_cast<float>(atof(t.c_str()))); }
         else if (a == "--seqs") { if (!(v = need(i))) return false; o.tmp.seqs = Split(v, ','); }
@@ -553,7 +562,7 @@ int main(int argc, char** argv) {
         PrintHelp();
         return 2;
     }
-    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.listAdapters)) {
+    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.reliefMotionDepth && !o.listAdapters)) {
         PrintHelp();
         return o.help ? 0 : 2;
     }
@@ -584,7 +593,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<AdapterInfo> adapters;
-    if (o.selftest || o.quality || o.time || o.temporal || o.relief) {
+    if (o.selftest || o.quality || o.time || o.temporal || o.relief || o.reliefMotionDepth) {
         adapters = PickAdapters(o, err);
         if (adapters.empty()) {
             if (o.selftest && !o.quality && !o.time) printf("warning: %s; GPU self-checks skipped\n", err.c_str());
@@ -620,10 +629,14 @@ int main(int argc, char** argv) {
         if (!o.reliefStrengths.empty()) r.strengths = o.reliefStrengths;
         r.detailScalePx = o.reliefDetail;
         r.timing = !o.reliefNoTime;
+        r.parallax = o.reliefParallax;
         r.saveImages = o.saveImages;
         r.outDir = o.outDir / "relief";
-        for (auto& a : adapters) rc |= RunReliefBench(r, a);
+        for (const auto& im : o.reliefImages) r.images.emplace_back(im);
+        for (auto& a : adapters) rc |= r.images.empty() ? RunReliefBench(r, a) : RunReliefImage(r, a);
     }
+    if (o.reliefMotionDepth)
+        for (const auto& a : adapters) rc |= RunReliefMotionBench(a);
     CoUninitialize();
     return rc;
 }

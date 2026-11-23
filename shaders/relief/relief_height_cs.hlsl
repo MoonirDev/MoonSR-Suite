@@ -35,7 +35,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     bool cut = (cFlags & RELIEF_F_RESET) != 0 || asfloat(state.Load(RST_CUT)) > 0.5;
     if (cFlags & RELIEF_F_MOTION_CUT) cut = cut || motionStats.Load(cSceneCutIndex) != 0;
 
-    const bool pixelChanged = gate.z > 0.25; // the 2x2 block changed by more than 0.01 stop (gate pass)
+    const bool pixelChanged = gate.z > 0.25; // change exceeded the gate pass's luminance-dependent noise floor
 
     // Temporal history.
     float alpha = 1.0;

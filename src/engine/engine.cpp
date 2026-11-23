@@ -8,6 +8,7 @@
 #include "cursor/cursor_overlay.h"
 #include "diag/frame_recorder.h"
 #include "overlay/stats_overlay.h"
+#include "gpu/cross_adapter.h"
 #include "gpu/gpu_device.h"
 #include "neural/neural_bridge.h"
 #include "present/presenter.h"
@@ -84,6 +85,8 @@ struct Engine::Impl {
     std::vector<std::unique_ptr<GpuDevice>> extraDevices;
     GpuDevice* fgDevice = nullptr;
     GpuDevice* nrDevice = nullptr;
+    GpuDevice* reliefDevice = nullptr; // null when disabled, otherwise owns the relief context
+    std::unique_ptr<GpuDevice> ownedReliefDevice;
     // The adapter driving the output monitor (the "Auto" GPU, also where MoonSR.exe's Direct2D UI device lives).
     // NVIDIA neural rendering anywhere else runs in a helper process (see StartNeural).
     LUID outputMonitorAdapter{};
@@ -111,9 +114,25 @@ struct Engine::Impl {
 
     bool AnyDeviceLost() const {
         if (device && device->DeviceStatus() != S_OK) return true;
+        if (ownedReliefDevice && ownedReliefDevice->DeviceStatus() != S_OK) return true;
         for (const auto& d : extraDevices)
             if (d->DeviceStatus() != S_OK) return true;
         return false;
+    }
+
+    std::wstring StageGpuText(const PipelineOrder& order) const {
+        std::wstring text;
+        for (const PipelineStage stage : order.stages) {
+            const GpuDevice* selected = stage == PipelineStage::FrameGeneration ? fgDevice
+                                      : stage == PipelineStage::NeuralRendering ? nrDevice
+                                      : stage == PipelineStage::Relief ? reliefDevice : nullptr;
+            if (stage == PipelineStage::Relief && !relief) continue;
+            if (!text.empty()) text += L" > ";
+            const GpuDevice* gpu = selected ? selected : device.get();
+            text += std::format(L"{}: {}{}", Engine::StageName(stage), gpu->Info().name,
+                                gpu != device.get() ? L" (frames copied across GPUs)" : L"");
+        }
+        return text;
     }
     std::unique_ptr<Presenter> presenter;
     std::unique_ptr<ICaptureSource> capture;
@@ -275,23 +294,48 @@ struct Engine::Impl {
     RectI sceneDestRect;
     CursorState drawnCursor;
 
-    // Smart parallax (relief/relief_pass.h). Exists only while a tier other than Off is requested; then every displayed
-    // frame is rendered into `scene` (as for the software cursor) and Apply writes scene -> back buffer before the
-    // cursor and the frame counter are drawn. With relief off (and no software cursor) frames go straight to the back
-    // buffer as before: no pass, no scene texture, no extra copy.
+    // Smart parallax analyses each original capture. Its output is consumed at the selected stage boundary.
+    // A stage running after the final scale can use the kept scene and draw directly to the back buffer.
     std::unique_ptr<ReliefPass> relief;
+    std::unique_ptr<FrameGenerator> reliefMotion;
+    std::unique_ptr<CrossAdapterLink> reliefCaptureUpload, reliefUpload, reliefDownload;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> reliefInput, reliefOutput;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> reliefInputSrv;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> reliefOutputRtv;
+    Size reliefApplySize;
+    DXGI_FORMAT reliefFormat = DXGI_FORMAT_UNKNOWN;
+    bool reliefMotionFailed = false, reliefCopyFailed = false, reliefCopyProblem = false;
     bool reliefFailed = false;      // creation failed; not retried until the pipeline is rebuilt
     bool reliefAnalysed = false;    // the newest real frame was analysed (Apply is skipped otherwise)
     float reliefPhase = 1.0f;       // phase of the frame in `scene`: 1 = real, (0,1) = generated
+    bool reliefInScene = false;
+    bool pendingReliefDone = false;
+    bool reliefBeforeScale = false;
+    ScaleSettings reliefScaleSettings;
     ReliefSettings appliedRelief;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv;
 
     // Scene routing: the software cursor and relief both need the finished image in `scene`.
-    bool WantScene() const { return cursor != nullptr || relief != nullptr; }
+    bool WantScene() const { return cursor != nullptr || reliefInScene; }
 
     void ReleaseRelief() {
+        if (relief && scale) scale->ResetSourceCache();
         relief.reset();
+        reliefMotion.reset();
+        reliefInputSrv.Reset();
+        reliefInput.Reset();
+        reliefOutputRtv.Reset();
+        reliefOutput.Reset();
+        reliefApplySize = {};
+        reliefFormat = DXGI_FORMAT_UNKNOWN;
+        reliefUpload.reset();
+        reliefCaptureUpload.reset();
+        reliefDownload.reset();
+        reliefDevice = nullptr;
+        ownedReliefDevice.reset();
+        reliefMotionFailed = reliefCopyFailed = reliefCopyProblem = false;
         reliefAnalysed = false;
+        reliefInScene = false;
         reliefPhase = 1.0f;
         appliedRelief = ReliefSettings{};
         sceneSrv.Reset();
@@ -301,6 +345,41 @@ struct Engine::Impl {
             sceneSize = {};
             sceneValid = false;
         }
+    }
+
+    bool StartRelief(std::wstring& error) {
+        const LUID requested = config.stageAdapters.relief;
+        const LUID luid = LuidIsZero(requested) ? outputMonitorAdapter : requested;
+        reliefDevice = device.get();
+        if (!LuidIsZero(luid) && !LuidEqual(luid, device->Info().luid)) {
+            for (const auto& d : extraDevices)
+                if (LuidEqual(luid, d->Info().luid)) reliefDevice = d.get();
+            if (reliefDevice == device.get()) {
+                ownedReliefDevice = GpuDevice::Create(&luid, error);
+                if (!ownedReliefDevice && !LuidIsZero(requested)) return false;
+                if (ownedReliefDevice) {
+                    reliefDevice = ownedReliefDevice.get();
+                    wchar_t value[16]{};
+                    const DWORD len = GetEnvironmentVariableW(L"MOONSR_GPU_PRIORITY", value, 16);
+                    if (!len || len >= 16 || _wcsicmp(value, L"normal") != 0) RaiseGpuPriority(reliefDevice->Device());
+                }
+            }
+        }
+        if (reliefDevice != device.get()) {
+            // The original capture and the stage input can have different sizes. Keep separate
+            // transfer caches so a stage after upscaling does not recreate resources every frame.
+            reliefCaptureUpload = CrossAdapterLink::Create(*device, *reliefDevice, error);
+            if (!reliefCaptureUpload) return false;
+            reliefUpload = CrossAdapterLink::Create(*device, *reliefDevice, error);
+            if (!reliefUpload) return false;
+            reliefDownload = CrossAdapterLink::Create(*reliefDevice, *device, error);
+            if (!reliefDownload) return false;
+        }
+        relief = ReliefPass::Create(*reliefDevice, error);
+        if (!relief) return false;
+        MSR_LOG_INFO(L"Smart parallax runs on '{}'{}", reliefDevice->Info().name,
+                     reliefUpload ? std::format(L" ({})", reliefUpload->Method()) : L"");
+        return true;
     }
 
     // Creates / releases / configures the pass for this loop iteration (pipeline thread).
@@ -315,9 +394,10 @@ struct Engine::Impl {
         }
         if (!relief && !reliefFailed) {
             std::wstring error;
-            relief = ReliefPass::Create(*device, error);
-            if (!relief) {
-                reliefFailed = true; // logged by Create
+            if (!StartRelief(error)) {
+                ReleaseRelief();
+                reliefFailed = true;
+                MSR_LOG_ERROR(L"Smart parallax could not start: {}", error);
                 return;
             }
             appliedRelief = ReliefSettings{};
@@ -325,15 +405,138 @@ struct Engine::Impl {
         }
         if (relief && !(requested == appliedRelief)) {
             relief->SetSettings(requested);
+            if (requested.tier != ReliefTier::MotionDepth) reliefMotion.reset();
             appliedRelief = requested;
         }
     }
 
-    // Once per real frame, on the original capture (never modified in place by the other stages: they write into their
-    // own textures). `motion` is passed only when the generator already measured it for this capture (D7).
+    void ResetReliefHistory() {
+        if (relief) relief->Reset();
+        if (reliefMotion) reliefMotion->Reset();
+        reliefAnalysed = false;
+    }
+
+    void LogReliefCopyFailure(const std::wstring& error) {
+        if (!reliefCopyFailed) MSR_LOG_WARN(L"Smart parallax frame transfer or target failed: {}", error);
+        reliefCopyFailed = true;
+        reliefCopyProblem = true;
+    }
+
+    // A compatible field from an earlier stage is borrowed on the same device. Motion depth otherwise
+    // measures its own field from real captures; this generator never interpolates or schedules a frame.
     void ReliefAnalyse(const CapturedFrame& frame, const MotionFieldView* motion) {
         if (!relief) return;
-        reliefAnalysed = relief->Analyse(frame.texture, frame.contentRect, motion, frame.captureQpc);
+        ID3D11Texture2D* input = frame.texture;
+        RectI rect = frame.contentRect;
+        if (reliefCaptureUpload) {
+            std::wstring error;
+            input = reliefCaptureUpload->Transfer(input, rect, error);
+            if (!input) {
+                LogReliefCopyFailure(error);
+                ResetReliefHistory();
+                return;
+            }
+            rect = {0, 0, rect.Width(), rect.Height()};
+            motion = nullptr; // a main-device SRV cannot be bound on the relief GPU
+        }
+        MotionFieldView independent;
+        if (motion && reliefMotion) reliefMotion.reset();
+        if (!motion && appliedRelief.tier == ReliefTier::MotionDepth && !reliefMotionFailed) {
+            if (!reliefMotion) {
+                std::wstring error;
+                reliefMotion = FrameGenerator::Create(*reliefDevice, error);
+                if (!reliefMotion) {
+                    reliefMotionFailed = true;
+                    MSR_LOG_WARN(L"Smart parallax motion estimator unavailable: {}", error);
+                } else {
+                    FrameGenSettings motionSettings;
+                    motionSettings.quality = FrameGenQuality::Performance;
+                    motionSettings.flowScale = 0.5f;
+                    reliefMotion->SetSettings(motionSettings);
+                    MSR_LOG_INFO(L"Motion depth estimates motion on '{}'", reliefDevice->Info().name);
+                }
+            }
+            if (reliefMotion && reliefMotion->PushFrame(input, rect, frame.captureQpc)) {
+                independent = reliefMotion->MotionField();
+                if (independent.valid) motion = &independent;
+            }
+        }
+        reliefAnalysed = relief->Analyse(input, rect, motion, frame.captureQpc);
+    }
+
+    bool EnsureReliefTargets(Size size, DXGI_FORMAT format) {
+        if (size == reliefApplySize && format == reliefFormat && reliefOutputRtv) return true;
+        reliefApplySize = {};
+        reliefInputSrv.Reset();
+        reliefInput.Reset();
+        reliefOutputRtv.Reset();
+        reliefOutput.Reset();
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = size.width;
+        td.Height = size.height;
+        td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
+        td.Format = format;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = reliefDevice->Device()->CreateTexture2D(&td, nullptr, &reliefInput);
+        if (SUCCEEDED(hr)) hr = reliefDevice->Device()->CreateShaderResourceView(reliefInput.Get(), nullptr, &reliefInputSrv);
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (SUCCEEDED(hr)) hr = reliefDevice->Device()->CreateTexture2D(&td, nullptr, &reliefOutput);
+        if (SUCCEEDED(hr)) hr = reliefDevice->Device()->CreateRenderTargetView(reliefOutput.Get(), nullptr, &reliefOutputRtv);
+        if (FAILED(hr)) {
+            LogReliefCopyFailure(HrToString(hr));
+            return false;
+        }
+        reliefApplySize = size;
+        reliefFormat = format;
+        return true;
+    }
+
+    ID3D11Texture2D* RenderRelief(ID3D11Texture2D* input, const RectI& rect, const RectI& content, float phase,
+                               float outputPixelScale = 1.0f) {
+        if (!relief || !reliefAnalysed || !input || rect.Empty()) return nullptr;
+        std::wstring error;
+        ID3D11Texture2D* source = input;
+        const Size size{static_cast<uint32_t>(rect.Width()), static_cast<uint32_t>(rect.Height())};
+        const RectI full{0, 0, rect.Width(), rect.Height()};
+        RectI sourceRect = rect;
+        if (reliefUpload) {
+            source = reliefUpload->Transfer(input, rect, error);
+            if (!source) {
+                LogReliefCopyFailure(error);
+                return nullptr;
+            }
+            sourceRect = full;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        source->GetDesc(&desc);
+        if (!EnsureReliefTargets(size, desc.Format)) return nullptr;
+        const D3D11_BOX crop{static_cast<UINT>(sourceRect.left), static_cast<UINT>(sourceRect.top), 0,
+                             static_cast<UINT>(sourceRect.right), static_cast<UINT>(sourceRect.bottom), 1};
+        reliefDevice->Context()->CopySubresourceRegion(reliefInput.Get(), 0, 0, 0, 0, source, 0, &crop);
+        if (!relief->Apply(reliefInputSrv.Get(), size, reliefOutputRtv.Get(), size, content, phase, outputPixelScale))
+            return nullptr;
+        reliefCopyProblem = false;
+        if (!reliefDownload) return reliefOutput.Get();
+        ID3D11Texture2D* result = reliefDownload->Transfer(reliefOutput.Get(), full, error);
+        if (!result) LogReliefCopyFailure(error);
+        return result;
+    }
+
+    void ApplyReliefBefore(bool precedes, bool& done, ID3D11Texture2D*& texture, RectI& rect, float phase) {
+        if (!precedes || done || !relief || !reliefAnalysed || !texture || rect.Empty()) return;
+        const RectI full{0, 0, rect.Width(), rect.Height()};
+        float outputPixelScale = 1.0f;
+        if (reliefBeforeScale && reliefScaleSettings.enabled) {
+            const auto w = static_cast<uint32_t>(rect.Width()), h = static_cast<uint32_t>(rect.Height());
+            const RectI output = ScalePass::ComputeDestRect({w, h}, presenter->BackBufferSize(), reliefScaleSettings.fit);
+            outputPixelScale = std::max(static_cast<float>(output.Width()) / static_cast<float>(w),
+                                        static_cast<float>(output.Height()) / static_cast<float>(h));
+        }
+        if (auto* processed = RenderRelief(texture, rect, full, phase, outputPixelScale)) {
+            texture = processed;
+            rect = full;
+        }
+        done = true; // failed transfers leave this frame usable by the next stage
     }
 
     bool EnsureSceneSrv() {
@@ -662,14 +865,7 @@ struct Engine::Impl {
         stats.neuralRenderingActive = false;
         stats.neuralRenderingNote.clear();
         // Which GPU runs each stage, in load order. Remote stages copy their frames across (see remote_stages.h).
-        stats.stageGpuText.clear();
-        for (const PipelineStage s : Engine::NormalizeOrder(config.order).stages) {
-            const GpuDevice* d = s == PipelineStage::FrameGeneration ? fgDevice
-                               : s == PipelineStage::NeuralRendering ? nrDevice : nullptr;
-            if (!stats.stageGpuText.empty()) stats.stageGpuText += L" > ";
-            stats.stageGpuText += std::format(L"{}: {}{}", Engine::StageName(s), (d ? d : device.get())->Info().name,
-                                              d ? L" (frames copied across GPUs)" : L"");
-        }
+        stats.stageGpuText = StageGpuText(Engine::NormalizeOrder(config.order));
         MSR_LOG_INFO(L"Pipeline initialised: main GPU '{}', capture '{}', output {}x{}; stages: {}", stats.adapterName,
                      stats.captureMethod, stats.outputSize.width, stats.outputSize.height, stats.stageGpuText);
         return true;
@@ -1120,12 +1316,19 @@ struct Engine::Impl {
     PresentStatus ComposeAndPresent(const CursorState& state) {
         ID3D11RenderTargetView* bb = presenter->BackBufferRtv();
         bool applied = false;
-        if (relief && reliefAnalysed && EnsureSceneSrv())
-            applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase);
-        if (!applied) { // relief off, not analysed, or failed: never lose the image
+        ID3D11Texture2D* composed = scene.Get();
+        if (reliefInScene && relief && reliefAnalysed) {
+            if (!reliefUpload && EnsureSceneSrv()) {
+                applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase);
+            } else if (reliefUpload) {
+                const RectI full{0, 0, static_cast<int32_t>(sceneSize.width), static_cast<int32_t>(sceneSize.height)};
+                if (auto* processed = RenderRelief(scene.Get(), full, sceneDestRect, reliefPhase)) composed = processed;
+            }
+        }
+        if (!applied) {
             Microsoft::WRL::ComPtr<ID3D11Resource> bbTex;
             bb->GetResource(&bbTex);
-            device->Context()->CopyResource(bbTex.Get(), scene.Get());
+            device->Context()->CopyResource(bbTex.Get(), composed);
         }
         if (cursor) {
             cursor->Draw(state, config.targetWindow, bb, sceneSize, sceneDestRect);
@@ -1280,7 +1483,6 @@ struct Engine::Impl {
                 if (pendingIndex >= pendingCount) neuralChange.swap(pendingNeuralChange);
                 overlayEnabled = liveFrameCounter;
             }
-            UpdateRelief(reliefSettings);
 
             // The generator's lifetime follows the REQUESTED multiplier. The effective multiplier is decided once
             // per real frame, when it is scheduled.
@@ -1347,6 +1549,8 @@ struct Engine::Impl {
                     if (fg) { fg->Reset(); fgHasHistory = false; }
                     if (alsr) alsr->Reset();
                     if (alsrMotion) alsrMotion->Reset();
+                    ResetReliefHistory();
+                    reliefInScene = false;
                     neuralReset = true;
                 }
                 appliedOrder = order;
@@ -1358,6 +1562,22 @@ struct Engine::Impl {
             const bool orderUpscaleFirst = posOf(PipelineStage::Upscaling) < posOf(PipelineStage::FrameGeneration);
             const bool neuralBeforeFg = posOf(PipelineStage::NeuralRendering) < posOf(PipelineStage::FrameGeneration);
             const bool upscaleBeforeNeural = posOf(PipelineStage::Upscaling) < posOf(PipelineStage::NeuralRendering);
+            const auto reliefPosition = posOf(PipelineStage::Relief);
+            const bool reliefBeforeFg = reliefPosition < posOf(PipelineStage::FrameGeneration);
+            const bool reliefBeforeUp = reliefPosition < posOf(PipelineStage::Upscaling);
+            const bool reliefBeforeNeural = reliefPosition < posOf(PipelineStage::NeuralRendering);
+            reliefBeforeScale = reliefBeforeUp;
+            reliefScaleSettings = settings;
+            if (pendingIndex >= pendingCount) {
+                const bool wasEnabled = relief != nullptr;
+                UpdateRelief(reliefSettings);
+                if (wasEnabled != (relief != nullptr)) {
+                    if (reliefBeforeFg && fg) { fg->Reset(); fgHasHistory = false; }
+                    if (reliefBeforeUp && alsr) alsr->Reset();
+                    if (reliefBeforeUp && alsrMotion) alsrMotion->Reset();
+                    if (reliefBeforeNeural) neuralReset = true;
+                }
+            }
             if (neuralChange && ApplyNeuralChange(*neuralChange)) {
                 if (neuralBeforeFg && fg) { fg->Reset(); fgHasHistory = false; }
                 if (alsr) alsr->Reset();
@@ -1426,6 +1646,8 @@ struct Engine::Impl {
                 const Size fs = fg->FrameSize();
                 ID3D11Texture2D* tex = fg->RealFrame(0);
                 Size texSize = fs;
+                const float phase = p.real ? 1.0f : p.t;
+                bool reliefDone = pendingReliefDone;
                 bool alreadyUpscaled = pendingPreScaled;
                 if (p.real) {
                     if (pendingAlsr && alsrOut) { // reconstructed by Moon ALSR when the frame was pushed
@@ -1436,25 +1658,61 @@ struct Engine::Impl {
                 } else {
                     tex = (EnsureFgOut(fs) && fg->Interpolate(p.t, fgOutRtv.Get())) ? fgOut.Get() : nullptr;
                     // Generated frames get ALSR's single-frame reconstruction so they match the real frames' look.
-                    if (tex && pendingAlsr && alsr && alsrGen &&
-                        alsr->RenderSingle(fgOut.Get(), alsrGenRtv.Get(), alsrSize, alsrSettings)) {
-                        tex = alsrGen.Get();
-                        texSize = alsrSize;
-                        alreadyUpscaled = true;
+                    if (tex && pendingAlsr && alsr && alsrGen) {
+                        RectI rect{0, 0, static_cast<int32_t>(fs.width), static_cast<int32_t>(fs.height)};
+                        ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, rect, phase);
+                        if (alsr->RenderSingle(tex, alsrGenRtv.Get(), alsrSize, alsrSettings)) {
+                            tex = alsrGen.Get();
+                            texSize = alsrSize;
+                            alreadyUpscaled = true;
+                        }
                     }
                 }
+                auto renderDeferredAlsr = [&](RectI& rect) {
+                    ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, rect, phase);
+                    if (p.real) {
+                        if (!alsrMotion && !alsrMotionFailed) {
+                            std::wstring error;
+                            alsrMotion = FrameGenerator::Create(*device, error);
+                            if (!alsrMotion) {
+                                alsrMotionFailed = true;
+                                MSR_LOG_ERROR(L"MoonSR motion estimator unavailable: {}", error);
+                            }
+                        }
+                        if (!alsrMotion || !alsrMotion->PushFrame(tex, rect, pendingRealArrivalQpc) ||
+                            !alsr->Render(*alsrMotion, alsrOutRtv.Get(), alsrSize, alsrSettings)) return false;
+                        tex = alsrOut.Get();
+                    } else {
+                        if (!alsr->RenderSingle(tex, alsrGenRtv.Get(), alsrSize, alsrSettings)) return false;
+                        tex = alsrGen.Get();
+                    }
+                    texSize = alsrSize;
+                    alreadyUpscaled = true;
+                    rect = {0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
+                    return true;
+                };
                 if (tex && neural && !pendingNeuralDone) {
                     RectI currentRect{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
                     if (upscaleBeforeNeural && settings.enabled && !alreadyUpscaled) {
-                        const RectI dr = ScalePass::ComputeDestRect(texSize, presenter->BackBufferSize(), settings.fit);
-                        const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
-                        ScaleSettings fill = settings; fill.fit = FitMode::Stretch;
-                        if (ds.Empty() || !EnsurePreScaled(ds) || !scale->Render(tex, currentRect, preScaledRtv.Get(), ds, fill, nullptr)) {
-                            exitError = L"Could not upscale a frame before neural rendering."; exitState = EngineState::Failed; break;
+                        if (pendingAlsrAfterNeural && alsr) {
+                            if (!renderDeferredAlsr(currentRect)) {
+                                exitError = L"MoonSR could not upscale a frame before neural rendering.";
+                                exitState = EngineState::Failed;
+                                break;
+                            }
+                        } else {
+                            ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, currentRect, phase);
+                            const RectI dr = ScalePass::ComputeDestRect(texSize, presenter->BackBufferSize(), settings.fit);
+                            const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
+                            ScaleSettings fill = settings; fill.fit = FitMode::Stretch;
+                            if (ds.Empty() || !EnsurePreScaled(ds) || !scale->Render(tex, currentRect, preScaledRtv.Get(), ds, fill, nullptr)) {
+                                exitError = L"Could not upscale a frame before neural rendering."; exitState = EngineState::Failed; break;
+                            }
+                            tex = preScaled.Get(); texSize = ds; alreadyUpscaled = true;
+                            currentRect = {0, 0, static_cast<int32_t>(ds.width), static_cast<int32_t>(ds.height)};
                         }
-                        tex = preScaled.Get(); texSize = ds; alreadyUpscaled = true;
-                        currentRect = {0, 0, static_cast<int32_t>(ds.width), static_cast<int32_t>(ds.height)};
                     }
+                    ApplyReliefBefore(reliefBeforeNeural, reliefDone, tex, currentRect, phase);
                     const Size neuralInputSize{static_cast<uint32_t>(currentRect.Width()), static_cast<uint32_t>(currentRect.Height())};
                     std::wstring neuralError;
                     if (!NeuralProcess(tex, currentRect, p.dueQpc, pictureSettings, neuralError)) {
@@ -1471,27 +1729,17 @@ struct Engine::Impl {
                         if (!p.real) ++stats.neuralProcessedGeneratedFrames;
                     }
                 }
-                if (tex && pendingAlsrAfterNeural && alsr) {
-                    bool ok = false;
-                    if (p.real) {
-                        if (!alsrMotion && !alsrMotionFailed) {
-                            std::wstring motionError; alsrMotion = FrameGenerator::Create(*device, motionError);
-                            if (!alsrMotion) { alsrMotionFailed = true; MSR_LOG_ERROR(L"MoonSR motion estimator unavailable: {}", motionError); }
-                        }
-                        const RectI r{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
-                        ok = alsrMotion && alsrMotion->PushFrame(tex, r, pendingRealArrivalQpc) &&
-                             alsr->Render(*alsrMotion, alsrOutRtv.Get(), alsrSize, alsrSettings);
-                        if (ok) tex = alsrOut.Get();
-                    } else {
-                        ok = alsr->RenderSingle(tex, alsrGenRtv.Get(), alsrSize, alsrSettings);
-                        if (ok) tex = alsrGen.Get();
-                    }
-                    if (!ok) { exitError = L"MoonSR could not run after neural rendering."; exitState = EngineState::Failed; break; }
-                    texSize = alsrSize; alreadyUpscaled = true;
+                if (tex && pendingAlsrAfterNeural && alsr && !alreadyUpscaled) {
+                    RectI r{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
+                    if (!renderDeferredAlsr(r)) { exitError = L"MoonSR could not upscale the frame."; exitState = EngineState::Failed; break; }
                 }
                 RectI destRect;
                 bool rendered = false, toScene = false;
                 if (tex) {
+                    RectI rect{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
+                    ApplyReliefBefore(reliefBeforeUp && !alreadyUpscaled, reliefDone, tex, rect, phase);
+                    reliefInScene = relief && reliefAnalysed && !reliefDone;
+                    reliefPhase = phase;
                     // Frames of an "upscaling first" schedule are already at output size: copy them 1:1 (the
                     // destination rectangle the fit mode yields for an image of that size is the same rectangle).
                     ScaleSettings blit = settings;
@@ -1500,8 +1748,7 @@ struct Engine::Impl {
                         blit.scaler = ScalerKind::Nearest;
                         blit.sharpness = 0.0f;
                     }
-                    rendered = RenderOnly(tex, RectI{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)},
-                                          blit, destRect, toScene);
+                    rendered = RenderOnly(tex, rect, blit, destRect, toScene);
                 }
                 const double cpuMs = QpcToMs(QpcNow() - t0);
 
@@ -1531,7 +1778,6 @@ struct Engine::Impl {
                 if (rendered && toScene) {
                     // Sample the cursor as late as possible: after the wait, right before compositing.
                     if (cursor) cursorState = cursor->Poll(config.targetWindow);
-                    reliefPhase = p.real ? 1.0f : p.t;
                     ps = ComposeAndPresent(cursorState);
                 } else if (rendered) {
                     ps = PresentBackBuffer();
@@ -1635,7 +1881,8 @@ struct Engine::Impl {
                         (neuralSequence && frame.sequence != neuralSequence + 1) ||
                         (neuralQpc && (frame.captureQpc <= neuralQpc || QpcToMs(frame.captureQpc - neuralQpc) > 1000.0));
                     neuralSequence = frame.sequence; neuralRect = frame.contentRect; neuralQpc = frame.captureQpc;
-                    const bool originalFeedsNeural = neuralBeforeFg && !(upscaleBeforeNeural && settings.enabled);
+                    const bool originalFeedsNeural = neuralBeforeFg && !(upscaleBeforeNeural && settings.enabled) &&
+                                                     !(relief && reliefBeforeNeural);
                     if (!originalFeedsNeural && !SaveNeuralOriginal(frame.texture, frame.contentRect)) {
                         capture->ReleaseFrame(); exitError = L"Could not preserve the original frame for neural optical flow.";
                         exitState = EngineState::Failed; break;
@@ -1651,7 +1898,7 @@ struct Engine::Impl {
                 if (frame.textureSize != lastTextureSize) {
                     // The capture pool was recreated; drop views that pin the old textures.
                     scale->ResetSourceCache();
-                    if (relief) relief->Reset();
+                    ResetReliefHistory();
                     lastTextureSize = frame.textureSize;
                 }
                 // Real frame time estimate; maintained with and without generation.
@@ -1661,12 +1908,16 @@ struct Engine::Impl {
                 const uint32_t effective = !fg ? 1u : autoMode ? (DecideAuto(vsync) ? 2u : 1u) : DecideMultiplier(vsync);
                 activeMultiplier = effective;
                 const bool willGenerate = fg && effective > 1;
+                bool reliefDone = false;
+                const bool analyseReliefEarly = reliefBeforeFg || !willGenerate;
+                if (analyseReliefEarly) ReliefAnalyse(frame, nullptr);
                 bool capturePreScaled = false;
                 bool captureNeuralDone = false;
                 // If neural rendering follows upscaling but precedes frame generation, both operations must
                 // happen on the real capture before it enters the generator.
                 if (neural && (neuralBeforeFg || !willGenerate)) {
                     if (upscaleBeforeNeural && settings.enabled) {
+                        ApplyReliefBefore(reliefBeforeUp, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                         const Size content{static_cast<uint32_t>(pipelineRect.Width()), static_cast<uint32_t>(pipelineRect.Height())};
                         const RectI dr = ScalePass::ComputeDestRect(content, presenter->BackBufferSize(), settings.fit);
                         const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
@@ -1691,10 +1942,11 @@ struct Engine::Impl {
                         }
                         pipelineRect = {0, 0, static_cast<int32_t>(ds.width), static_cast<int32_t>(ds.height)};
                     }
+                    ApplyReliefBefore(reliefBeforeNeural, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                     const Size neuralInputSize{static_cast<uint32_t>(pipelineRect.Width()), static_cast<uint32_t>(pipelineRect.Height())};
                     std::wstring neuralError;
                     if (!NeuralProcess(pipelineTexture, pipelineRect, frame.captureQpc, pictureSettings, neuralError,
-                                       !capturePreScaled)) {
+                                       !capturePreScaled && !reliefDone)) {
                         if (!neuralChangedLive) {
                             capture->ReleaseFrame(); exitError = L"Neural rendering stopped: " + neuralError;
                             exitState = EngineState::Failed; break;
@@ -1716,6 +1968,7 @@ struct Engine::Impl {
                     // hand the UPSCALED image to the generator.
                     bool preScaledNow = capturePreScaled;
                     if (upscaleFirst && settings.enabled && !preScaledNow) {
+                        ApplyReliefBefore(reliefBeforeUp, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                         const Size content{static_cast<uint32_t>(frame.contentRect.Width()),
                                            static_cast<uint32_t>(frame.contentRect.Height())};
                         const RectI dr = ScalePass::ComputeDestRect(content, presenter->BackBufferSize(), settings.fit);
@@ -1741,8 +1994,10 @@ struct Engine::Impl {
                     }
                     ID3D11Texture2D* fgInput = capturePreScaled ? pipelineTexture : preScaledNow ? (useAlsr ? alsrOut.Get() : preScaled.Get()) : pipelineTexture;
                     const Size fgInputSize = capturePreScaled ? Size{static_cast<uint32_t>(pipelineRect.Width()), static_cast<uint32_t>(pipelineRect.Height())} : useAlsr ? alsrSize : preScaledSize;
-                    const RectI fgRect = preScaledNow ? RectI{0, 0, static_cast<int32_t>(fgInputSize.width),
-                                                              static_cast<int32_t>(fgInputSize.height)} : pipelineRect;
+                    RectI fgRect = preScaledNow ? RectI{0, 0, static_cast<int32_t>(fgInputSize.width),
+                                                       static_cast<int32_t>(fgInputSize.height)} : pipelineRect;
+                    const bool reliefDoneBeforePush = reliefDone;
+                    ApplyReliefBefore(reliefBeforeFg, reliefDone, fgInput, fgRect, 1.0f);
                     if (haveFgInputMode && lastFgPreScaled != preScaledNow) {
                         fg->Reset();
                         fgHasHistory = false;
@@ -1750,7 +2005,13 @@ struct Engine::Impl {
                     haveFgInputMode = true;
                     lastFgPreScaled = preScaledNow;
                     const bool pushed = fg->PushFrame(fgInput, fgRect, frame.captureQpc);
-                    if (pushed) { pendingPreScaled = preScaledNow; pendingNeuralDone = captureNeuralDone; }
+                    if (pushed) {
+                        pendingPreScaled = preScaledNow;
+                        pendingNeuralDone = captureNeuralDone;
+                        pendingReliefDone = reliefDone;
+                    } else {
+                        reliefDone = reliefDoneBeforePush;
+                    }
                     // Moon ALSR: reconstruct this real frame now (exactly once per PushFrame).
                     if (pushed) {
                         pendingAlsr = false;
@@ -1762,7 +2023,8 @@ struct Engine::Impl {
                             const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
                             const bool alsrAfterNeural = neural && !captureNeuralDone && !upscaleBeforeNeural;
                             FrameGenerator* motionSource = nullptr;
-                            if (alsrAfterNeural && !ds.Empty() && EnsureAlsrTargets(ds)) {
+                            const bool reliefBeforeAlsr = relief && reliefBeforeUp && !reliefDone;
+                            if ((alsrAfterNeural || reliefBeforeAlsr) && !ds.Empty() && EnsureAlsrTargets(ds)) {
                                 pendingAlsrAfterNeural = true;
                             } else if (!alsrAfterNeural && !ds.Empty() && EnsureAlsrTargets(ds) &&
                                        (motionSource = LocalMotionSource(fgInput, fgRect, frame.captureQpc)) != nullptr &&
@@ -1786,7 +2048,7 @@ struct Engine::Impl {
                         // Smart parallax analyses the original capture (still held). The generator's motion field is
                         // passed only when it measured this real frame on the main device in capture pixels: local
                         // generator, fed with a capture-sized image (not pre-scaled; neural output keeps the geometry).
-                        if (relief) {
+                        if (relief && !analyseReliefEarly) {
                             MotionFieldView motion;
                             const Size content{static_cast<uint32_t>(frame.contentRect.Width()),
                                                static_cast<uint32_t>(frame.contentRect.Height())};
@@ -1889,7 +2151,9 @@ struct Engine::Impl {
                     pendingSlotMs = 0.0;
                 }
 
-                ReliefAnalyse(frame, nullptr); // no-op when relief is off; no motion on the direct path
+                if (!analyseReliefEarly) ReliefAnalyse(frame, nullptr);
+                ApplyReliefBefore(reliefBeforeUp && !capturePreScaled, reliefDone, pipelineTexture, pipelineRect, 1.0f);
+                reliefInScene = relief && reliefAnalysed && !reliefDone;
                 RectI destRect;
                 bool rendered = false;
                 ScaleSettings directSettings = settings;
@@ -2000,12 +2264,12 @@ struct Engine::Impl {
                     for (PipelineStage st : actual.stages) {
                         const bool active = st == PipelineStage::Upscaling ? settings.enabled
                                           : st == PipelineStage::FrameGeneration ? activeMultiplier > 1
-                                          : neural != nullptr;
+                                          : st == PipelineStage::Relief ? relief != nullptr : neural != nullptr;
                         if (!active) continue;
                         if (!text.empty()) text += L" > ";
                         text += Engine::StageName(st);
                     }
-                    if (relief) text += text.empty() ? L"Smart parallax" : L" > Smart parallax"; // always last (D1)
+                    stats.stageGpuText = StageGpuText(actual);
                     stats.pipelineOrderText = text.empty() ? L"(no processing: frames shown as captured)" : text;
                     stats.pipelineOrderNote.clear();
                     if (orderUpscaleFirst && settings.enabled && !pendingPreScaled && fgWanted) {
@@ -2026,6 +2290,13 @@ struct Engine::Impl {
                     stats.reliefActive = rs.active;
                     stats.reliefTier = rs.tierInEffect;
                     stats.reliefNote = rs.reason;
+                    if (reliefMotionFailed && reliefSettings.tier == ReliefTier::MotionDepth &&
+                        rs.tierInEffect == ReliefTier::Parallax)
+                        stats.reliefNote = L"The Motion depth estimator could not start. Using Parallax.";
+                    if (reliefCopyProblem) {
+                        stats.reliefActive = false;
+                        stats.reliefNote = L"Smart parallax was bypassed because its frame transfer or render target failed.";
+                    }
                     stats.reliefGpuMs = rs.applyGpuMs + rs.analyseGpuMs;
                 } else {
                     stats.reliefActive = false;
@@ -2248,6 +2519,7 @@ const wchar_t* Engine::StageName(PipelineStage stage) {
     switch (stage) {
     case PipelineStage::NeuralRendering: return L"Neural rendering";
     case PipelineStage::FrameGeneration: return L"Frame generation";
+    case PipelineStage::Relief: return L"Smart parallax";
     default: return L"Upscaling";
     }
 }
@@ -2258,6 +2530,8 @@ const wchar_t* Engine::StageDescription(PipelineStage stage) {
         return L"Enhances image detail and appearance using your selected neural rendering model.";
     case PipelineStage::FrameGeneration:
         return L"Before upscaling it interpolates at the game's resolution (lighter); after it, at output resolution (heavier).";
+    case PipelineStage::Relief:
+        return L"Adds shading and surface displacement. Motion depth can estimate motion independently.";
     default:
         return L"Enlarges the image to the output size.";
     }
@@ -2265,6 +2539,12 @@ const wchar_t* Engine::StageDescription(PipelineStage stage) {
 
 PipelineOrder Engine::NormalizeOrder(const PipelineOrder& order) {
     const PipelineOrder def;
+    if (order.stages.size() + 1 == def.stages.size() &&
+        std::count(order.stages.begin(), order.stages.end(), PipelineStage::Relief) == 0) {
+        PipelineOrder migrated = order;
+        migrated.stages.push_back(PipelineStage::Relief);
+        return NormalizeOrder(migrated);
+    }
     if (order.stages.size() != def.stages.size()) return def;
     for (PipelineStage st : def.stages)
         if (std::count(order.stages.begin(), order.stages.end(), st) != 1) return def;

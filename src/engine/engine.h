@@ -51,16 +51,18 @@ enum class PipelineStage : uint32_t {
     NeuralRendering = 0, // user-supplied model, applied to real captures
     FrameGeneration,
     Upscaling,
+    Relief,
 };
 
-// The order of the stages. Must contain each PipelineStage exactly once; anything else is replaced by the default.
+// Each stage appears once. Old three-stage orders migrate by appending Relief. Invalid orders use the default.
 //   Frame generation BEFORE upscaling (default): frames are interpolated at the game's resolution, then every
 //     displayed frame is upscaled. Cheapest.
 //   Upscaling BEFORE frame generation: real frames are upscaled first and interpolation runs on the upscaled
 //     images. Heavier (motion analysis at output resolution); generated frames are built from more detail.
     //   Neural rendering follows the selected position; optical flow uses original captures.
 struct PipelineOrder {
-    std::vector<PipelineStage> stages{PipelineStage::NeuralRendering, PipelineStage::FrameGeneration, PipelineStage::Upscaling};
+    std::vector<PipelineStage> stages{PipelineStage::NeuralRendering, PipelineStage::FrameGeneration,
+                                      PipelineStage::Upscaling, PipelineStage::Relief};
     bool operator==(const PipelineOrder&) const = default;
 };
 
@@ -69,13 +71,14 @@ struct PipelineOrder {
 // Wherever two consecutive steps run on different GPUs the engine copies the frame between them (one cross-GPU copy
 // per frame and hop, generated frames included). Applied when scaling starts; not changed live.
 struct StageAdapters {
-    LUID neuralRendering{}, frameGeneration{}, upscaling{};
+    LUID neuralRendering{}, frameGeneration{}, upscaling{}, relief{};
     LUID& For(PipelineStage s) {
         return s == PipelineStage::NeuralRendering ? neuralRendering
-             : s == PipelineStage::FrameGeneration ? frameGeneration : upscaling;
+             : s == PipelineStage::FrameGeneration ? frameGeneration
+             : s == PipelineStage::Relief ? relief : upscaling;
     }
     const LUID& For(PipelineStage s) const { return const_cast<StageAdapters*>(this)->For(s); }
-    void SetAll(const LUID& luid) { neuralRendering = frameGeneration = upscaling = luid; }
+    void SetAll(const LUID& luid) { neuralRendering = frameGeneration = upscaling = relief = luid; }
 };
 
 struct EngineConfig {
@@ -98,9 +101,8 @@ struct EngineConfig {
     PictureSettings pictureSettings;
     bool showFrameCounter = false; // draw "game fps / displayed fps" in the top-left corner of the output
     // Smart parallax (experimental, relief/relief_pass.h). With tier Off (the default) nothing is created and the frame
-    // path is unchanged. Otherwise Analyse runs once per real frame on the original capture and Apply runs on every
-    // displayed frame as the last image operation on the main (Upscaling) GPU, before the software cursor and the frame
-    // counter are drawn, so neither is relief-processed.
+    // path is unchanged. Otherwise Analyse runs on the original capture on the selected relief GPU and Apply
+    // consumes the image at the position given by the load order, before presentation overlays.
     ReliefSettings relief;
     // A/B compare: left half of the output shows the raw capture (nearest, integer scaling), right half the final image.
     bool splitView = false;

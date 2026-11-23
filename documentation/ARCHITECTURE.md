@@ -60,6 +60,7 @@ Status: Phase 2 (functional foundation). Sections marked *planned* describe agre
 | engine | `src/engine` | `engine.h` | lead | Phase 2 |
 | app | `src/app` | — | ui-engineer | Phase 2 |
 | framegen | `src/framegen` | `frame_generator.h` | frame-generation-engineer | iteration 1 |
+| relief | `src/relief` | `relief_pass.h` | upscaling-engineer | experimental |
 | pacing | `src/pacing` | *planned* | gpu-rendering-engineer | Phase 4-5 |
 | addon | `src/addon`, `sdk/` | *planned* C ABI | addon-developer | Phase 6 |
 | profiles / config | `src/config` | *planned* | ui-engineer | Phase 2-3 |
@@ -113,6 +114,32 @@ being late and there is no frame-time cost limit (owner's decision, 2026-11-16):
 as soon as it is ready and the rest of that frame's schedule shifts by the same amount. The effective multiplier is
 limited only by the monitor refresh rate. When the GPU cannot keep up, frames are shown late (higher latency, and
 capture drops real frames latest-wins); the status note says so.
+
+### Smart parallax
+
+Smart parallax runs at its position in Load order and on its selected GPU. Legacy three-stage orders keep their
+existing relative order, with Smart parallax appended. The engine analyses the original capture once per real frame.
+When Smart parallax comes before frame generation, its result feeds the generator. When it comes after, it processes
+both real and generated frames. The software cursor and frame counter are drawn after all stages. The engine creates
+the pass only while enabled. Analysis stores two game-size height maps and half-size protection maps. Shading uses a
+directional light and cavity darkening. Parallax adds a screen-position-driven colour lookup with an output-pixel
+cap, a gradient limit, and protection checks along the sampling path.
+
+Motion depth reuses capture-size cell flow when it is available from an earlier stage on the same GPU. Otherwise,
+it runs the existing motion analysis on its own GPU using the original captures at half flow resolution. This
+analysis never schedules or creates generated frames. A robust projective fit removes the dominant plane's motion.
+The remaining motion estimates relative depth, geometry boundaries, and independent motion. The pass keeps
+reprojected depth through reliable turns, fades it on unreliable motion, and resets it on cuts.
+
+When the relief GPU differs from the main device, the original capture and the stage's colour input travel over
+separate size-cached cross-adapter links. A return link supplies the relief result to the rest of the pipeline. The engine
+leaves the input frame usable if a transfer or relief render fails. The links and dedicated motion estimator are
+released when the stage is disabled.
+
+For generated frames, apply samples both real-frame height maps at their motion-warped positions when flow is
+available, blending by display phase. It uses the stronger protection from the two frames, keeps HUD protection in
+screen coordinates, and attenuates relief where motion is unreliable or discontinuous. The generated path uses
+unwarped height blending when matching motion is unavailable.
 
 ### Original plan (Phase 4-5), kept for reference
 

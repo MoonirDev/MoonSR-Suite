@@ -1,6 +1,18 @@
 # MoonSR Suite — Known Issues
 
-Updated: 2026-11-22 (Session 7 sections appended at the end; older sections unchanged)
+Updated: 2026-11-23 (Smart parallax)
+
+## Smart parallax (experimental)
+
+- The effect estimates surface detail from SDR colour and can read differently by game or material. Static shots
+  can show almost no difference between Shading and Parallax.
+- Parallax assumes wall-like surfaces above the centre and ground-like surfaces lower on screen. Angled surfaces or
+  pure turns can make texture displacement look different from the game's own parallax.
+- Motion depth estimates motion itself when frame-generation flow is unavailable or incompatible. This adds analysis
+  cost even with frame generation off. A different Smart parallax GPU adds capture and colour transfers. Rotation
+  alone supplies no new depth, and unreliable motion fades prior depth.
+- Near the edge of a silhouette, translucent HUD, smoke, and foliage can still be misclassified. Generated-frame
+  protection has synthetic coverage. Live 2× and 4× playtests are pending.
 
 ## Frame generation (iteration 1)
 - Nobody has looked at live generated frames yet: the output window is excluded from capture, so live image

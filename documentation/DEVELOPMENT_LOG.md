@@ -4,6 +4,26 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-23 - Smart parallax (1.1.0)
+
+- Hardened Shading against shadow noise while retaining the strict opaque HUD comparison and the flat-scene
+  auto-pause. The owner reported slightly deeper textures in ATLYSS, more subtle depth in Helldivers 2, and no
+  return of the false pause in Helldivers 2.
+- Added Parallax, with position-based displacement, a gradient limit and HUD and edge checks along its sampling
+  path. Tuned the displacement after the owner's A/B tests. The owner confirmed that the tuned effect holds depth
+  better in motion in Helldivers 2.
+- Added experimental Motion depth based on a projective plane fit to existing frame-generator motion. It uses
+  residual flow for coarse relative depth and suppression around independent motion and depth discontinuities.
+  It falls back to Parallax when matching flow is unavailable. No motion estimator is started for relief.
+- Generated frames now blend the two real-frame height maps, warp with matching motion when available, and keep the
+  more protective mask at each position. The synthetic motion tests passed on the RTX 5060, RTX A400 and Radeon
+  iGPU. Live Motion depth and generated-frame checks at 2× and 4× are pending.
+- The owner requested that Smart parallax move into Load order, gain a GPU selector and estimate motion when frame
+  generation cannot provide a compatible field. Legacy three-stage orders retain their sequence. Live capture of
+  the test pattern verified Motion depth with generation off, on either side of generation, before temporal
+  upscaling, and with relief on the A400 and Upscaling on the RTX 5060. Both cross-adapter paths passed.
+- Shading met the 1080p budget in the loaded test. The idle-gap measurement remained above target.
+
 ## 2026-11-22 - Session 8: version 1.0.0, installer, Smart parallax groundwork
 
 - **Version 1.0.0.** Single source: root `CMakeLists.txt` `project(MoonSR VERSION ...)` -> generated `core/version.h`

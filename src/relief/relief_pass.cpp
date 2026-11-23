@@ -1,9 +1,8 @@
-// Smart parallax (screen-space relief): tier T1 "relief shading" (milestones M1 + M2 of
+// Smart parallax (screen-space relief): Shading and Parallax (milestones M1–M3 of
 // documentation/research/screen_space_relief.md). Owner: upscaling-engineer. Clean-room implementation from the papers
 // cited in the research note; no third-party shader code was read or used.
 //
-// State: FIRST ITERATION of T1. Parallax (T2) and Motion depth (T3) are NOT built: both fall back to relief shading and
-// say so in ReliefStats::reason.
+// Motion depth fits a dominant plane and fuses residual depth when matching frame-generator flow exists.
 //
 // Analyse (once per real frame, game resolution, original capture read in place through a cached view; copied only
 // when the capture is not shader-bindable), 5 compute passes:
@@ -17,11 +16,11 @@
 //           temporal history (motion-warped when a MotionFieldView is supplied) (full size)
 // Apply (once per displayed frame, output resolution): normals from H, fixed light, directional shading + cavity
 // darkening, soft-capped at +-15 % in linear light, scaled by P and the fade; debug views and the Split A/B view
-// (relief_apply_ps.hlsl). Generated frames (phase < 1) fetch H and P warped by the prev -> curr motion when available.
+// (relief_apply_ps.hlsl). Parallax resamples colour along a position-driven ray. Generated frames
+// reconstruct H and P from both real-frame analyses with the same pair's flow when available.
 //
-// Missing (later milestones): parallax offset and march (M3), protection from motion discontinuities / flow confidence,
-// generated-frame confidence scaling, history of P (M4), Motion depth (M5), "follow scene light" (the Fixed light is
-// used for both settings), pixel-art detection. The internal constants below are first-iteration values tuned on the
+// Missing: "follow scene light" (the Fixed light is used for both settings) and an independent
+// pixel-art detector. The internal constants below are first-iteration values tuned on the
 // synthetic scenes of `moonsr_bench --relief`, not on real games.
 //
 // Threading: pipeline thread only (owner of the GpuDevice immediate context). No per-frame heap allocation: game-size
@@ -34,11 +33,19 @@
 #include "framegen/frame_generator.h"
 
 #include "g_cs_relief_box1.h"
+#include "g_cs_relief_box1_r3.h"
 #include "g_cs_relief_box2.h"
+#include "g_cs_relief_box2_r3.h"
 #include "g_cs_relief_gate.h"
 #include "g_cs_relief_height.h"
 #include "g_cs_relief_luma.h"
+#include "g_cs_relief_motion_depth.h"
+#include "g_cs_relief_motion_fit.h"
 #include "g_ps_relief_apply.h"
+#include "g_ps_relief_apply_pair.h"
+#include "g_ps_relief_motion_apply.h"
+#include "g_ps_relief_parallax.h"
+#include "g_ps_relief_parallax_pair.h"
 #include "g_vs_fullscreen.h"
 
 #include <wrl/client.h>
@@ -81,7 +88,7 @@ constexpr float kSigmaFloor = 0.02f;     // stops noise / grain / dark regions f
 constexpr float kTexGate[4] = {0.012f, 0.045f, 0.8f, 1.4f}; // sigma_local ramps (log2 luma)
 constexpr float kEdgeGate[2] = {0.22f, 0.55f};              // |grad B| ramp (stops per px), dilated 3 px
 constexpr float kHistoryAlpha = 0.35f;   // new-estimate weight where history is valid
-constexpr float kFrameChangedMin = 0.1f; // share of changed pixels (|dL| > 0.01 stop) for the HUD counter to advance
+constexpr float kFrameChangedMin = 0.1f; // share of pixels changing beyond the noise floor for the HUD counter to advance
 constexpr float kMaxDelta = 0.15f;       // soft cap of the luminance change (fraction of linear luminance)
 // Gains per unit strength. Directional shading dominates cavity darkening, so borders read as lit bevels (highlight on
 // the light-facing edge, shadow on the opposite edge) rather than as uniformly darkened outlines.
@@ -108,18 +115,22 @@ struct alignas(16) ApplyCB {
     float light[4];
     float shadeGain, cavityGain, maxDelta, bump;
     uint32_t debug;
-    float splitX, warp;
+    float splitX, phase;
     uint32_t srcLinear;
     float cellInv[2];
     uint32_t cells[2];
     float tapPx;
-    float pad[3];
+    float parallaxPx;
+    float outTexel[2];
+    uint32_t protectCharacters, hasMotion, hasHistory, hasDepthHistory;
 };
 static_assert(sizeof(ApplyCB) % 16 == 0);
 
 constexpr uint32_t kFlagHud = 1, kFlagEdges = 2, kFlagAuto = 4, kFlagMotion = 8, kFlagMotionCut = 16, kFlagReset = 32;
+constexpr uint32_t kFlagDepthHistory = 64;
+constexpr uint32_t kDepthFitBytes = 48;
 constexpr uint32_t kStateSlots = 16;
-enum StateSlot : uint32_t { kFade = 0, kCovEma, kHudEma, kMeanY, kReason, kFrames, kCov, kHud, kCut, kChanged };
+enum StateSlot : uint32_t { kFade = 0, kCovEma, kHudEma, kMeanY, kReason, kFrames, kCov, kHud, kCut, kChanged, kMotionFit };
 
 bool IsLinearFormat(DXGI_FORMAT f) {
     switch (f) {
@@ -140,9 +151,14 @@ public:
         ID3D11Device1* d = device_.Device();
         HRESULT hr = d->CreateVertexShader(g_vs_fullscreen, sizeof(g_vs_fullscreen), nullptr, &vs_);
         if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_relief_apply, sizeof(g_ps_relief_apply), nullptr, &psApply_);
+        if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_relief_parallax, sizeof(g_ps_relief_parallax), nullptr, &psParallax_);
+        if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_relief_apply_pair, sizeof(g_ps_relief_apply_pair), nullptr, &psApplyPair_);
+        if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_relief_parallax_pair, sizeof(g_ps_relief_parallax_pair), nullptr, &psParallaxPair_);
         if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_luma, sizeof(g_cs_relief_luma), nullptr, &csLuma_);
         if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_box1, sizeof(g_cs_relief_box1), nullptr, &csBox_[0]);
         if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_box2, sizeof(g_cs_relief_box2), nullptr, &csBox_[1]);
+        if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_box1_r3, sizeof(g_cs_relief_box1_r3), nullptr, &csBoxR3_[0]);
+        if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_box2_r3, sizeof(g_cs_relief_box2_r3), nullptr, &csBoxR3_[1]);
         if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_height, sizeof(g_cs_relief_height), nullptr, &csHeight_);
         if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_relief_gate, sizeof(g_cs_relief_gate), nullptr, &csGate_);
         if (FAILED(hr)) {
@@ -255,6 +271,7 @@ public:
         motionFlow_ = motionValid_ ? motion->flow : nullptr; // kept (AddRef) for Apply of generated frames
         motionCells_ = motionValid_ ? motion->cells : Size{};
         motionCellPx_ = motionValid_ ? motion->cellSizePx : 0.0f;
+        const bool useDepth = settings_.tier == ReliefTier::MotionDepth && motionValid_ && EnsureMotionDepth(motionCells_);
 
         AnalyseCB c{};
         c.srcOffset[0] = srcOffset[0];
@@ -273,6 +290,8 @@ public:
         c.flags = (settings_.protectHud ? kFlagHud : 0) | (settings_.protectEdges ? kFlagEdges : 0) |
                   (settings_.autoDisable ? kFlagAuto : 0) | (motionValid_ ? kFlagMotion : 0) |
                   (motionValid_ && motion->stats ? kFlagMotionCut : 0) | (resetPending_ ? kFlagReset : 0);
+        depthHistoryValid_ = useDepth && depthAnalysed_ && !resetPending_;
+        if (depthHistoryValid_) c.flags |= kFlagDepthHistory;
         c.sceneCutIndex = motionValid_ ? motion->sceneCutIndex : 0;
         if (motionValid_) {
             c.cellInv[0] = c.cellInv[1] = 1.0f / motion->cellSizePx;
@@ -285,28 +304,36 @@ public:
             EndTiming(analyseQ_, q);
             return false;
         }
+        historyValid_ = !resetPending_ && analysedFrames_ != 0;
         resetPending_ = false;
 
         const UINT zeros[4] = {0, 0, 0, 0};
         ctx->ClearUnorderedAccessViewUint(stats_.uav.Get(), zeros);
         ctx->CSSetConstantBuffers(0, 1, cbAnalyse_.GetAddressOf());
         ctx->CSSetSamplers(0, 1, linClamp_.GetAddressOf());
-        const UINT g16x = (size.width + 15) / 16, g16y = (size.height + 15) / 16;
+        const UINT gLumaX = (size.width + 15) / 16, gLumaY = (size.height + 15) / 16;
         const UINT g8fx = (size.width + 7) / 8, g8fy = (size.height + 7) / 8;
 
         const UINT gHx = ((size.width + 1) / 2 + 15) / 16, gHy = ((size.height + 1) / 2 + 15) / 16; // half size
-        Dispatch(csLuma_.Get(), {srcView}, {l_[cur_].uav.Get()}, g16x, g16y);
-        Dispatch(csBox_[0].Get(), {l_[cur_].srv.Get()}, {t1_.uav.Get()}, gHx, gHy);
-        Dispatch(csBox_[1].Get(), {t1_.srv.Get()}, {t2_.uav.Get()}, gHx, gHy);
+        Dispatch(csLuma_.Get(), {srcView}, {l_[cur_].uav.Get()}, gLumaX, gLumaY);
+        const auto& boxShaders = c.radius == 3 ? csBoxR3_ : csBox_;
+        Dispatch(boxShaders[0].Get(), {l_[cur_].srv.Get()}, {t1_.uav.Get()}, gHx, gHy);
+        Dispatch(boxShaders[1].Get(), {t1_.srv.Get()}, {t2_.uav.Get()}, gHx, gHy);
         Dispatch(csGate_.Get(),
                  {l_[cur_].srv.Get(), t2_.srv.Get(), count_[prev].srv.Get(), l_[prev].srv.Get(),
                   motionValid_ ? motion->stats : nullptr},
-                 {p_.uav.Get(), stats_.uav.Get(), state_.uav.Get(), count_[cur_].uav.Get()}, gHx, gHy);
+                 {p_[cur_].uav.Get(), stats_.uav.Get(), state_.uav.Get(), count_[cur_].uav.Get()}, gHx, gHy);
         Dispatch(csHeight_.Get(),
                  {t2_.srv.Get(), l_[cur_].srv.Get(), nullptr, h_[prev].srv.Get(),
                   motionValid_ ? motion->flow : nullptr, motionValid_ ? motion->stats : nullptr, state_.srv.Get(),
-                  p_.srv.Get()},
+                  p_[cur_].srv.Get()},
                  {h_[cur_].uav.Get()}, g8fx, g8fy);
+        depthAnalysed_ = useDepth;
+        if (useDepth) {
+            Dispatch(csMotionFit_.Get(), {motionFlow_.Get(), p_[cur_].srv.Get()}, {motionFit_.uav.Get(), state_.uav.Get()}, 1, 1);
+            Dispatch(csMotionDepth_.Get(), {motionFlow_.Get(), motionFit_.srv.Get(), motionDepth_[prev].srv.Get(), state_.srv.Get()},
+                     {motionDepth_[cur_].uav.Get()}, (motionCells_.width + 7) / 8, (motionCells_.height + 7) / 8);
+        }
         ID3D11Buffer* nullCb = nullptr;
         ctx->CSSetConstantBuffers(0, 1, &nullCb);
 
@@ -324,7 +351,7 @@ public:
     }
 
     bool Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
-               const RectI& contentInDst, float phase) override {
+               const RectI& contentInDst, float phase, float outputPixelScale) override {
         if (!src || !dst || srcSize.Empty() || srcSize != dstSize) {
             if (!applyArgsLogged_) {
                 applyArgsLogged_ = true;
@@ -371,13 +398,20 @@ public:
         c.bump = kBump;
         c.tapPx = std::max(1.0f, settings_.detailScalePx / 1.5f); // 1 game px at the old 1.5 px detail size
         c.debug = static_cast<uint32_t>(settings_.debugView);
-        if (settings_.debugView == ReliefDebugView::Offset || settings_.debugView == ReliefDebugView::Depth)
-            c.debug = 0; // parallax / motion-depth views do not exist yet: show the shaded result
+        if (settings_.tier >= ReliefTier::Parallax)
+            c.parallaxPx = settings_.strength * settings_.parallaxMaxPx / std::max(1.0f, outputPixelScale);
+        c.outTexel[0] = 1.0f / static_cast<float>(dstSize.width);
+        c.outTexel[1] = 1.0f / static_cast<float>(dstSize.height);
         c.splitX = c.content[0] + std::floor(0.5f * c.content[2]);
-        const bool warp = motionValid_ && motionFlow_ && phase > 0.0f && phase < 1.0f;
-        c.warp = warp ? 1.0f - phase : 0.0f;
+        const bool hasMotion = motionValid_ && motionFlow_;
+        const bool depth = settings_.tier == ReliefTier::MotionDepth && depthAnalysed_;
+        c.phase = ClampFinite(phase, 0.0f, 1.0f, 1.0f);
+        c.hasHistory = historyValid_ ? 1u : 0u;
+        c.hasMotion = hasMotion ? 1u : 0u;
+        c.hasDepthHistory = depthHistoryValid_ ? 1u : 0u;
         c.srcLinear = IsLinearFormat(svd.Format) ? 1u : 0u;
-        if (warp) {
+        c.protectCharacters = settings_.protectCharacters ? 1u : 0u;
+        if (hasMotion) {
             c.cellInv[0] = c.cellInv[1] = 1.0f / motionCellPx_;
             c.cells[0] = motionCells_.width;
             c.cells[1] = motionCells_.height;
@@ -389,20 +423,28 @@ public:
             ctx->IASetInputLayout(nullptr);
             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             ctx->VSSetShader(vs_.Get(), nullptr, 0);
-            ctx->PSSetShader(psApply_.Get(), nullptr, 0);
+            const bool pair = hasMotion || (historyValid_ && c.phase < 1.0f);
+            auto* ps = c.parallaxPx > 0.0f ? (pair ? psParallaxPair_.Get() : psParallax_.Get())
+                                         : (pair ? psApplyPair_.Get() : psApply_.Get());
+            ctx->PSSetShader(depth ? psMotionDepth_.Get() : ps, nullptr, 0);
             ctx->RSSetState(nullptr);
             ctx->RSSetViewports(1, &vp);
             ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
             ctx->OMSetDepthStencilState(nullptr, 0);
             ctx->OMSetRenderTargets(1, &dst, nullptr);
-            ID3D11ShaderResourceView* srvs[5] = {src, h_[cur_].srv.Get(), p_.srv.Get(), state_.srv.Get(),
-                                                 warp ? motionFlow_.Get() : nullptr};
-            ctx->PSSetShaderResources(0, 5, srvs);
+            const uint32_t prev = cur_ ^ 1u;
+            ID3D11ShaderResourceView* srvs[] = {src, h_[cur_].srv.Get(), p_[cur_].srv.Get(), state_.srv.Get(),
+                                               hasMotion ? motionFlow_.Get() : nullptr,
+                                               depth ? motionDepth_[cur_].srv.Get() : nullptr,
+                                               historyValid_ ? h_[prev].srv.Get() : nullptr,
+                                               historyValid_ ? p_[prev].srv.Get() : nullptr,
+                                               depth && depthHistoryValid_ ? motionDepth_[prev].srv.Get() : nullptr};
+            ctx->PSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
             ctx->PSSetConstantBuffers(0, 1, cbApply_.GetAddressOf());
             ctx->PSSetSamplers(0, 1, linClamp_.GetAddressOf());
             ctx->Draw(3, 0);
-            ID3D11ShaderResourceView* nullSrv[5] = {};
-            ctx->PSSetShaderResources(0, 5, nullSrv);
+            ID3D11ShaderResourceView* nullSrv[std::size(srvs)] = {};
+            ctx->PSSetShaderResources(0, static_cast<UINT>(std::size(nullSrv)), nullSrv);
             ctx->OMSetRenderTargets(0, nullptr, nullptr);
         }
         EndTiming(applyQ_, q);
@@ -413,13 +455,16 @@ public:
     void Reset() override {
         resetPending_ = true; // next Analyse: no history, HUD counter cleared, fade restarts from 0
         motionValid_ = false;
+        depthAnalysed_ = false;
+        depthHistoryValid_ = false;
+        historyValid_ = false;
         motionFlow_.Reset();
         lastQpc_ = 0;
     }
 
     ReliefStats Stats() const override {
         ReliefStats st;
-        st.tierInEffect = settings_.tier == ReliefTier::Off ? ReliefTier::Off : ReliefTier::Shading;
+        st.tierInEffect = depthAnalysed_ ? settings_.tier : std::min(settings_.tier, ReliefTier::Parallax);
         st.analyseGpuMs = Median(analyseQ_);
         st.applyGpuMs = Median(applyQ_);
         if (settings_.tier == ReliefTier::Off) return st;
@@ -430,8 +475,11 @@ public:
         st.active = haveState && fade > 0.0f && analysedFrames_ > 0;
         st.texturedCoverage = st.active ? std::clamp(stateVals_[kCov], 0.0f, 1.0f) : 0.0f;
         std::wstring why;
-        if (settings_.tier == ReliefTier::Parallax || settings_.tier == ReliefTier::MotionDepth)
-            why = L"Parallax is not built yet; showing relief shading.";
+        if (settings_.tier == ReliefTier::MotionDepth && !depthAnalysed_)
+            why = depthFailed_ ? L"Motion depth resources unavailable. Using Parallax."
+                               : L"Waiting for motion from a pair of real frames. Using Parallax.";
+        else if (depthAnalysed_ && haveState && stateVals_[kMotionFit] > 2.5f && stateVals_[kCut] < 0.5f)
+            why = L"Motion depth is waiting for reliable flow.";
         auto add = [&why](const wchar_t* s) {
             if (!why.empty()) why += L' ';
             why += s;
@@ -519,6 +567,33 @@ private:
         return hr;
     }
 
+    bool EnsureMotionDepth(Size cells) {
+        if (depthFailed_) return false;
+        if (cells == depthCells_) return true;
+        depthAnalysed_ = false;
+        ID3D11Device1* d = device_.Device();
+        HRESULT hr = S_OK;
+        if (!csMotionFit_) {
+            hr = d->CreateComputeShader(g_cs_relief_motion_fit, sizeof(g_cs_relief_motion_fit), nullptr, &csMotionFit_);
+            if (SUCCEEDED(hr))
+                hr = d->CreateComputeShader(g_cs_relief_motion_depth, sizeof(g_cs_relief_motion_depth), nullptr, &csMotionDepth_);
+            if (SUCCEEDED(hr))
+                hr = d->CreatePixelShader(g_ps_relief_motion_apply, sizeof(g_ps_relief_motion_apply), nullptr, &psMotionDepth_);
+            if (SUCCEEDED(hr)) hr = CreateRawBuffer(kDepthFitBytes, motionFit_);
+        }
+        for (Tex& depth : motionDepth_)
+            if (SUCCEEDED(hr)) hr = CreateTex(cells, DXGI_FORMAT_R16G16B16A16_FLOAT, depth);
+        if (FAILED(hr)) {
+            MSR_LOG_WARN(L"Smart parallax: Motion depth resources failed ({}); using Parallax", HrToString(hr));
+            motionDepth_ = {};
+            motionFit_ = {};
+            depthFailed_ = true;
+            return false;
+        }
+        depthCells_ = cells;
+        return true;
+    }
+
     // Cached shader-resource view of a capture pool texture (round-robin over kViews entries; views are created only
     // when a texture is seen for the first time, so the steady state allocates nothing).
     ID3D11ShaderResourceView* CaptureView(ID3D11Texture2D* tex) {
@@ -577,7 +652,8 @@ private:
             hr = CreateTex(halfSize, DXGI_FORMAT_R16G16_UNORM, count_[i]);
         if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R32G32_FLOAT, t1_);
         if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R16G16_FLOAT, t2_);
-        if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R8G8B8A8_UNORM, p_); // gates (hud, edge x tex, changed, encoded sigma)
+        for (Tex& gate : p_)
+            if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R8G8B8A8_UNORM, gate);
         if (FAILED(hr)) {
             MSR_LOG_ERROR(L"Smart parallax: analysis resources {}x{} (capture format {}) failed: {}", s.width, s.height,
                           static_cast<int>(captureFormat), HrToString(hr));
@@ -589,6 +665,7 @@ private:
         srcFormat_ = captureFormat;
         analysedFrames_ = 0;
         resetPending_ = true;
+        depthAnalysed_ = false;
         return true;
     }
 
@@ -692,9 +769,11 @@ private:
     GpuDevice& device_;
     ReliefSettings settings_;
     ComPtr<ID3D11VertexShader> vs_;
-    ComPtr<ID3D11PixelShader> psApply_;
+    ComPtr<ID3D11PixelShader> psApply_, psParallax_, psApplyPair_, psParallaxPair_;
     ComPtr<ID3D11ComputeShader> csLuma_, csGate_, csHeight_;
-    std::array<ComPtr<ID3D11ComputeShader>, 2> csBox_;
+    ComPtr<ID3D11ComputeShader> csMotionFit_, csMotionDepth_;
+    ComPtr<ID3D11PixelShader> psMotionDepth_;
+    std::array<ComPtr<ID3D11ComputeShader>, 2> csBox_, csBoxR3_;
     ComPtr<ID3D11Buffer> cbAnalyse_, cbApply_;
     ComPtr<ID3D11SamplerState> linClamp_;
     RawBuf stats_, state_;
@@ -714,10 +793,14 @@ private:
     ComPtr<ID3D11Texture2D> srcCopy_; // fallback when the capture cannot be bound as a shader resource
     ComPtr<ID3D11ShaderResourceView> srcSrv_;
     DXGI_FORMAT srcFormat_ = DXGI_FORMAT_UNKNOWN;
-    std::array<Tex, 2> l_, h_, count_;
-    Tex t1_, t2_, p_;
+    std::array<Tex, 2> l_, h_, count_, p_;
+    Tex t1_, t2_;
+    std::array<Tex, 2> motionDepth_;
+    RawBuf motionFit_;
+    Size depthCells_;
+    bool depthAnalysed_ = false, depthHistoryValid_ = false, depthFailed_ = false;
     uint32_t cur_ = 0;
-    bool resetPending_ = true;
+    bool resetPending_ = true, historyValid_ = false;
 
     ComPtr<ID3D11ShaderResourceView> motionFlow_;
     Size motionCells_;
@@ -740,7 +823,7 @@ std::unique_ptr<ReliefPass> ReliefPass::Create(GpuDevice& device, std::wstring& 
         MSR_LOG_ERROR(L"Smart parallax unavailable: {}", error);
         return nullptr;
     }
-    MSR_LOG_INFO(L"Smart parallax pass created (T1 relief shading, first iteration; parallax not built)");
+    MSR_LOG_INFO(L"Smart parallax pass created");
     return pass;
 }
 

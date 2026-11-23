@@ -18,6 +18,43 @@ No estimates, no third-party figures presented as ours. "Not measured" is a vali
 Not available on this machine: any Intel GPU, any GPU older than the listed ones, a VRR measurement rig, a latency
 photodiode. Compatibility with those is therefore unverified.
 
+## Smart parallax playtest build (2026-11-23)
+
+Working tree based on `8a975b9`, benchmark source fingerprint `ddcc6a97fd59b8e4`. Hardware and driver versions
+are listed above. Times are GPU timestamp medians. Analyse runs per real frame and Apply per displayed frame.
+
+The RTX 5060 1920×1080 input and output test used `moonsr_bench --relief --relief-strengths 0.5,1 --adapter 5060`
+and the same command with `--relief-parallax`. Timing uses 50% strength for Shading, 100% and a 3 px cap for
+Parallax, default detail, and no frame generation. The loaded case uses filler copies between relief frames.
+
+| Tier | Loaded total (ms) | Idle-gap total (ms) |
+|---|---:|---:|
+| Shading | 0.2423 | 0.2949 |
+| Parallax | 0.3061 | 0.3342 |
+
+With relief off, the engine does not create or dispatch the relief stage. This was verified from the engine code
+path. The test above does not measure application pacing with relief off.
+
+`moonsr_bench --relief-motion-depth --adapter 5060 --adapter A400 --adapter Radeon` used a 640×352 input and output,
+100% strength, default detail and 2 px cap. The fixture supplied 8 px cell flow from known camera and object motion.
+These times cover relief only, after the flow exists, with a real frame displayed.
+
+| Adapter | Parallax analyse + apply (ms) | Motion depth analyse + apply (ms) |
+|---|---:|---:|
+| RTX 5060 | 0.0302 + 0.0201 | 0.0836 + 0.0227 |
+| RTX A400 | 0.2014 + 0.1534 | 0.2743 + 0.1683 |
+| Radeon iGPU | Correctness only | Correctness only |
+
+On the RTX 5060, mean RGB change inside the independently moving patch fell from 2.677 to 0.258 code values.
+All three adapters passed the tests for rotation-only motion, the synthetic near plane and moving object,
+stationary 2× and 4× generated phases, and the simulated scene cut. Live generated-frame quality is pending.
+
+The ordered-stage integration was also checked with Windows Graphics Capture on the animated test pattern
+at 640×360 input and 1920×1080 output. Motion depth reached its active tier with generation off, before and
+after fixed 2× generation, and before MoonSR temporal upscaling. With the RTX 5060 as the main GPU and the
+RTX A400 selected for relief, both the D3D12 cross-adapter path and forced CPU staging presented frames. This
+check was for routing and correctness. Its GPU numbers are separate from the single-device timing table.
+
 ## Reference technologies — what can be measured here
 
 | Reference | Status | Reason |

@@ -37,6 +37,7 @@ cbuffer ReliefAnalyseCB : register(b0)
 #define RELIEF_F_MOTION        8u
 #define RELIEF_F_MOTION_CUT    16u
 #define RELIEF_F_RESET         32u  // first frame after a reset: no history, HUD counter cleared
+#define RELIEF_F_DEPTH_HISTORY 64u
 
 // Frame statistics buffer (written by the half-size gate pass), byte offsets. Each counter is spread over RS_SLOTS
 // addresses (chosen by thread group) so that thousands of groups do not serialise on one global atomic. The LAST group
@@ -44,9 +45,9 @@ cbuffer ReliefAnalyseCB : register(b0)
 #define RS_SLOTS       64
 #define RS_COUNTERS    5
 #define RS_ADDR(c, slot) ((((c) * RS_SLOTS) + (slot)) * 4)
-#define RS_TEXTURED    0   // pixels with P > 0.25 (received relief)
+#define RS_TEXTURED    0   // textured pixels (edge gate x texture gate > 0.25; HUD-protected pixels included)
 #define RS_HUD         1   // textured pixels (texture gate > 0.1) with HUD protection > 0.5
-#define RS_CHANGED     2   // pixels whose L (2x2 mean) changed by more than 0.01 stop since the previous frame
+#define RS_CHANGED     2   // pixels whose L (2x2 mean) changed beyond the luminance-dependent noise floor
 #define RS_ABSDL       3   // sum of truncated |dL| * 32 per pixel (|dL| saturates at 8 stops; no overflow up to 4K)
 #define RS_SUMY        4   // sum of truncated linear Y * 64 per pixel
 #define RS_DONE        ((RS_COUNTERS * RS_SLOTS) * 4) // finished-group counter
@@ -61,6 +62,7 @@ cbuffer ReliefAnalyseCB : register(b0)
 #define RST_HUD        28
 #define RST_CUT        32
 #define RST_CHANGED    36
+#define RST_MOTION_FIT 40  // mode from motion fit, as float
 #define RST_SLOTS      16  // buffer size in 32-bit slots
 
 float SrgbToLinear(float c)
