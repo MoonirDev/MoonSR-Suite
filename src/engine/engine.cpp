@@ -122,6 +122,7 @@ struct Engine::Impl {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> neuralOriginal, neuralGuide;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> neuralGuideRtv;
     Size neuralOriginalSize, neuralGuideSize;
+    double neuralCallMsAvg = 0.0, neuralCallMsMax = 0.0; // pipeline-thread time per NeuralProcess call
 
     bool StartNeural(std::wstring& error) {
         GpuDevice& nr = NrDevice();
@@ -247,8 +248,13 @@ struct Engine::Impl {
             }
         }
         ID3D11Texture2D* result = nullptr; RectI resultRect;
+        const int64_t start = QpcNow();
         if (!neural->ProcessWithGuide(tex, rect, guide, qpc, ++neuralOutputSequence, neuralReset,
                                       picture, result, resultRect, error)) return false;
+        // Pipeline-thread time spent in the bridge (submission, plus any wait the runtime does): logged with the stats.
+        const double ms = QpcToMs(QpcNow() - start);
+        neuralCallMsAvg = neuralCallMsAvg <= 0.0 ? ms : neuralCallMsAvg * 0.9 + ms * 0.1;
+        neuralCallMsMax = std::max(neuralCallMsMax, ms);
         neuralReset = false;
         tex = result; rect = resultRect;
         return true;
@@ -2061,6 +2067,12 @@ struct Engine::Impl {
                                  periodMs, periodSlowMs, outputRefreshHz, stats.frameGenTargetFps, stats.frameGenRatio,
                                  stats.latencyMs, stats.generatedLate,
                                  stats.framesDropped, stats.frameGenNote.empty() ? L"" : L" | ", stats.frameGenNote);
+                    if (neural) {
+                        MSR_LOG_INFO(L"Stats: neural rendering call {:.2f} ms average, {:.2f} ms max (pipeline thread), "
+                                     L"present call {:.2f} ms, swapchain wait {:.2f} ms",
+                                     neuralCallMsAvg, neuralCallMsMax, presentCallAvg, swapchainWaitAvg);
+                        neuralCallMsMax = 0.0;
+                    }
                 }
                 windowStart = QpcNow();
                 windowCaptured = windowPresented = windowGenerated = 0;

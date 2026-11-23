@@ -62,6 +62,7 @@ struct TestOptions {
     // --test-nr-import amd-zip|amd-files|intel-zip|intel-folder|intel-weights <path[;path...]>: run that import at start-up
     // (into the folders beside this MoonSR.exe, so use a scratch copy); the result goes to --test-nr-report <file>.
     std::wstring nrImportKind, nrImportPaths, nrReport;
+    std::wstring fp16File;           // --test-fp16-file <file>: treat this file's SHA-256 as an FP16-patched model (test only)
     std::wstring nrGpu;              // --test-nr-gpu <name substring>: GPU for the Neural rendering stage (not persisted)
     int nrSetupExpand = -1;          // --test-nr-setup expand|collapse: overrides the remembered setup panel state
 };
@@ -159,7 +160,7 @@ private:
     void OnPictureChange();
 
     // Neural rendering guided setup (top of the Neural rendering page)
-    enum class SetupAction { None, ImportNvidiaModel, ReviewLocalModel, AmdZip, AmdFiles, IntelZip, IntelFolder, IntelWeights };
+    enum class SetupAction { None, ImportNvidiaModel, ReviewLocalModel, UseFp16Model, AmdZip, AmdFiles, IntelZip, IntelFolder, IntelWeights };
     enum class SetupState { Ready, Needed, NotSupported, Checking };
     struct GpuSetup {
         SetupState state = SetupState::Needed;
@@ -170,6 +171,8 @@ private:
         std::wstring primaryText, secondaryText, link, linkText, link2, link2Text;
     };
     GpuSetup EvaluateGpu(const AdapterInfo& adapter);
+    static std::wstring Fp16NeededText(const ModelInfo& standard);
+    std::wstring Fp16Problem() const;  // plain explanation when NR would run on RTX 20/30/40 without the FP16 model
     void UpdateSetupPanel();
     void OnSetupAction(SetupAction action);
     void BeginRuntimeImport(nr::ImportKind kind, std::vector<std::wstring> paths);

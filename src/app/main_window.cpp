@@ -44,7 +44,6 @@ constexpr UINT WM_APP_TEST_LATE = WM_APP + 1;
 constexpr UINT WM_APP_MODELS_DONE = WM_APP + 2;
 constexpr UINT WM_APP_AMDCHECK_DONE = WM_APP + 5;   // background AMDNR load check finished
 constexpr UINT WM_APP_IMPORT_PROGRESS = WM_APP + 6; // runtime import: new progress line in importProgress_
-constexpr wchar_t kFp16RuntimeHash[] = L"cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed";
 
 using Severity = ui::InfoBar::Severity;
 
@@ -265,6 +264,7 @@ TestOptions ParseTestOptions() {
         }
         else if (a == L"--test-nr-report") t.nrReport = next();
         else if (a == L"--test-nr-gpu") t.nrGpu = next();
+        else if (a == L"--test-fp16-file") t.fp16File = next();
         else if (a == L"--test-nr-setup") t.nrSetupExpand = next() == L"collapse" ? 0 : 1;
         else if (a == L"--test-wheel") {
             const std::wstring v = next();
@@ -336,6 +336,12 @@ bool MainWindow::Create(HINSTANCE instance, int showCmd, const TestOptions& test
             dir += L"MoonSR-test-models";
         }
         testStore_ = std::make_unique<ModelStore>(dir);
+        if (!test_.fp16File.empty()) {  // --test-fp16-file: treat this file's SHA-256 as an FP16-patched model
+            ModelInfo fi;
+            std::wstring err;
+            if (ModelStore::Inspect(test_.fp16File, fi, err)) nr::AddTestFp16Hash(fi.sha256);
+            else MSR_LOG_WARN(L"--test-fp16-file: {}", err);
+        }
         MSR_LOG_INFO(L"Test mode: model store {}", testStore_->Directory());
     }
     if (!gfx_.Init()) return false;
@@ -1702,6 +1708,10 @@ void MainWindow::StartScaling(HWND target) {
         engineActive_ = true;
         lastFailed_ = false;
         SetMessage(targetTitle_.empty() ? L"Scaling." : std::format(L"Scaling: {}", targetTitle_));
+        if (cfg.neuralRendering) {
+            const std::wstring problem = Fp16Problem();
+            if (!problem.empty()) SetNeuralMessage(problem, Severity::Warning);
+        }
     } else {
         engine_.Stop();
         lastFailed_ = true;
@@ -1826,9 +1836,12 @@ void MainWindow::ShowStats(const EngineStats& st) {
     ui_.orderNow->SetVisible(true);
     ui_.orderNote->Set(Severity::Warning, st.pipelineOrderNote);
     ui_.orderNote->SetVisible(!st.pipelineOrderNote.empty());
+    // On RTX 20/30/40 the standard model cannot run: say why in plain words instead of the engine's generic note.
+    const std::wstring fp16Problem = (!st.neuralRenderingActive && ui_.neural->checked()) ? Fp16Problem() : std::wstring();
+    const std::wstring& nrNote = fp16Problem.empty() ? st.neuralRenderingNote : fp16Problem;
     for (ui::InfoBar* bar : {ui_.neuralNote, ui_.neuralHomeNote}) {
-        bar->Set(Severity::Warning, st.neuralRenderingNote);
-        bar->SetVisible(!st.neuralRenderingNote.empty());
+        bar->Set(Severity::Warning, nrNote);
+        bar->SetVisible(!nrNote.empty());
     }
     ui_.alsrNote->Set(Severity::Warning, st.alsrNote);
     ui_.alsrNote->SetVisible(!st.alsrNote.empty() && AlsrSelected());
@@ -2172,7 +2185,7 @@ void MainWindow::RefreshModels() {
     int select = -1, firstNeural = -1;
     for (size_t i = 0; i < models_.size(); ++i) {
         auto name = models_[i].displayName;
-        if (EqualNoCase(models_[i].sha256, kFp16RuntimeHash)) name += L" (FP16)";
+        if (nr::IsFp16RuntimeHash(models_[i].sha256)) name += L" (FP16)";
         ui_.activeModel->AddItem(name, static_cast<long long>(i));
         if (models_[i].id == selectedModelId_) select = static_cast<int>(i);
         if (firstNeural < 0 && models_[i].kind == ModelKind::DlssNeuralRendering) firstNeural = static_cast<int>(i);
@@ -2229,6 +2242,8 @@ void MainWindow::UpdateNeuralState() {
                           : L"Add d5c_chain.dll, its shaders and dlssnr-logical.safetensors to the intel-nr folder.";
     else if (models_.empty()) desc = L"Add a model file first";
     else if (!avail) desc = L"Select a DLSS Neural Rendering model first";
+    if (avail && !Fp16Problem().empty())
+        desc = L"This GPU needs the FP16-patched model; the active one is the standard model.";
     ui_.neuralRow->desc = desc;
     UpdateSetupPanel();
     view_.Invalidate();
@@ -2343,7 +2358,7 @@ void MainWindow::ShowImportDialog(const ModelInfo& m, const std::wstring& path) 
         kindTone = Tone::Warning;
         break;
     }
-    if (EqualNoCase(m.sha256, kFp16RuntimeHash)) kind += L" (FP16 for RTX 20/30/40)";
+    if (nr::IsFp16RuntimeHash(m.sha256)) kind += L" (FP16 for RTX 20/30/40)";
     spec.lines.push_back({L"Detected as", kind, kindTone, {}});
     spec.lines.push_back({L"File version", m.fileVersion.empty() ? std::wstring(L"not stated") : m.fileVersion, Tone::Normal, {}});
     std::wstring maker = m.productName;
@@ -2561,6 +2576,24 @@ void MainWindow::StartAmdLoadCheck() {
     }
 }
 
+std::wstring MainWindow::Fp16NeededText(const ModelInfo& standard) {
+    return L"FP16 model needed. RTX 20, 30 and 40 series cards need the FP16-patched nvngx_dlssnr.dll; the imported model (version " +
+           (standard.fileVersion.empty() ? std::wstring(L"unknown") : standard.fileVersion) +
+           L") is the standard one, which only runs on RTX 50 series.";
+}
+
+// Non-empty when neural rendering would run on an RTX 20/30/40 series GPU with a model that is not FP16-patched.
+std::wstring MainWindow::Fp16Problem() const {
+    const AdapterInfo* a = StageAdapter(PipelineStage::NeuralRendering);
+    if (!a) a = OutputAdapter();
+    if (!a || a->vendor != Vendor::Nvidia) return {};
+    const nr::GpuSupport sup = nr::ClassifyGpu(*a);
+    if (sup.support != nr::Support::Supported || !nr::NvidiaNeedsFp16(sup.nvidia)) return {};
+    const ModelInfo* m = SelectedModel();
+    if (!m || m->kind != ModelKind::DlssNeuralRendering || nr::IsFp16RuntimeHash(m->sha256)) return {};
+    return Fp16NeededText(*m);
+}
+
 MainWindow::GpuSetup MainWindow::EvaluateGpu(const AdapterInfo& a) {
     GpuSetup g;
     const nr::GpuSupport sup = nr::ClassifyGpu(a);
@@ -2573,14 +2606,14 @@ MainWindow::GpuSetup MainWindow::EvaluateGpu(const AdapterInfo& a) {
     }
     const std::wstring caution = sup.support == nr::Support::Unknown ? sup.reason + L" " : std::wstring();
     if (a.vendor == Vendor::Nvidia) {
-        const ModelInfo* model = nullptr;
-        for (const ModelInfo& m : models_)
-            if (m.kind == ModelKind::DlssNeuralRendering && (!model || m.id == selectedModelId_)) model = &m;
-        if (model) {
-            g.state = SetupState::Ready;
-            g.severity = Severity::Success;
-            g.status = L"Ready. DLSS Neural Rendering model imported: " + model->displayName + L".";
-        } else {
+        const ModelInfo* model = nullptr;      // the active model if it is a neural rendering model, else the first one
+        const ModelInfo* fp16Model = nullptr;  // an imported FP16-patched model
+        for (const ModelInfo& m : models_) {
+            if (m.kind != ModelKind::DlssNeuralRendering) continue;
+            if (!model || m.id == selectedModelId_) model = &m;
+            if (nr::IsFp16RuntimeHash(m.sha256) && (!fp16Model || m.id == selectedModelId_)) fp16Model = &m;
+        }
+        if (!model) {
             g.severity = Severity::Warning;
             g.status = L"Model needed. Import your own nvngx_dlssnr.dll (the DLSS Neural Rendering model); MoonSR checks "
                        L"and copies it. RTX 20, 30 and 40 series need the patched FP16 version.";
@@ -2590,7 +2623,32 @@ MainWindow::GpuSetup MainWindow::EvaluateGpu(const AdapterInfo& a) {
                 g.secondary = SetupAction::ReviewLocalModel;
                 g.secondaryText = L"Use the copy beside MoonSR";
             }
+            return g;
         }
+        if (nr::NvidiaNeedsFp16(sup.nvidia) && !nr::IsFp16RuntimeHash(model->sha256)) {
+            // RTX 20, 30 and 40 series cannot run the standard model: it needs the FP16-patched file.
+            g.severity = Severity::Warning;
+            if (fp16Model) {
+                g.status = L"FP16 model needed. The active model (version " +
+                           (model->fileVersion.empty() ? std::wstring(L"unknown") : model->fileVersion) +
+                           L") is the standard one, which only runs on RTX 50 series. You have imported an FP16 model; "
+                           L"switch to it.";
+                g.primary = SetupAction::UseFp16Model;
+                g.primaryText = L"Use the FP16 model";
+                g.secondary = SetupAction::ImportNvidiaModel;
+                g.secondaryText = L"Import nvngx_dlssnr.dll...";
+            } else {
+                g.status = Fp16NeededText(*model);
+                g.primary = SetupAction::ImportNvidiaModel;
+                g.primaryText = L"Import nvngx_dlssnr.dll...";
+            }
+            return g;
+        }
+        g.state = SetupState::Ready;
+        g.severity = Severity::Success;
+        g.status = caution + (nr::NvidiaNeedsFp16(sup.nvidia) ? L"Ready. FP16 DLSS Neural Rendering model: "
+                                                              : L"Ready. DLSS Neural Rendering model imported: ") +
+                   model->displayName + L".";
         return g;
     }
     if (a.vendor == Vendor::Amd) {
@@ -2738,9 +2796,9 @@ void MainWindow::UpdateSetupPanel() {
         slot.primary->SetVisible(show && g.primary != SetupAction::None);
         slot.secondary->SetText(g.secondaryText);
         slot.secondary->SetVisible(show && g.secondary != SetupAction::None);
-        const bool nvidiaAction = g.primary == SetupAction::ImportNvidiaModel;
+        const bool nvidiaAction = g.primary == SetupAction::ImportNvidiaModel || g.primary == SetupAction::UseFp16Model;
         slot.primary->SetEnabled(nvidiaAction ? !busy_ : canImport);
-        slot.secondary->SetEnabled(g.secondary == SetupAction::ReviewLocalModel ? !busy_ : canImport);
+        slot.secondary->SetEnabled(g.secondary == SetupAction::ReviewLocalModel || g.secondary == SetupAction::ImportNvidiaModel ? !busy_ : canImport);
         slot.link->text = g.linkText;
         slot.link2->text = g.link2Text;
         slot.link->SetVisible(show && !g.link.empty());
@@ -2793,6 +2851,18 @@ void MainWindow::OnSetupAction(SetupAction action) {
         modelFromSetup_ = true;
         OnAddModel();
         return;
+    case SetupAction::UseFp16Model: {
+        if (busy_ || engineActive_) return;
+        for (const ModelInfo& m : models_)
+            if (m.kind == ModelKind::DlssNeuralRendering && nr::IsFp16RuntimeHash(m.sha256)) {
+                selectedModelId_ = m.id;
+                RefreshModels();
+                OnNeuralChange();
+                SaveNow();
+                break;
+            }
+        return;
+    }
     case SetupAction::ReviewLocalModel: {
         if (busy_) return;
         const auto path = LocalNeuralModel();

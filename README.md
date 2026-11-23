@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.0.1**
+**Version 1.0.2**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -95,6 +95,10 @@ Binaries are written to `build\main\bin`:
 
 ## Releases
 
+- **1.0.2** (2026-11-22): fixes. Frame generation with neural rendering and V-Sync on no longer drops to about 95 fps
+  (60 fps game, 2X: now 120 fps, the same as with V-Sync off); the output window uses three buffers. The neural
+  rendering setup now requires the FP16-patched model on RTX 20, 30 and 40 series cards (identified by hardware ID,
+  including professional RTX cards) and explains it when the standard model is selected.
 - **1.0.1** (2026-11-22): guided neural rendering setup on the Neural rendering page (status per GPU, the next step for
   each, and Import buttons for `nvngx_dlssnr.dll`, the AMDNR release zip or files, and the DLSS5_INTEL bundle and
   weights); clearer supported-card wording; an Updates row in Settings with a link to the releases page; uninstalling

@@ -24,7 +24,12 @@ namespace moonsr::app::nr {
 // ------------------------------------------------------------------------------------------------ GPU support
 enum class Support { Supported, Unknown, NotSupported };
 
+// NVIDIA GPU architecture, by PCI device ID (ClassifyNvidia). Turing, Ampere and Ada run the DLSS Neural Rendering model
+// only as the FP16-patched nvngx_dlssnr.dll; Blackwell (RTX 50 series) and newer run the standard model.
+enum class NvidiaArch { Unknown, Turing, Ampere, Ada, Blackwell };
+
 struct GpuSupport {
+    NvidiaArch nvidia = NvidiaArch::Unknown;  // NVIDIA only
     Support support = Support::Unknown;
     std::wstring family;  // e.g. "RDNA 3 (Navi 31)", "GeForce RTX", "Arc A/B-series"
     std::wstring reason;  // plain-language reason when not Supported (empty otherwise)
@@ -34,6 +39,16 @@ struct GpuSupport {
 // RDNA 4 (Radeon RX 7000 / RX 9000) and RDNA 3-class APUs, by PCI device ID (ClassifyAmd). Intel: Arc A- and B-series.
 GpuSupport ClassifyGpu(const AdapterInfo& adapter);
 GpuSupport ClassifyAmd(uint32_t deviceId);
+// NVIDIA architecture from the PCI device ID (vendor 0x10DE), falling back to the adapter name only when the ID is not
+// in the table. Returns Unknown for data-centre parts (Hopper, GA100, GB100) and for IDs newer than the table.
+NvidiaArch ClassifyNvidia(uint32_t deviceId, const std::wstring& adapterName);
+const wchar_t* NvidiaArchName(NvidiaArch arch);  // "Turing (RTX 20 series)", ... ; L"" for Unknown
+inline bool NvidiaNeedsFp16(NvidiaArch a) { return a == NvidiaArch::Turing || a == NvidiaArch::Ampere || a == NvidiaArch::Ada; }
+
+// SHA-256 (lowercase hex) of the known FP16-patched nvngx_dlssnr.dll builds. Add new builds to kFp16RuntimeHashes in
+// nr_import.cpp. AddTestFp16Hash (the --test-fp16-file test option) adds one more for this process only.
+bool IsFp16RuntimeHash(const std::wstring& sha256);
+void AddTestFp16Hash(const std::wstring& sha256);
 
 // ------------------------------------------------------------------------------------------------ install status
 struct IntelFiles {

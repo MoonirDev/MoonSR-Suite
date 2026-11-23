@@ -190,3 +190,13 @@ Still open:
 - Saving the theme choice to `settings.ini`, and the import, export and remove dialogs for themes, were not clicked
   through live. The theme logic is covered by a 36-check self-test (`--test-theme-selftest`) only.
 - The app no longer follows the Windows light/dark setting. The default theme is Windows 11 Dark.
+
+## 1.0.2 notes (2026-11-22)
+
+- Fixed: with V-Sync on, neural rendering plus frame generation dropped to about 95 fps (60 fps game, 2X, 144 Hz):
+  the two-buffer swapchain blocked the pipeline in Present whenever the per-frame GPU work exceeded one refresh. The
+  presenter now uses three buffers (measured 120 fps, same as V-Sync off).
+- Open: load order Frame generation > Neural rendering > Upscaling with Auto 144 and V-Sync reaches about 127 fps,
+  not 144 (neural rendering then runs on every displayed frame, about 6.5 ms each on an RTX 5060 at 1080p).
+- The FP16 requirement on RTX 20/30/40 cards is checked in the setup panel by PCI device ID and model hash; the
+  "Use the FP16 model" button and the start-time message were not exercised live.

@@ -9,6 +9,7 @@
 //              [--fg-diag] (prints presentation timing diagnostics every second)
 //              [--vsync-switch-at <second>] (toggles V-Sync live at that second of the run)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
+//              [--order <nr,fg,up in any order>] (load order, e.g. fg,nr,up; overrides --upscale-first)
 //              [--gpu-nr|--gpu-fg|--gpu-up <adapter name substring>] (GPU per stage; --adapter sets all three)
 //              [--relief off|shading|parallax|motion] [--relief-strength 0..1] (Smart parallax, experimental)
 //   moonsr_cli --relief-selftest [--adapter <name substring>]
@@ -204,7 +205,7 @@ int wmain(int argc, wchar_t** argv) {
     float flowScale = 0.5f;
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
-    std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp;
+    std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp, orderText;
     std::wstring reliefMode = L"off";
     float reliefStrength = -1.0f; // < 0: the ReliefSettings default
     bool reliefSelfTest = false;
@@ -228,6 +229,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--order-switch-at") orderSwitchAt = _wtoi(next().c_str());
         else if (a == L"--vsync-switch-at") vsyncSwitchAt = _wtoi(next().c_str());
         else if (a == L"--neural") neuralModel = next();
+        else if (a == L"--order") orderText = Lower(next());
         else if (a == L"--gpu-nr") gpuNr = next();
         else if (a == L"--gpu-fg") gpuFg = next();
         else if (a == L"--gpu-up") gpuUp = next();
@@ -301,6 +303,25 @@ int wmain(int argc, wchar_t** argv) {
     cfg.scale.enabled = !noscale;
     if (upscaleFirst)
         cfg.order.stages = {PipelineStage::NeuralRendering, PipelineStage::Upscaling, PipelineStage::FrameGeneration};
+    if (!orderText.empty()) {
+        std::vector<PipelineStage> stages;
+        size_t start = 0;
+        for (;;) {
+            const size_t comma = orderText.find(L',', start);
+            const std::wstring tok = orderText.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
+            if (tok == L"nr") stages.push_back(PipelineStage::NeuralRendering);
+            else if (tok == L"fg") stages.push_back(PipelineStage::FrameGeneration);
+            else if (tok == L"up") stages.push_back(PipelineStage::Upscaling);
+            else {
+                fwprintf(stderr, L"--order takes nr, fg and up separated by commas (got '%s')\n", tok.c_str());
+                return 2;
+            }
+            if (comma == std::wstring::npos) break;
+            start = comma + 1;
+        }
+        cfg.order.stages = stages;
+        upscaleFirst = true; // prints the applied order every second
+    }
     cfg.frameGen.multiplier = static_cast<uint32_t>(std::clamp(fgMultiplier, 1, 20));
     if (fgAutoFps > 0) {
         cfg.frameGen.mode = FrameGenMode::Auto;

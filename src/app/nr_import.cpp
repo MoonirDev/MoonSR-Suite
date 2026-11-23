@@ -895,6 +895,82 @@ GpuSupport ClassifyAmd(uint32_t id) {
     return s;
 }
 
+// NVIDIA architecture by PCI device ID (vendor 0x10DE). Source: the PCI ID repository, pci.ids (read 2026-11-22 from
+// https://raw.githubusercontent.com/pciutils/pciids/master/pci.ids, vendor 10de). Block per chip family:
+//   0x1E00-0x1FFF  TU102/TU104/TU106/TU117 (RTX 20, Quadro RTX, GTX 16)    Turing    e.g. 1e87 RTX 2080, 1e04 RTX 2080 Ti
+//   0x2180-0x21FF  TU116 (GTX 1650/1660)                                   Turing
+//   0x2200-0x22FF  GA102 (RTX 3080/3090, RTX A6000/A5000)                  Ampere    e.g. 2206 RTX 3080, 2230 RTX A6000
+//   0x2400-0x25FF  GA103/GA104/GA106/GA107 (RTX 3050-3070 Ti, A400-A4000)  Ampere    e.g. 25b2 RTX A400, 2571 RTX A2000
+//   0x2600-0x28FF  AD102-AD107 (RTX 4060-4090, RTX 2000-6000 Ada)          Ada       e.g. 2684 RTX 4090, 26b1 RTX 6000 Ada
+//   0x2B00-0x2FFF  GB202/GB203/GB205/GB206/GB207 (RTX 50, RTX PRO)         Blackwell e.g. 2b85 RTX 5090, 2d05 RTX 5060
+// Deliberately Unknown: 0x2080-0x20FF GA100 (A100), 0x2300-0x23FF GH100 (Hopper H100/H200: the brief's Ampere range
+// 0x2200-0x25FF would include them, so it is split), 0x2900-0x2AFF GB100/GB102 (data centre), 0x3000 and up GR10x.
+// The 22xx block also holds HD Audio functions (22ba-22ec); those are never display adapters. GTX parts inside these
+// blocks (TU117, TU116) are rejected earlier because ClassifyGpu requires "RTX" in the name.
+NvidiaArch ClassifyNvidia(uint32_t id, const std::wstring& name) {
+    struct Range {
+        uint32_t first, last;
+        NvidiaArch arch;
+    };
+    static constexpr Range kTable[] = {
+        {0x1e00, 0x1fff, NvidiaArch::Turing},    {0x2180, 0x21ff, NvidiaArch::Turing},
+        {0x2200, 0x22ff, NvidiaArch::Ampere},    {0x2400, 0x25ff, NvidiaArch::Ampere},
+        {0x2600, 0x28ff, NvidiaArch::Ada},       {0x2b00, 0x2fff, NvidiaArch::Blackwell},
+    };
+    for (const Range& r : kTable)
+        if (id >= r.first && id <= r.last) return r.arch;
+    if (id != 0 && ((id >= 0x2080 && id <= 0x20ff) || (id >= 0x2300 && id <= 0x23ff) || (id >= 0x2900 && id <= 0x2aff) || id >= 0x3000))
+        return NvidiaArch::Unknown;  // known data-centre blocks and newer than this table: do not guess from the name
+    // The ID is not in the table (older or missing): use the marketing name.
+    auto has = [&](const wchar_t* t) { return name.find(t) != std::wstring::npos; };
+    if (has(L" Ada") || has(L"Ada Generation")) return NvidiaArch::Ada;
+    if (has(L"Blackwell") || has(L"RTX PRO")) return NvidiaArch::Blackwell;
+    if (has(L"Quadro RTX") || has(L"TITAN RTX")) return NvidiaArch::Turing;
+    if (has(L"RTX A")) return NvidiaArch::Ampere;
+    const size_t p = name.find(L"RTX ");
+    if (p != std::wstring::npos && p + 4 < name.size() && std::iswdigit(name[p + 4])) {
+        switch (name[p + 4]) {
+        case L'2': return NvidiaArch::Turing;
+        case L'3': return NvidiaArch::Ampere;
+        case L'4': return NvidiaArch::Ada;
+        case L'5': return NvidiaArch::Blackwell;
+        default: break;
+        }
+    }
+    return NvidiaArch::Unknown;
+}
+
+const wchar_t* NvidiaArchName(NvidiaArch a) {
+    switch (a) {
+    case NvidiaArch::Turing: return L"Turing (RTX 20 series)";
+    case NvidiaArch::Ampere: return L"Ampere (RTX 30 series)";
+    case NvidiaArch::Ada: return L"Ada Lovelace (RTX 40 series)";
+    case NvidiaArch::Blackwell: return L"Blackwell (RTX 50 series)";
+    default: return L"";
+    }
+}
+
+namespace {
+// Known FP16-patched nvngx_dlssnr.dll builds (SHA-256, lowercase). Add further builds here.
+constexpr const wchar_t* kFp16RuntimeHashes[] = {
+    L"cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed",
+};
+std::vector<std::wstring>& TestFp16Hashes() {
+    static std::vector<std::wstring> v;
+    return v;
+}
+}  // namespace
+
+bool IsFp16RuntimeHash(const std::wstring& sha256) {
+    for (const wchar_t* h : kFp16RuntimeHashes)
+        if (_wcsicmp(sha256.c_str(), h) == 0) return true;
+    for (const std::wstring& h : TestFp16Hashes())
+        if (_wcsicmp(sha256.c_str(), h.c_str()) == 0) return true;
+    return false;
+}
+
+void AddTestFp16Hash(const std::wstring& sha256) { TestFp16Hashes().push_back(sha256); }
+
 GpuSupport ClassifyGpu(const AdapterInfo& a) {
     GpuSupport s;
     const std::wstring name = a.name;
@@ -902,6 +978,8 @@ GpuSupport ClassifyGpu(const AdapterInfo& a) {
         s.family = L"RTX";
         if (name.find(L"RTX") != std::wstring::npos) {
             s.support = Support::Supported;
+            s.nvidia = ClassifyNvidia(a.deviceId, name);
+            if (s.nvidia != NvidiaArch::Unknown) s.family = NvidiaArchName(s.nvidia);
         } else {
             s.support = Support::NotSupported;
             s.reason = L"Neural rendering needs an NVIDIA GeForce RTX card.";

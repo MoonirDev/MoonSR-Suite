@@ -41,7 +41,12 @@ namespace moonsr {
 namespace {
 
 constexpr wchar_t kClassName[] = L"MoonSR.OutputWindow";
-constexpr UINT kBufferCount = 2;
+// Three buffers: one on screen, one queued for the next refresh, one free to render into. With only two and V-Sync
+// on, a frame cannot be drawn until the queued one has flipped, so the GPU sits idle until the vblank and any frame
+// whose GPU work (e.g. neural rendering + optical flow, ~7 ms at 1080p on an RTX 5060) is longer than one refresh
+// slips to every second refresh: 60 fps x2 on a 144 Hz display measured ~94 fps instead of 120. The waiting paths
+// still use a maximum frame latency of 1 (see CreateSwapchain), so this adds a render target, not queued latency.
+constexpr UINT kBufferCount = 3;
 
 constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 constexpr ULONGLONG kRestackPollMs = 100;
