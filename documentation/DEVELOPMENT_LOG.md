@@ -4,6 +4,15 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-24 - Dismissible notices (1.1.1)
+
+- Codex restored the notice and warning close buttons in the standard and Retro layouts. With visual effects on,
+  the bar shrinks and fades before the page closes the gap. With effects off, it closes immediately.
+- A dismissed message stays hidden for the current run. A different message can appear immediately, including
+  when it replaces a notice mid-animation.
+- The isolated full build, upscaling and frame-generation self-tests, and theme self-test passed. A focused test
+  exercised the close hit area, animated collapse, repeated and replacement messages, and immediate closing in Retro.
+
 ## 2026-11-23 - Smart parallax (1.1.0)
 
 - Hardened Shading against shadow noise while retaining the strict opaque HUD comparison and the flat-scene

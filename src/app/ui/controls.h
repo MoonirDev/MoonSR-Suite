@@ -218,8 +218,14 @@ private:
 class InfoBar : public Control {
 public:
     enum class Severity { Info, Success, Warning, Error };
-    InfoBar() { focusable = false; interactive = false; }
+    InfoBar() { focusable = false; interactive = true; }
     void Set(Severity s, const std::wstring& message);
+    // Closed with its x button; the same text stays hidden for this run, a new message shows again.
+    bool Dismissed() const;
+    void OnRelease(float x, float y, bool inside) override;
+    bool Tick(float dt) override;
+    bool AnimPending() const override;
+    Rect CloseRect() const { return Rect{bounds.right - 34.0f, bounds.top + 6.0f, bounds.right - 6.0f, bounds.top + 34.0f}; }
     const std::wstring& message() const { return message_; }
     void DrawRetro(Canvas& c, const Palette& p);  // console theme, retro_controls.cpp
     float RetroMeasure(const Gfx& g, float width) const;
@@ -229,6 +235,11 @@ public:
 private:
     Severity severity_ = Severity::Info;
     std::wstring message_;
+    bool closing_ = false;
+    float shown_ = 1.0f;
+    mutable float fullH_ = 0.0f;  // height before closing, for drawing the shrinking bar
+    float Ease() const;
+    void FinishClose();
 };
 
 // Label + large value, optionally with a small unit / note after the value.

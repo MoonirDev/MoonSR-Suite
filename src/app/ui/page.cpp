@@ -100,7 +100,7 @@ float Page::Layout(const Gfx& g, float width) {
             y += it.h;
             break;
         case Item::Kind::Info: {
-            if (!it.info->visible) {
+            if (!it.info->visible || it.info->Dismissed()) {
                 it.h = 0.0f;
                 break;
             }
@@ -261,7 +261,7 @@ void Page::Draw(Canvas& c, const Palette& p, const Gfx& g) {
             }
             break;
         case Item::Kind::Info:
-            if (it.info->visible) it.info->Draw(c, p);
+            if (it.info->visible && !it.info->Dismissed()) it.info->Draw(c, p);
             break;
         case Item::Kind::Tiles:
             for (Tile* t : it.tiles) t->Draw(c, p);
@@ -280,6 +280,10 @@ void Page::Draw(Canvas& c, const Palette& p, const Gfx& g) {
 }
 
 Control* Page::HitTest(float x, float y) const {
+    for (const Item& it : items_)
+        if (it.kind == Item::Kind::Info && it.info->visible && it.info->enabled && !it.info->Dismissed() &&
+            RectHas(it.info->bounds, x, y) && RectHas(it.info->CloseRect(), x, y))
+            return it.info;
     for (auto it = focusOrder_.rbegin(); it != focusOrder_.rend(); ++it) {
         Control* c = *it;
         if (c->visible && c->enabled && c->interactive && RectHas(c->bounds, x, y)) return c;

@@ -1,6 +1,8 @@
 # MoonSR Suite — Known Issues
 
-Updated: 2026-11-23 (Smart parallax)
+Updated: 2026-11-24
+
+The missing notice and warning close buttons in 1.1.0 were restored in 1.1.1.
 
 ## Smart parallax (experimental)
 

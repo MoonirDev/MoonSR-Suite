@@ -18,6 +18,8 @@ No estimates, no third-party figures presented as ours. "Not measured" is a vali
 Not available on this machine: any Intel GPU, any GPU older than the listed ones, a VRR measurement rig, a latency
 photodiode. Compatibility with those is therefore unverified.
 
+The notice dismissal patch changed the app UI. No new performance measurements were taken for that patch.
+
 ## Smart parallax playtest build (2026-11-23)
 
 Working tree based on `8a975b9`, benchmark source fingerprint `ddcc6a97fd59b8e4`. Hardware and driver versions

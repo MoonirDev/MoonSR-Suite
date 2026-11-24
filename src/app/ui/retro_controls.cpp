@@ -105,7 +105,7 @@ void NumberBox::DrawRetro(Canvas& c, const Palette& p) {
 
 float InfoBar::RetroMeasure(const Gfx& g, float width) const {
     const float prefixW = g.MeasureWidth(L"ERROR:", Font::BodyStrong);
-    const float textH = g.MeasureHeight(message_, Font::Body, width - 12.0f - prefixW - 10.0f - 12.0f);
+    const float textH = g.MeasureHeight(message_, Font::Body, width - 12.0f - prefixW - 10.0f - 36.0f);
     return std::max(40.0f, textH + 22.0f);
 }
 
@@ -119,8 +119,9 @@ void InfoBar::DrawRetro(Canvas& c, const Palette& p) {
     const float prefixW = c.gfx().MeasureWidth(L"ERROR:", Font::BodyStrong);
     c.Text(InfoPrefix(severity_), Rect{bounds.left + 12.0f, bounds.top + 11.0f, bounds.left + 12.0f + prefixW + 4.0f, bounds.top + 31.0f},
            Font::BodyStrong, col.icon, HAlign::Left);
-    c.Text(message_, Rect{bounds.left + 12.0f + prefixW + 10.0f, bounds.top + 11.0f, bounds.right - 12.0f, bounds.bottom - 8.0f},
+    c.Text(message_, Rect{bounds.left + 12.0f + prefixW + 10.0f, bounds.top + 11.0f, bounds.right - 36.0f, bounds.bottom - 8.0f},
            Font::Body, p.text, HAlign::Left, true);
+    c.Text(L"x", CloseRect(), Font::BodyStrong, col.icon, HAlign::Center);
 }
 
 void Tile::DrawRetro(Canvas& c, const Palette& p) {

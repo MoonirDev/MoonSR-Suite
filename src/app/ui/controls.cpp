@@ -405,19 +405,99 @@ void Slider::Draw(Canvas& c, const Palette& p) {
 void InfoBar::Set(Severity s, const std::wstring& message) {
     if (severity_ == s && message_ == message) return;
     const bool relayout = message_ != message;
+    if (relayout) {
+        closing_ = false;
+        shown_ = 1.0f;
+    }
     severity_ = s;
     message_ = message;
     if (view && relayout) view->RequestLayout();
     Invalidate();
 }
 
+namespace {
+std::vector<std::wstring>& DismissedNotices() {
+    static std::vector<std::wstring> list;
+    return list;
+}
+}  // namespace
+
+bool InfoBar::Dismissed() const {
+    const auto& l = DismissedNotices();
+    return std::find(l.begin(), l.end(), message_) != l.end();
+}
+
+void InfoBar::OnRelease(float x, float y, bool inside) {
+    if (!inside || closing_ || !RectHas(CloseRect(), x, y) || Dismissed()) return;
+    if (!view || !view->effects()) {
+        FinishClose();
+        return;
+    }
+    closing_ = true;
+    view->RequestAnimation();
+}
+
+void InfoBar::FinishClose() {
+    closing_ = false;
+    shown_ = 1.0f;
+    DismissedNotices().push_back(message_);
+    if (view) view->RequestLayout();
+    Invalidate();
+}
+
+bool InfoBar::AnimPending() const { return Control::AnimPending() || closing_; }
+
+bool InfoBar::Tick(float dt) {
+    if (!closing_) return false;
+    if (dt <= 0.0f || !visible || (view && !view->effects())) {
+        FinishClose();
+        return false;
+    }
+    shown_ -= dt / 0.20f;
+    if (shown_ <= 0.0f) {
+        FinishClose();
+        return false;
+    }
+    if (view) view->RequestLayout();
+    Invalidate();
+    return true;
+}
+
 float InfoBar::Measure(const Gfx& g, float width) const {
-    if (g.retro()) return RetroMeasure(g, width);
-    const float textH = g.MeasureHeight(message_, Font::Body, width - 16.0f - 20.0f - 16.0f - 16.0f);
-    return std::max(48.0f, textH + 24.0f);
+    float h;
+    if (g.retro()) h = RetroMeasure(g, width);
+    else h = std::max(48.0f, g.MeasureHeight(message_, Font::Body, width - 16.0f - 20.0f - 16.0f - 40.0f) + 24.0f);
+    if (!closing_) fullH_ = h;
+    return h * Ease();
+}
+
+float InfoBar::Ease() const {
+    // Ease-in-out cubic of the remaining share: starts and ends gently.
+    const float t = 1.0f - std::clamp(shown_, 0.0f, 1.0f);
+    const float k = t < 0.5f ? 4.0f * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) * 0.5f;
+    return 1.0f - k;
 }
 
 void InfoBar::Draw(Canvas& c, const Palette& p) {
+    if (closing_) {
+        // Shrink toward the middle: full-size content centred on the shrinking slot, clipped to it,
+        // and squeezed slightly on the sides too.
+        const Rect slot = bounds;
+        const float e = Ease();
+        const float cy = (slot.top + slot.bottom) * 0.5f;
+        const float inset = RW(slot) * 0.04f * (1.0f - e);
+        const Rect clip{slot.left + inset, slot.top, slot.right - inset, slot.bottom};
+        c.PushOpacity(clip, e);
+        c.PushClip(clip);
+        bounds = Rect{clip.left, cy - fullH_ * 0.5f, clip.right, cy + fullH_ * 0.5f};
+        closing_ = false;  // draw the normal content once, inside the fade layer
+        Draw(c, p);
+        closing_ = true;
+        bounds = slot;
+        c.PopClip();
+        c.PopOpacity();
+        return;
+    }
     if (p.retro) {
         DrawRetro(c, p);
         return;
@@ -435,8 +515,9 @@ void InfoBar::Draw(Canvas& c, const Palette& p) {
                           : severity_ == Severity::Error ? L"x" : L"i";
     if (severity_ == Severity::Success) c.Check(cx, cy - 0.5f, 9.0f, col.iconText);
     else c.Text(glyph, Rect{cx - 9.0f, cy - 9.0f, cx + 9.0f, cy + 9.0f}, Font::Glyph, col.iconText, HAlign::Center);
-    c.Text(message_, Rect{bounds.left + 52.0f, bounds.top + 12.0f, bounds.right - 16.0f, bounds.bottom - 12.0f}, Font::Body,
+    c.Text(message_, Rect{bounds.left + 52.0f, bounds.top + 12.0f, bounds.right - 40.0f, bounds.bottom - 12.0f}, Font::Body,
            p.text, HAlign::Left, true);
+    c.Text(L"✕", CloseRect(), Font::Body, p.textSecondary, HAlign::Center);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
