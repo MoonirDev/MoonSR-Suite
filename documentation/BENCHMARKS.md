@@ -3,6 +3,10 @@
 Rules: every number here was produced by a command that was run on the hardware listed, at the commit listed.
 No estimates, no third-party figures presented as ours. "Not measured" is a valid and expected entry.
 
+## 1.1.3 notice persistence
+
+UI/settings change only; no new performance measurements. Existing rendering measurements below remain unchanged.
+
 ## Test machine
 
 | Item | Value |

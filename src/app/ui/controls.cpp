@@ -420,8 +420,17 @@ std::vector<std::wstring>& DismissedNotices() {
     static std::vector<std::wstring> list;
     return list;
 }
+std::function<void(const std::vector<std::wstring>&)> saveDismissals;
 }  // namespace
-
+void InfoBar::ConfigureDismissals(std::vector<std::wstring> messages,
+                                 std::function<void(const std::vector<std::wstring>&)> save) {
+    DismissedNotices() = std::move(messages);
+    saveDismissals = std::move(save);
+}
+void InfoBar::ResetDismissals() {
+    DismissedNotices().clear();
+    if (saveDismissals) saveDismissals(DismissedNotices());
+}
 bool InfoBar::Dismissed() const {
     const auto& l = DismissedNotices();
     return std::find(l.begin(), l.end(), message_) != l.end();
@@ -440,7 +449,8 @@ void InfoBar::OnRelease(float x, float y, bool inside) {
 void InfoBar::FinishClose() {
     closing_ = false;
     shown_ = 1.0f;
-    DismissedNotices().push_back(message_);
+    if (!Dismissed()) DismissedNotices().push_back(message_);
+    if (saveDismissals) saveDismissals(DismissedNotices());
     if (view) view->RequestLayout();
     Invalidate();
 }

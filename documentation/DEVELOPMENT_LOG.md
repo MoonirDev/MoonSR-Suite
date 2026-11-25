@@ -4,6 +4,12 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-25 - Persistent notice dismissal (1.1.3)
+
+- Codex saved exact dismissed messages in settings.ini and added a one-shot Settings switch to restore them. Changed messages still appear; the existing closing animation is retained.
+- Isolated full build, upscaling and frame-generation self-tests, and theme self-test passed. A focused C++20 test verified persistence across processes, quoted/Unicode messages, reset, and preservation of other settings.
+
+
 ## 2026-11-25 - Smart Parallax stability (1.1.2)
 
 - Codex packaged the owner-approved halo playtest, including grain-resistant HUD learning, selected motion

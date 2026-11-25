@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "neural/neural_settings.h"
 
 namespace moonsr::app {
@@ -71,6 +72,9 @@ struct AppSettings {
 
 // %LOCALAPPDATA%\MoonSR, created on demand. Empty on failure.
 std::wstring AppDataDirectory();
+
+std::vector<std::wstring> LoadDismissedNotices();
+bool SaveDismissedNotices(const std::vector<std::wstring>& messages);
 
 AppSettings LoadSettings();
 bool SaveSettings(const AppSettings& settings);

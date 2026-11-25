@@ -509,6 +509,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         ver->text = MOONSR_VERSION_WSTRING;
         u.closeToTray = p->Make<ToggleSwitch>();
         u.visualEffects = p->Make<ToggleSwitch>();
+        u.resetNotices = p->Make<ToggleSwitch>();
 
         p->AddSection(L"Application");
         ui::Card& app = p->AddCard();
@@ -517,6 +518,9 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.visualEffectsRow = &p->AddRow(app, kIconEffects, L"Visual effects",
                                         L"Transparency, glow and animations. Turn off for a plain look or on slower PCs.",
                                         {{u.visualEffects, kToggleW}});
+        p->AddRow(app, kIconReset, L"Restore dismissed notices",
+                  L"Show closed notices and warnings again. This switch resets after use.",
+                  {{u.resetNotices, kToggleW}});
         u.openReleases = p->Make<ui::LinkButton>();
         u.openReleases->text = L"Open releases page";
         ui::Row& updates = p->AddRow(app, kIconSync, L"Updates", std::wstring(L"This is MoonSR ") + MOONSR_VERSION_WSTRING,

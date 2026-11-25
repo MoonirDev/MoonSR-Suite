@@ -827,6 +827,8 @@ void MainWindow::OnDpiChanged(int newDpi, const RECT* suggested) {
 }
 
 void MainWindow::OnCreate() {
+    ui::InfoBar::ConfigureDismissals(LoadDismissedNotices(),
+        [](const std::vector<std::wstring>& messages) { SaveDismissedNotices(messages); });
     dpi_ = CurrentDpi();
     view_.Attach(hwnd_, dpi_);
     themeKey_ = settings_.theme.empty() ? std::wstring(L"dark") : settings_.theme;
@@ -896,6 +898,12 @@ void MainWindow::WireHandlers() {
     ui_.refresh->onChange = [this] { PopulateWindows(); };
     ui_.record->onChange = [this] { StartRecording(); };
     ui_.themePicker->onChange = [this] { OnThemeChosen(); };
+    ui_.resetNotices->onChange = [this] {
+        ui::InfoBar::ResetDismissals();
+        ui_.resetNotices->SetChecked(false);
+        view_.RequestLayout();
+        view_.Invalidate();
+    };
     ui_.visualEffects->onChange = [this] {
         effectsSetting_ = ui_.visualEffects->checked();
         if (test_.effects >= 0) test_.effects = -1;  // an explicit choice wins over --test-effects

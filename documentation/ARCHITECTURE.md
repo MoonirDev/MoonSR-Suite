@@ -211,3 +211,7 @@ on it.
   string, never through exceptions across module boundaries.
 - Capture and present report `DeviceLost` distinctly so the engine can recover.
 - Log file: written by the app at startup (`InitLog`).
+
+## Notice dismissal persistence
+
+InfoBar keeps an in-memory list of exact dismissed messages. MainWindow loads it from the DismissedNotices settings section and wires a save callback after the close animation completes. Messages are hex-encoded UTF-16 to preserve INI-sensitive text. The one-shot Settings restore switch clears the list and section and relayouts the current page. Other settings sections are preserved.

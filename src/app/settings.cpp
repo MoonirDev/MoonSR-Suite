@@ -67,6 +67,47 @@ std::wstring AppDataDirectory() {
     return dir;
 }
 
+std::vector<std::wstring> LoadDismissedNotices() {
+    const auto path = SettingsPath();
+    std::vector<std::wstring> messages;
+    if (path.empty()) return messages;
+    const int count = std::clamp(ReadInt(path, L"DismissedNotices", L"Count", 0), 0, 4096);
+    for (int i = 0; i < count; ++i) {
+        wchar_t text[32768] = {};
+        GetPrivateProfileStringW(L"DismissedNotices", std::to_wstring(i).c_str(), L"",
+                                text, static_cast<DWORD>(std::size(text)), path.c_str());
+        std::wstring decoded;
+        const std::wstring encoded(text);
+        if (encoded.size() % 4) continue;
+        bool valid = true;
+        for (size_t j = 0; j < encoded.size(); j += 4) {
+            const auto word = encoded.substr(j, 4);
+            if (word.find_first_not_of(L"0123456789abcdef") != std::wstring::npos) { valid = false; break; }
+            decoded.push_back(static_cast<wchar_t>(wcstoul(word.c_str(), nullptr, 16)));
+        }
+        if (valid && !decoded.empty()) messages.push_back(std::move(decoded));
+    }
+    return messages;
+}
+bool SaveDismissedNotices(const std::vector<std::wstring>& messages) {
+    const auto path = SettingsPath();
+    if (path.empty()) return false;
+    EnsureUnicodeFile(path);
+    bool ok = WritePrivateProfileStringW(L"DismissedNotices", nullptr, nullptr, path.c_str()) != FALSE;
+    for (size_t i = 0; i < messages.size(); ++i) {
+        // Hex preserves quotes, line breaks and Unicode exactly through the INI parser.
+        std::wstring encoded;
+        for (wchar_t ch : messages[i]) {
+            wchar_t word[5] = {};
+            swprintf_s(word, L"%04x", static_cast<unsigned>(ch));
+            encoded += word;
+        }
+        ok &= WriteString(path, L"DismissedNotices", std::to_wstring(i).c_str(), encoded);
+    }
+    ok &= WriteInt(path, L"DismissedNotices", L"Count", messages.size());
+    return ok;
+}
+
 AppSettings LoadSettings() {
     AppSettings s;
     const std::wstring path = SettingsPath();

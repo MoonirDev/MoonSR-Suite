@@ -1,8 +1,9 @@
 # MoonSR Suite — Known Issues
 
-Updated: 2026-11-24
+Updated: 2026-11-25
 
 The missing notice and warning close buttons in 1.1.0 were restored in 1.1.1.
+Version 1.1.3 remembers closed messages across restarts. Restore them with Settings > Application > Restore dismissed notices. Changed message text appears again.
 
 ## Smart parallax (experimental)
 

@@ -220,7 +220,10 @@ public:
     enum class Severity { Info, Success, Warning, Error };
     InfoBar() { focusable = false; interactive = true; }
     void Set(Severity s, const std::wstring& message);
-    // Closed with its x button; the same text stays hidden for this run, a new message shows again.
+    // Exact messages stay hidden until reset; changed messages appear again.
+    static void ConfigureDismissals(std::vector<std::wstring> messages,
+                                   std::function<void(const std::vector<std::wstring>&)> save);
+    static void ResetDismissals();
     bool Dismissed() const;
     void OnRelease(float x, float y, bool inside) override;
     bool Tick(float dt) override;

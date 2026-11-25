@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 # The version lives here only. It flows into src/core/version.h (generated), the .exe version resources, the
 # Settings page and the installer. Bump it for every release (see README "Releases").
-project(MoonSR VERSION 1.1.2 LANGUAGES CXX)
+project(MoonSR VERSION 1.1.3 LANGUAGES CXX)
 
 if(NOT MSVC)
     message(FATAL_ERROR "MoonSR currently builds with MSVC only.")
