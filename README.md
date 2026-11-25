@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.1.3**
+**Version 1.1.4**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -11,6 +11,8 @@ It is an experimental personal project. Quality and speed claims come only from 
 [documentation/BENCHMARKS.md](documentation/BENCHMARKS.md), with the hardware and settings stated there.
 
 ## Features
+
+- **Screenshots and recording:** screen capture can include the final scaled image. Capture the display to include MoonSR processing; capturing the game alone records its original image.
 
 - **Notices:** closed notices and warnings stay dismissed across restarts. Restore them from Settings.
 
@@ -98,6 +100,8 @@ Binaries are written to `build\main\bin`:
   tests in `tests/`.
 
 ## Releases
+
+- **1.1.4** (2026-11-25): Fixed screenshots and screen recordings omitting the final scaled image. Includes persistent notice dismissal and the Settings restore switch from the pending 1.1.3 update.
 
 - **1.1.3** (2026-11-25): Notices and warnings now stay closed across restarts. Added a Settings switch to restore dismissed messages; closing animations are kept.
 

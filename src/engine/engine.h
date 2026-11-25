@@ -211,7 +211,7 @@ public:
     bool IsRunning() const;
 
     // Diagnostics: saves the next `outputFrames` presented frames (and the captured input frames they came from)
-    // as PNG files into `directory`. The output window is excluded from screen capture, so this is how the real
+    // as PNG files into `directory`. This provides exact paired frames so the real
     // output can be inspected. Recording stalls the pipeline on every frame: the images are exact, the timing is
     // not representative. Returns false if the engine is not running or a recording is already in progress.
     bool RecordFrames(uint32_t outputFrames, const std::wstring& directory);

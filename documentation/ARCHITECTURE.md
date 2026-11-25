@@ -215,3 +215,7 @@ on it.
 ## Notice dismissal persistence
 
 InfoBar keeps an in-memory list of exact dismissed messages. MainWindow loads it from the DismissedNotices settings section and wires a save callback after the close animation completes. Messages are hex-encoded UTF-16 to preserve INI-sensitive text. The one-shot Settings restore switch clears the list and section and relayouts the current page. Other settings sections are preserved.
+
+## Final output screen capture
+
+The presenter allows screen capture by default. WGC input capture uses CreateForWindow on the selected source HWND, rather than monitor capture, so capturing the final output externally does not feed that output into the input pipeline. MoonSR windows remain excluded from its own source enumeration. Game-only external capture sees the original game; display capture includes the processed output.

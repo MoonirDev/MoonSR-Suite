@@ -23,8 +23,7 @@ Version 1.1.3 remembers closed messages across restarts. Restore them with Setti
   remains unverified.
 
 ## Frame generation (iteration 1)
-- Nobody has looked at live generated frames yet: the output window is excluded from capture, so live image
-  quality is unverified. Quality numbers come from synthetic sequences with ground truth only. No real game tested.
+- Screen capture can include the final output as of 1.1.4. Game-only capture still records the original game image; use display capture for the processed output. Capture-tool compatibility beyond the tested desktop screenshot and WGC paths may vary.
 - Interpolation holds every real frame back by (M - 1) / M of a frame time (16.6 ms at 30 fps, 2X). This is added
   latency by design and is included in the reported latency.
 - Small fast objects (smaller than ~2 coarse blocks, moving more than their own size) are not tracked: they

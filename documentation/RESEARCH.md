@@ -74,7 +74,7 @@ goal that must be shown by measurement, and may not be reachable on the universa
    broken frame. Adaptive multiplier with hysteresis and a minimum hold time.
 6. **Capture / presentation**: WGC, free-threaded pool, newest-frame-wins, `MinUpdateInterval` (24H2+) for >60 fps,
    client-area crop; overlay `WS_POPUP` + `WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP`,
-   click-through, excluded from capture; `FLIP_DISCARD` + waitable object + tearing. Swapchain on the adapter that
+   click-through, included in screen capture by default since 1.1.4; `FLIP_DISCARD` + waitable object + tearing. Swapchain on the adapter that
    owns the monitor. Cursor: hide the system cursor and draw a mapped software cursor (Phase 2 follow-up).
 7. **No injection** and no undocumented DWM surfaces in the default path.
 8. **Process in linear light** eventually (DLSS 4.5 moved to linear for quality); today the pipeline is gamma-space.

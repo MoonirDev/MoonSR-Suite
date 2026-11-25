@@ -26,7 +26,7 @@ struct PresentOptions {
     HMONITOR monitor = nullptr;     // output monitor; the window covers its full desktop rect
     bool vsync = false;             // true: sync interval 1. false: interval 0, with tearing if supported
     bool clickThrough = true;       // mouse input passes through to the windows underneath
-    bool excludeFromCapture = true; // keep the output window out of screen captures (prevents recursion)
+    bool excludeFromCapture = false; // screenshots can capture final output; input WGC targets the game HWND
     // Top-level window the output stays directly above in z-order (normally the captured game window). Child
     // windows are resolved to their root. Null: the output is placed once at the top of the non-topmost band and
     // not tracked.

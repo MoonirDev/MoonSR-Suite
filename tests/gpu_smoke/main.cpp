@@ -291,7 +291,7 @@ int RunCapture(HWND target, double seconds, const std::wstring& label, const Cap
 
 // ---- present mode -------------------------------------------------------------------------------------------------
 
-int RunPresent(double seconds, bool vsync, bool wait, int adapterIndex, int monitorIndex) {
+int RunPresent(double seconds, bool vsync, bool wait, int adapterIndex, int monitorIndex, bool checkCapture = false) {
     MonitorInfo primary;
     const auto monitors = EnumerateMonitors();
     for (size_t i = 0; i < monitors.size(); ++i)
@@ -324,6 +324,15 @@ int RunPresent(double seconds, bool vsync, bool wait, int adapterIndex, int moni
         Print(L"Presenter::Create failed: " + error + L"\n");
         return 1;
     }
+    DWORD affinity = ~0u;
+    if (checkCapture && (!GetWindowDisplayAffinity(pres->Window(), &affinity) || affinity != WDA_NONE)) {
+        Print(L"FAIL: output window is excluded from capture\n"); return 1;
+    }
+    CaptureOptions captureOptions;
+    captureOptions.captureCursor = false;
+    auto outputCapture = checkCapture ? CreateWgcCapture(*dev, pres->Window(), captureOptions, error) : nullptr;
+    if (checkCapture && !outputCapture) { Print(L"FAIL: output capture: " + error + L"\n"); return 1; }
+    bool desktopOk = false, wgcOk = false;
     const Size bb = pres->BackBufferSize();
     Print(std::format(L"== Present on {} ({}x{}, {:.3f} Hz) via '{}' for {:.1f} s, vsync={}, wait-on-waitable={}, "
                       L"tearing supported={} ==\n",
@@ -341,11 +350,47 @@ int RunPresent(double seconds, bool vsync, bool wait, int adapterIndex, int moni
             break;
         }
         const float t = static_cast<float>(QpcToMs(QpcNow() - start) / 1000.0);
-        const float c[4] = {0.5f + 0.5f * std::sin(t * 6.0f), 0.2f, 0.5f + 0.5f * std::cos(t * 4.0f), 1.0f};
+        float c[4] = {0.5f + 0.5f * std::sin(t * 6.0f), 0.2f, 0.5f + 0.5f * std::cos(t * 4.0f), 1.0f};
+        if (checkCapture) { c[0] = 0.125f; c[1] = 0.75f; c[2] = 0.25f; }
         ID3D11RenderTargetView* rtv = pres->BackBufferRtv();
         dev->Context()->OMSetRenderTargets(1, &rtv, nullptr);
         dev->Context()->ClearRenderTargetView(rtv, c);
         const PresentStatus ps = pres->Present();
+        if (checkCapture && t > 0.5f && (!desktopOk || !wgcOk)) {
+            auto matches = [](int r, int g, int b) {
+                return std::abs(r - 32) <= 3 && std::abs(g - 191) <= 3 && std::abs(b - 64) <= 3;
+            };
+            HDC screen = GetDC(nullptr), copy = CreateCompatibleDC(screen);
+            HBITMAP bitmap = CreateCompatibleBitmap(screen, 1, 1);
+            HGDIOBJ old = SelectObject(copy, bitmap);
+            const int x = primary.desktopRect.left + bb.width / 2;
+            const int y = primary.desktopRect.top + bb.height / 2;
+            if (BitBlt(copy, 0, 0, 1, 1, screen, x, y, SRCCOPY | CAPTUREBLT)) {
+                const COLORREF pixel = GetPixel(copy, 0, 0);
+                desktopOk |= matches(GetRValue(pixel), GetGValue(pixel), GetBValue(pixel));
+            }
+            SelectObject(copy, old); DeleteObject(bitmap); DeleteDC(copy); ReleaseDC(nullptr, screen);
+            CapturedFrame frame;
+            if (outputCapture->AcquireFrame(0, frame) == CaptureStatus::Ok) {
+                D3D11_TEXTURE2D_DESC desc{};
+                desc.Width = desc.Height = desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                ComPtr<ID3D11Texture2D> pixel;
+                if (SUCCEEDED(dev->Device()->CreateTexture2D(&desc, nullptr, &pixel))) {
+                    const UINT cx = frame.textureSize.width / 2, cy = frame.textureSize.height / 2;
+                    D3D11_BOX box{cx, cy, 0, cx + 1, cy + 1, 1};
+                    dev->Context()->CopySubresourceRegion(pixel.Get(), 0, 0, 0, 0, frame.texture, 0, &box);
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    if (SUCCEEDED(dev->Context()->Map(pixel.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+                        const auto* bytes = static_cast<const unsigned char*>(mapped.pData);
+                        wgcOk |= matches(bytes[2], bytes[1], bytes[0]);
+                        dev->Context()->Unmap(pixel.Get(), 0);
+                    }
+                }
+                outputCapture->ReleaseFrame();
+            }
+        }
         if (ps == PresentStatus::Ok) ok++;
         else if (ps == PresentStatus::Occluded) occluded++;
         else {
@@ -359,7 +404,12 @@ int RunPresent(double seconds, bool vsync, bool wait, int adapterIndex, int moni
                       elapsed, ok, ok / elapsed, occluded, waitTimeouts,
                       bad == PresentStatus::Ok ? L"none" : (bad == PresentStatus::DeviceLost ? L"DeviceLost" : L"Error"),
                       YesNo(pumpFailed)));
+    outputCapture.reset();
     pres.reset();
+    if (checkCapture) {
+        Print(std::format(L"Output capture: desktop screenshot={}, WGC recording={}\n", YesNo(desktopOk), YesNo(wgcOk)));
+        return desktopOk && wgcOk ? 0 : 1;
+    }
     return 0;
 }
 
@@ -450,7 +500,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         st.stop = true;
         st.thread.join();
-    } else if (mode == L"--present") {
+    } else if (mode == L"--present" || mode == L"--present-capture") {
         double secs = 2.0;
         bool vsync = false, wait = true;
         int adapter = -1, monitor = -1;
@@ -462,7 +512,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (a == L"--monitor" && i + 1 < argc) monitor = _wtoi(argv[++i]);
             else if (_wtof(a.c_str()) > 0) secs = _wtof(a.c_str());
         }
-        rc = RunPresent(secs, vsync, wait, adapter, monitor);
+        rc = RunPresent(secs, vsync, wait, adapter, monitor, mode == L"--present-capture");
     } else {
         PrintAdapters();
         PrintMonitors();
