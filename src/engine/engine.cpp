@@ -297,20 +297,22 @@ struct Engine::Impl {
     // Smart parallax analyses each original capture. Its output is consumed at the selected stage boundary.
     // A stage running after the final scale can use the kept scene and draw directly to the back buffer.
     std::unique_ptr<ReliefPass> relief;
-    std::unique_ptr<FrameGenerator> reliefMotion;
     std::unique_ptr<CrossAdapterLink> reliefCaptureUpload, reliefUpload, reliefDownload;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> reliefInput, reliefOutput;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> reliefInputSrv;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> reliefOutputRtv;
     Size reliefApplySize;
     DXGI_FORMAT reliefFormat = DXGI_FORMAT_UNKNOWN;
-    bool reliefMotionFailed = false, reliefCopyFailed = false, reliefCopyProblem = false;
+    bool reliefCopyFailed = false, reliefCopyProblem = false;
     bool reliefFailed = false;      // creation failed; not retried until the pipeline is rebuilt
     bool reliefAnalysed = false;    // the newest real frame was analysed (Apply is skipped otherwise)
+    bool reliefUsesFrameGenFlow = false;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> reliefFrameSelection;
     float reliefPhase = 1.0f;       // phase of the frame in `scene`: 1 = real, (0,1) = generated
     bool reliefInScene = false;
     bool pendingReliefDone = false;
     bool reliefBeforeScale = false;
+    bool reliefAfterActiveFrameGen = false;
     ScaleSettings reliefScaleSettings;
     ReliefSettings appliedRelief;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv;
@@ -320,8 +322,9 @@ struct Engine::Impl {
 
     void ReleaseRelief() {
         if (relief && scale) scale->ResetSourceCache();
+        reliefFrameSelection.Reset();
+        reliefUsesFrameGenFlow = false;
         relief.reset();
-        reliefMotion.reset();
         reliefInputSrv.Reset();
         reliefInput.Reset();
         reliefOutputRtv.Reset();
@@ -333,7 +336,7 @@ struct Engine::Impl {
         reliefDownload.reset();
         reliefDevice = nullptr;
         ownedReliefDevice.reset();
-        reliefMotionFailed = reliefCopyFailed = reliefCopyProblem = false;
+        reliefCopyFailed = reliefCopyProblem = false;
         reliefAnalysed = false;
         reliefInScene = false;
         reliefPhase = 1.0f;
@@ -405,14 +408,14 @@ struct Engine::Impl {
         }
         if (relief && !(requested == appliedRelief)) {
             relief->SetSettings(requested);
-            if (requested.tier != ReliefTier::MotionDepth) reliefMotion.reset();
             appliedRelief = requested;
         }
     }
 
     void ResetReliefHistory() {
         if (relief) relief->Reset();
-        if (reliefMotion) reliefMotion->Reset();
+        reliefUsesFrameGenFlow = false;
+        reliefFrameSelection.Reset();
         reliefAnalysed = false;
     }
 
@@ -422,9 +425,10 @@ struct Engine::Impl {
         reliefCopyProblem = true;
     }
 
-    // A compatible field from an earlier stage is borrowed on the same device. Motion depth otherwise
-    // measures its own field from real captures; this generator never interpolates or schedules a frame.
+    // Borrow capture-size frame-generation motion on the same device.
     void ReliefAnalyse(const CapturedFrame& frame, const MotionFieldView* motion) {
+        reliefFrameSelection.Reset();
+        reliefUsesFrameGenFlow = false;
         if (!relief) return;
         ID3D11Texture2D* input = frame.texture;
         RectI rect = frame.contentRect;
@@ -439,28 +443,7 @@ struct Engine::Impl {
             rect = {0, 0, rect.Width(), rect.Height()};
             motion = nullptr; // a main-device SRV cannot be bound on the relief GPU
         }
-        MotionFieldView independent;
-        if (motion && reliefMotion) reliefMotion.reset();
-        if (!motion && appliedRelief.tier == ReliefTier::MotionDepth && !reliefMotionFailed) {
-            if (!reliefMotion) {
-                std::wstring error;
-                reliefMotion = FrameGenerator::Create(*reliefDevice, error);
-                if (!reliefMotion) {
-                    reliefMotionFailed = true;
-                    MSR_LOG_WARN(L"Smart parallax motion estimator unavailable: {}", error);
-                } else {
-                    FrameGenSettings motionSettings;
-                    motionSettings.quality = FrameGenQuality::Performance;
-                    motionSettings.flowScale = 0.5f;
-                    reliefMotion->SetSettings(motionSettings);
-                    MSR_LOG_INFO(L"Motion depth estimates motion on '{}'", reliefDevice->Info().name);
-                }
-            }
-            if (reliefMotion && reliefMotion->PushFrame(input, rect, frame.captureQpc)) {
-                independent = reliefMotion->MotionField();
-                if (independent.valid) motion = &independent;
-            }
-        }
+        reliefUsesFrameGenFlow = motion != nullptr;
         reliefAnalysed = relief->Analyse(input, rect, motion, frame.captureQpc);
     }
 
@@ -513,7 +496,8 @@ struct Engine::Impl {
         const D3D11_BOX crop{static_cast<UINT>(sourceRect.left), static_cast<UINT>(sourceRect.top), 0,
                              static_cast<UINT>(sourceRect.right), static_cast<UINT>(sourceRect.bottom), 1};
         reliefDevice->Context()->CopySubresourceRegion(reliefInput.Get(), 0, 0, 0, 0, source, 0, &crop);
-        if (!relief->Apply(reliefInputSrv.Get(), size, reliefOutputRtv.Get(), size, content, phase, outputPixelScale))
+        if (!relief->Apply(reliefInputSrv.Get(), size, reliefOutputRtv.Get(), size, content, phase, outputPixelScale,
+                           reliefAfterActiveFrameGen, reliefFrameSelection.Get()))
             return nullptr;
         reliefCopyProblem = false;
         if (!reliefDownload) return reliefOutput.Get();
@@ -905,6 +889,8 @@ struct Engine::Impl {
     }
 
     void ResetFrameGen() {
+        reliefFrameSelection.Reset();
+        reliefUsesFrameGenFlow = false;
         fg.reset();
         alsrMotion.reset();
         fgOutRtv.Reset();
@@ -1319,7 +1305,8 @@ struct Engine::Impl {
         ID3D11Texture2D* composed = scene.Get();
         if (reliefInScene && relief && reliefAnalysed) {
             if (!reliefUpload && EnsureSceneSrv()) {
-                applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase);
+                applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase,
+                                                 1.0f, reliefAfterActiveFrameGen, reliefFrameSelection.Get());
             } else if (reliefUpload) {
                 const RectI full{0, 0, static_cast<int32_t>(sceneSize.width), static_cast<int32_t>(sceneSize.height)};
                 if (auto* processed = RenderRelief(scene.Get(), full, sceneDestRect, reliefPhase)) composed = processed;
@@ -1564,6 +1551,7 @@ struct Engine::Impl {
             const bool upscaleBeforeNeural = posOf(PipelineStage::Upscaling) < posOf(PipelineStage::NeuralRendering);
             const auto reliefPosition = posOf(PipelineStage::Relief);
             const bool reliefBeforeFg = reliefPosition < posOf(PipelineStage::FrameGeneration);
+            if (pendingIndex >= pendingCount) reliefAfterActiveFrameGen = fgWanted && fg && !reliefBeforeFg;
             const bool reliefBeforeUp = reliefPosition < posOf(PipelineStage::Upscaling);
             const bool reliefBeforeNeural = reliefPosition < posOf(PipelineStage::NeuralRendering);
             reliefBeforeScale = reliefBeforeUp;
@@ -1649,6 +1637,7 @@ struct Engine::Impl {
                 const float phase = p.real ? 1.0f : p.t;
                 bool reliefDone = pendingReliefDone;
                 bool alreadyUpscaled = pendingPreScaled;
+                reliefFrameSelection.Reset();
                 if (p.real) {
                     if (pendingAlsr && alsrOut) { // reconstructed by Moon ALSR when the frame was pushed
                         tex = alsrOut.Get();
@@ -1656,7 +1645,12 @@ struct Engine::Impl {
                         alreadyUpscaled = true;
                     }
                 } else {
-                    tex = (EnsureFgOut(fs) && fg->Interpolate(p.t, fgOutRtv.Get())) ? fgOut.Get() : nullptr;
+                    ID3D11ShaderResourceView* selection = nullptr;
+                    const bool shareSelection = reliefAfterActiveFrameGen && reliefAnalysed && reliefUsesFrameGenFlow &&
+                                                appliedRelief.tier >= ReliefTier::Parallax;
+                    tex = (EnsureFgOut(fs) && fg->Interpolate(p.t, fgOutRtv.Get(),
+                                                             shareSelection ? &selection : nullptr)) ? fgOut.Get() : nullptr;
+                    reliefFrameSelection = selection;
                     // Generated frames get ALSR's single-frame reconstruction so they match the real frames' look.
                     if (tex && pendingAlsr && alsr && alsrGen) {
                         RectI rect{0, 0, static_cast<int32_t>(fs.width), static_cast<int32_t>(fs.height)};
@@ -2290,9 +2284,6 @@ struct Engine::Impl {
                     stats.reliefActive = rs.active;
                     stats.reliefTier = rs.tierInEffect;
                     stats.reliefNote = rs.reason;
-                    if (reliefMotionFailed && reliefSettings.tier == ReliefTier::MotionDepth &&
-                        rs.tierInEffect == ReliefTier::Parallax)
-                        stats.reliefNote = L"The Motion depth estimator could not start. Using Parallax.";
                     if (reliefCopyProblem) {
                         stats.reliefActive = false;
                         stats.reliefNote = L"Smart parallax was bypassed because its frame transfer or render target failed.";

@@ -3150,7 +3150,7 @@ void MainWindow::RefreshOrderUi() {
             break;
         case PipelineStage::Relief:
             t += generated ? L"Adds relief to real and generated frames." : L"Adds relief to each game frame.";
-            t += L" Motion depth estimates motion when compatible frame-generation motion is unavailable.";
+            t += L" Motion depth uses Parallax until compatible frame-generation motion is available.";
             break;
         }
     }

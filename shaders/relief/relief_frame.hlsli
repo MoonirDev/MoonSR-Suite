@@ -11,7 +11,7 @@
 float StateGet(uint o) { return asfloat(state.Load(o)); }
 void StatePut(uint o, float v) { state.Store(o, asuint(v)); }
 
-void ReliefFrameUpdate(uint texturedPx, uint hudPx, uint changedPx, uint absDl32, uint sumY64, bool motionCut)
+void ReliefFrameUpdate(uint texturedPx, uint hudPx, uint changedPx, uint absDl32, uint sumY64, uint coherentPx, bool motionCut)
 {
     const float n = float(cSize.x * cSize.y);
     const float cov = float(texturedPx) / n;
@@ -20,7 +20,10 @@ void ReliefFrameUpdate(uint texturedPx, uint hudPx, uint changedPx, uint absDl32
     const float changed = float(changedPx) / n;
     const float meanAbsDl = float(absDl32) / (32.0 * n);
     const bool reset = (cFlags & RELIEF_F_RESET) != 0;
-    const bool cut = reset || motionCut || (changed > 0.85 && meanAbsDl > 0.5);
+    // Prefer the motion estimator's cut decision when available. The luma-only fallback compares
+    // unwarped frames, so a fast pan can exceed both of its cut thresholds without a scene change.
+    const bool hasMotionCut = (cFlags & RELIEF_F_MOTION_CUT) != 0;
+    const bool cut = reset || (hasMotionCut ? motionCut : (changed > 0.85 && meanAbsDl > 0.5));
 
     float frames = reset ? 0.0 : StateGet(RST_FRAMES);
     float covEma = frames < 1.0 ? cov : lerp(StateGet(RST_COV_EMA), cov, 0.08);
@@ -45,7 +48,8 @@ void ReliefFrameUpdate(uint texturedPx, uint hudPx, uint changedPx, uint absDl32
     StatePut(RST_COV, cov);
     StatePut(RST_HUD, hud);
     StatePut(RST_CUT, cut ? 1.0 : 0.0);
-    StatePut(RST_CHANGED, changed);
+    StatePut(RST_CHANGED, float(coherentPx) / n);
+    StatePut(44, meanAbsDl);
 }
 
 #endif

@@ -4,6 +4,66 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-25 - Smart Parallax stability (1.1.2)
+
+- Codex packaged the owner-approved halo playtest, including grain-resistant HUD learning, selected motion
+  for compatible generated frames, edge protection and the faster height pass. The isolated full build,
+  upscaling, frame generation, theme, Shading, Parallax and Motion Depth checks passed on the RTX 5060.
+
+## 2026-11-25 - Reuse frame-generation motion for Motion Depth
+
+- The revised objective limits relief to motion already analysed by frame generation. Codex removed the dedicated
+  estimator and updated the mode and Load order descriptions. Motion Depth uses Parallax when compatible motion
+  is unavailable. The isolated halo playtest was rebuilt.
+- Windows capture on the RTX 5060 verified Parallax fallback with generation off or later in Load order,
+  and active Motion Depth when compatible frame generation ran first.
+- On the rebuilt halo playtest, the fallback also stayed active with frame generation on the RTX A400, with
+  Smart Parallax on the RTX A400, and with 640×360 capture upscaled to 1920×1080 before frame generation.
+- An isolated Release packaging rehearsal with `tools/make_installer.ps1` produced a 2,949,736-byte installer
+  (2.81 MiB). All four shipped binaries reported version 1.1.1. Inno Setup packaged the four binaries,
+  README, licences and notices from the existing manifest. The rehearsal was kept under the ignored build
+  directory and was never run.
+- The full isolated Release build also passed the upscaling, frame generation, theme, strength-zero
+  and Motion Depth self-tests. GPU tests used the RTX 5060.
+- The Release and playtest builds produced byte-identical exports for all 24 paired images from
+  the saved Helldivers 2 and ATLYSS inputs at 50% and 100% Parallax on the RTX 5060.
+
+## 2026-11-24 - Smart parallax flicker playtest
+
+- The owner saw Parallax flicker at 4× in ATLYSS and pulsing or flicker at 2× and 4× in Helldivers 2. They also
+  reported shimmer on bright surfaces in Motion depth.
+- Codex made generated-frame relief strength approach the newest real frame gradually. The strict HUD mask and
+  path checks still apply. When matched motion supplies a scene-cut decision, relief uses it. The unwarped luma
+  comparison remains available for captures without that decision.
+- Motion depth now tapers the extra direction cue, depth boost, and displacement on bright surfaces. The local
+  replay isolated relief from the frame generator. The first live retest showed less pulsing, with shimmer
+  remaining after frame generation. The owner saw better stability with Smart parallax before frame generation.
+- After frame generation, Parallax now transfers the average colour change along the checked sampling path and
+  preserves finer detail from the generated image. It uses the same treatment on real and generated frames.
+  The owner reported less shimmer in the follow-up playtest and could still see it.
+- HUD learning now requires temporal changes with neighbouring support. The 90-frame grain test stayed active on
+  all ten material inputs while the opaque HUD regression remained pixel-exact. The revised Shading pass stayed
+  within its 1080p timing budget in the measured runs.
+- The next candidate also smooths the height used for displacement after frame generation. The flow-aligned
+  replay showed a small improvement in both Helldivers 2 clips. Lighting and the before-generation path keep
+  their existing height samples.
+- Offline replay compared the two real-frame height maps with height recomputed from the generated images.
+  Both the full analysis and band-pass trials increased aligned error and added GPU work. The playtest retains
+  the two real-frame height maps. Shimmer after frame generation remains open.
+- A displacement taper and interpolation of coarse motion had little effect in the saved clips. Sharing frame
+  generation's selected motion for height sampling reduced error at every tested phase against the generator's
+  own smooth-region warp. The coarser reference favoured the earlier build. The next playtest borrows this motion
+  for generated frames when the capture and GPU match and retains coarse flow around motion boundaries.
+  Synthetic checks verified that coherent selection changes the height sample, low confidence falls back, and
+  real frames stay pixel-exact on the RTX 5060, RTX A400 and Radeon iGPU.
+- The RTX 5060 Shading timing runs showed two clusters after idle gaps. A high-resolution timer kept the
+  pauses near 2 ms, and the slower cluster persisted. Per-pass timestamps located the largest time increases
+  in luminance, gating and height. The sRGB and cache trials were kept out of the app.
+- The height shader now calculates four adjacent pixels per thread. Two loaded Shading runs measured
+  0.2399 and 0.2398 ms at 1080p on the RTX 5060. All 312 paired benchmark PNGs matched. The isolated full
+  build and the upscaling, frame-generation, theme, Shading, Parallax, strength-zero and Motion depth checks
+  passed. The slowest high-resolution idle-gap run still exceeded the target.
+
 ## 2026-11-24 - Dismissible notices (1.1.1)
 
 - Codex restored the notice and warning close buttons in the standard and Retro layouts. With visual effects on,

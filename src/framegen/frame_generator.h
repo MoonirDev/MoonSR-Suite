@@ -96,7 +96,11 @@ public:
     // Synthesises the frame at phase t in (0,1) between RealFrame(1) (t = 0) and RealFrame(0) (t = 1) into `dst`,
     // a render target of exactly FrameSize(). On a scene cut it writes the nearer real frame instead of a blend.
     // Returns false if no valid pair exists or on a D3D failure. Leaves no RTV / SRV / UAV bound.
-    virtual bool Interpolate(float t, ID3D11RenderTargetView* dst) = 0;
+    // Optionally borrows the local phase's half-resolution RGBA16F selection (xy: motion in frame pixels,
+    // z: newest-frame blend share, w: confidence). Use it before the next interpolation, push, or reset.
+    // The selection is null on failure, in debug mode, or if the generator is on another device.
+    virtual bool Interpolate(float t, ID3D11RenderTargetView* dst,
+                             ID3D11ShaderResourceView** selection = nullptr) = 0;
 
     // Motion analysis of the newest pair for other GPU stages. See MotionFieldView.
     virtual MotionFieldView MotionField() const = 0;

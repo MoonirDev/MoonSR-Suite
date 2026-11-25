@@ -80,9 +80,12 @@ public:
     // Once per DISPLAYED frame. Reads `src` (the finished image at dstSize) and writes `dst` (same size, different
     // texture). `contentInDst` is where the game image lies inside dst (letterbox excluded). phase: 1 = the newest real
     // frame; (0,1) = a generated frame between the previous and the newest real frame (height and protection are
-    // warped to that phase). When the effect is off or inactive the engine does not call Apply at all.
+    // warped to that phase). Use filteredParallax for all frames when relief follows active frame generation,
+    // so the extra displacement preserves fine detail already interpolated by the generator. The optional
+    // selection is from that phase on this device, when the generator's input matches the analysed capture.
     virtual bool Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
-                       const RectI& contentInDst, float phase, float outputPixelScale = 1.0f) = 0;
+                       const RectI& contentInDst, float phase, float outputPixelScale = 1.0f,
+                       bool filteredParallax = false, ID3D11ShaderResourceView* selection = nullptr) = 0;
 
     virtual void Reset() = 0;     // scene cut, resize, device recovery
     virtual ReliefStats Stats() const = 0;

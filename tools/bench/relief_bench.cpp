@@ -8,8 +8,8 @@
 //   - height: Pearson / Spearman of the estimated H (Height debug view) against the band-passed true height, and the
 //     sign accuracy, on truly textured pixels;
 //   - shading fidelity: Pearson of the produced luminance change against the true relief shading change;
-//   - false relief: mean |dY|/Y (%) on flat, sky, character-interior and HUD pixels (truth: zero), and HUD max |d| in
-//     8-bit levels;
+//   - false relief: mean |dY|/Y (%) on flat, sky, character-interior and dense-smoke pixels, and separate opaque and
+//     translucent HUD max |d| in 8-bit levels;
 //   - halo: mean |dY|/Y in a 4 px band around silhouettes divided by the textured-interior mean;
 //   - temporal: flicker of the relief change along the known pan trajectory (mean |delta_t(x) - delta_t-1(x+v)| over
 //     mean |delta|);
@@ -71,6 +71,7 @@ float Lum(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722
 // World (2x supersampled frame space plus pan margin). Per texel: linear albedo, true height, baked cavity factor,
 // class (0 textured, 1 flat: no true relief) and object id (silhouette boundaries).
 enum Cls : uint8_t { kTextured = 0, kFlat = 1 };
+enum Hud : uint8_t { kNoHud = 0, kOpaqueHud, kTranslucentHud };
 struct World {
     int w = 0, h = 0;
     std::vector<float> r, g, b, height, cav;
@@ -92,6 +93,7 @@ const SceneDef kScenes[] = {
     {"bricks", true, false, false},     {"cobblestones", true, false, false}, {"rock", true, false, false},
     {"wood_planks", true, false, false},{"painted_wall", false, false, false},{"sky", false, false, true},
     {"hud_over_bricks", true, true, false}, {"silhouette", true, false, false}, {"stylised", false, false, true},
+    {"pixel_art", false, false, true}, {"smoke_over_bricks", true, false, false},
 };
 constexpr int kSceneCount = static_cast<int>(sizeof(kScenes) / sizeof(kScenes[0]));
 
@@ -125,7 +127,7 @@ void GenWorld(int scene, int W, int H, World& w) {
             uint8_t cls = kTextured, obj = 0;
             bool bakeCavity = true;
             switch (scene) {
-            case 0: case 6: Bricks(fx, fy, h, ar, ag, ab, seed); break;
+            case 0: case 6: case 10: Bricks(fx, fy, h, ar, ag, ab, seed); break;
             case 1: { // cobblestones: jittered Voronoi, domes, dark gaps
                 const float cs = 26;
                 const int cx = static_cast<int>(std::floor(fx / cs)), cy = static_cast<int>(std::floor(fy / cs));
@@ -195,6 +197,22 @@ void GenWorld(int scene, int W, int H, World& w) {
                 if (std::abs(rr - R) < 1.5f) ar = ag = ab = 0.03f;
                 break;
             }
+            case 9: { // Pixel-art tiles, with a limited palette and sharp, stepped silhouettes.
+                cls = kFlat;
+                bakeCavity = false;
+                const int px = static_cast<int>(fx) / 8;
+                const int py = static_cast<int>(fy) / 8;
+                const int row = py % 16;
+                const int col = px % 16;
+                const int edge = 6 - std::abs(col - 8);
+                constexpr float palette[][3] = {{0.04f, 0.08f, 0.16f}, {0.07f, 0.22f, 0.19f},
+                                                {0.15f, 0.41f, 0.24f}, {0.52f, 0.69f, 0.27f}};
+                const int hill = 11 - std::max(edge, 0);
+                int shade = row < hill ? 0 : row == hill ? 3 : row < hill + 3 ? 2 : 1;
+                if (row == 2 && (col == 4 || col == 12)) shade = 3;
+                ar = palette[shade][0]; ag = palette[shade][1]; ab = palette[shade][2];
+                break;
+            }
             }
             if (scene == 7) { // character-like silhouette over rock: smooth dark capsule body + head, no relief inside
                 const float cx = W * 0.25f + 10.0f;
@@ -205,6 +223,20 @@ void GenWorld(int scene, int W, int H, World& w) {
                     const float s = 0.55f + 0.45f * (1.0f - std::min(body, head)); // smooth shading
                     ar = 0.10f * s; ag = 0.11f * s; ab = 0.16f * s;
                 }
+            }
+            if (scene == 10) {
+                const float xFromPlume = (fx - 0.23f * W) / (0.12f * W);
+                const float yFromPlume = (fy - 0.24f * H) / (0.20f * H);
+                const float radial = std::hypot(xFromPlume, yFromPlume);
+                const float density = 1.0f - SmoothStep(0.30f, 1.0f, radial);
+                const float smoke = 0.30f + 0.20f * Fbm(fx * 0.033f, fy * 0.033f, seed + 10, 4);
+                const float wallCavity = 0.55f + 0.45f * h;
+                ar = std::lerp(ar * wallCavity, smoke, density);
+                ag = std::lerp(ag * wallCavity, 0.95f * smoke, density);
+                ab = std::lerp(ab * wallCavity, 0.92f * smoke, density);
+                h *= 1.0f - density;
+                if (density >= 0.85f) cls = kFlat;
+                bakeCavity = false;
             }
             w.r[i] = ar; w.g[i] = ag; w.b[i] = ab;
             w.height[i] = h;
@@ -223,11 +255,13 @@ struct Frame {
     std::vector<uint8_t> cls, obj, hud;
 };
 
-void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool hud, Frame& f) {
+void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool hud, Frame& f,
+                 Image* litReference = nullptr) {
     f.w = W; f.h = H;
     const size_t n = static_cast<size_t>(W) * H;
-    f.inLin.assign(n, 0); f.refLin.assign(n, 0); f.height.assign(n, 0); f.cls.assign(n, 0); f.obj.assign(n, 0); f.hud.assign(n, 0);
+    f.inLin.assign(n, 0); f.refLin.assign(n, 0); f.height.assign(n, 0); f.cls.assign(n, 0); f.obj.assign(n, 0); f.hud.assign(n, kNoHud);
     f.img.Alloc(W, H);
+    if (litReference) litReference->Alloc(W, H);
     constexpr float az = 135.0f * kPi / 180.0f, el = 45.0f * kPi / 180.0f;
     const float Lx = std::cos(el) * std::cos(az), Ly = -std::cos(el) * std::sin(az), Lz = std::sin(el);
     auto at = [&](const std::vector<float>& v, int x, int y) {
@@ -242,6 +276,7 @@ void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool 
     ParallelFor(static_cast<uint32_t>(H), [&](uint32_t y) {
         for (int x = 0; x < W; ++x) {
             float r = 0, g = 0, b = 0, ref = 0, hh = 0;
+            float litR = 0, litG = 0, litB = 0;
             for (int s = 0; s < 4; ++s) {
                 const float wx = 2.0f * (x + shift) + (s & 1), wy = 2.0f * (y + shiftY) + (s >> 1);
                 const float c = bil(wd.cav, wx, wy);
@@ -255,6 +290,7 @@ void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool 
                 nx /= nl; ny /= nl; nz /= nl;
                 const float S = (0.3f + 0.7f * std::max(0.0f, nx * Lx + ny * Ly + nz * Lz)) / (0.3f + 0.7f * Lz);
                 ref += Lum(ar, ag, ab) * S;
+                if (litReference) { litR += ar * S; litG += ag * S; litB += ab * S; }
                 hh += bil(wd.height, wx, wy);
             }
             r *= 0.25f; g *= 0.25f; b *= 0.25f;
@@ -269,9 +305,16 @@ void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool 
             p[0] = static_cast<uint8_t>(std::lround(LinToSrgb(b) * 255.0f));
             f.inLin[i] = Lum(SrgbToLin(p[2] / 255.0f), SrgbToLin(p[1] / 255.0f), SrgbToLin(p[0] / 255.0f));
             f.refLin[i] = ref * 0.25f;
+            if (litReference) {
+                uint8_t* q = litReference->Row(y) + x * 4;
+                q[2] = static_cast<uint8_t>(std::lround(LinToSrgb(litR * 0.25f) * 255.0f));
+                q[1] = static_cast<uint8_t>(std::lround(LinToSrgb(litG * 0.25f) * 255.0f));
+                q[0] = static_cast<uint8_t>(std::lround(LinToSrgb(litB * 0.25f) * 255.0f));
+                q[3] = 255;
+            }
         }
     });
-    if (hud) { // static HUD (frame space): opaque panels, a health bar and blocky text
+    if (hud) { // static HUD (frame space): opaque panels, a health bar, blocky text, and a translucent panel
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
                 bool on = false;
@@ -285,13 +328,19 @@ void RenderFrame(const World& wd, int W, int H, float shift, float shiftY, bool 
                     const float v = ink ? 0.95f : 0.05f;
                     c[0] = c[1] = c[2] = v;
                 }
-                if (!on) continue;
+                const bool translucent = x >= W / 2 - 60 && x < W / 2 + 60 && y >= 26 && y < 54;
+                if (!on && !translucent) continue;
                 const size_t i = static_cast<size_t>(y) * W + x;
                 uint8_t* p = f.img.Row(static_cast<uint32_t>(y)) + x * 4;
+                if (translucent) {
+                    for (size_t channel = 0; channel < 3; ++channel)
+                        c[channel] = std::lerp(SrgbToLin(p[2 - channel] / 255.0f), 0.24f, 0.55f);
+                }
                 p[2] = static_cast<uint8_t>(std::lround(LinToSrgb(c[0]) * 255)); p[1] = static_cast<uint8_t>(std::lround(LinToSrgb(c[1]) * 255));
                 p[0] = static_cast<uint8_t>(std::lround(LinToSrgb(c[2]) * 255));
+                if (litReference) std::memcpy(litReference->Row(y) + x * 4, p, 4);
                 f.inLin[i] = f.refLin[i] = Lum(SrgbToLin(p[2] / 255.0f), SrgbToLin(p[1] / 255.0f), SrgbToLin(p[0] / 255.0f));
-                f.height[i] = 0; f.cls[i] = kFlat; f.hud[i] = 1;
+                f.height[i] = 0; f.cls[i] = kFlat; f.hud[i] = translucent ? kTranslucentHud : kOpaqueHud;
             }
     }
 }
@@ -386,8 +435,10 @@ struct Harness {
     bool Analyse(const MotionFieldView* mv = nullptr) {
         return pass->Analyse(inTex.Get(), RectI{0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)}, mv, QpcNow());
     }
-    bool Apply(float phase = 1.0f) {
-        return pass->Apply(inSrv.Get(), Size{w, h}, outRtv.Get(), Size{w, h}, RectI{0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)}, phase);
+    bool Apply(float phase = 1.0f, bool filteredParallax = false, ID3D11ShaderResourceView* selection = nullptr) {
+        return pass->Apply(inSrv.Get(), Size{w, h}, outRtv.Get(), Size{w, h},
+                           RectI{0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)}, phase, 1.0f, filteredParallax,
+                           selection);
     }
     bool Read(Image& out) {
         ID3D11DeviceContext1* ctx = dev->Context();
@@ -405,8 +456,10 @@ struct SceneResult {
     std::string name;
     double pearsonH = 0, spearmanH = 0, signAcc = 0, shadeCorr = 0, litEdge = 0, shadowEdge = 0;
     double falseRelief = 0, hudMax = 0, halo = -1, hudHalo = -1, interior = 0, flicker = 0;
-    double maxOffsetPx = 0, maxHudOffsetPx = 0, generatedHudMax = 0;
+    double maxOffsetPx = 0, maxHudOffsetPx = 0, generatedHudMax = 0, translucentHudMax = 0;
     double embossCorr = 0, clarityCorr = 0, embossFalse = 0, clarityFalse = 0, embossHalo = -1, clarityHalo = -1;
+    double heightHalo = -1;
+    int staticChange = 0, staticFlicker = 0;
     float coverage = 0;
     bool autoDisabled = false, active = false;
     std::wstring reason;
@@ -508,11 +561,13 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
     hs.pass->SetSettings(rs);
 
     Frame f;
-    Image out, heightImg;
+    Image out, heightImg, litReference;
+    const bool exportFidelity = o.saveImages && !o.parallax && (scene == 0 || scene == 2);
     std::vector<float> prevDelta;
     double flickNum = 0, flickDen = 0;
     for (int k = 0; k < kFrames; ++k) {
-        RenderFrame(wd, W, H, k * kPan, k * kPanY, sd.hud, f);
+        RenderFrame(wd, W, H, k * kPan, k * kPanY, sd.hud, f,
+                    exportFidelity && k == kFrames - 1 ? &litReference : nullptr);
         hs.Upload(f.img);
         if (!hs.Analyse()) { err = "Analyse failed"; return false; }
         rs.debugView = ReliefDebugView::None;
@@ -544,7 +599,7 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
         for (size_t i = 0; i < f.hud.size(); ++i) {
             const double px = 3.0 * offset.px[i * 4] / 255.0; // blue channel holds the offset length
             res.maxOffsetPx = std::max(res.maxOffsetPx, px);
-            if (f.hud[i]) res.maxHudOffsetPx = std::max(res.maxHudOffsetPx, px);
+            if (f.hud[i] == kOpaqueHud) res.maxHudOffsetPx = std::max(res.maxHudOffsetPx, px);
         }
     }
     rs.debugView = ReliefDebugView::None;
@@ -565,9 +620,16 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
     const std::vector<float> hb = Blur(f.height, W, H, 3.0f);
     std::vector<float> est, tru;
     size_t signOk = 0, signN = 0;
+    double heightBandEnergy = 0, heightInteriorEnergy = 0;
+    size_t bandCount = 0;
     for (size_t i = 0; i < tex.size(); ++i) {
-        if (!tex[i]) continue;
         const float hEst = 2.0f * (heightImg.px[i * 4 + 1] / 255.0f) - 1.0f;
+        if (band[i]) {
+            heightBandEnergy += hEst * hEst;
+            ++bandCount;
+        }
+        if (!tex[i]) continue;
+        heightInteriorEnergy += hEst * hEst;
         const float t = f.height[i] - hb[i];
         est.push_back(hEst);
         tru.push_back(t);
@@ -576,6 +638,8 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
     res.pearsonH = Pearson(est, tru);
     res.spearmanH = Spearman(est, tru);
     res.signAcc = signN ? static_cast<double>(signOk) / signN : 0.0;
+    if (bandCount > 100 && heightInteriorEnergy > 0)
+        res.heightHalo = (heightBandEnergy / bandCount) / (heightInteriorEnergy / est.size());
     res.shadeCorr = MaskedPearson(delta, truthDelta, tex);
     // Bevel check: on pixels where the TRUE relief lighting brightens (light-facing slopes) or darkens (slopes facing
     // away) by more than 10 %, the mean produced change. Lit bevels need lit > 0 and shadow < 0; cavity-only darkening
@@ -592,8 +656,6 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
     }
     res.interior = MeanAbs(delta, tex);
     res.falseRelief = MeanAbs(delta, flat);
-    size_t bandCount = 0;
-    for (uint8_t b : band) bandCount += b;
     if (bandCount > 100) res.halo = res.interior > 0 ? MeanAbs(delta, band) / res.interior : -1;
     if (sd.hud && res.interior > 0) res.hudHalo = MeanAbs(delta, hudBand) / res.interior;
     size_t hudChanged = 0, hudAt = 0;
@@ -601,6 +663,10 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
         if (f.hud[i]) {
             double m = 0;
             for (int c = 0; c < 3; ++c) m = std::max(m, std::abs(static_cast<double>(out.px[i * 4 + c]) - f.img.px[i * 4 + c]));
+            if (f.hud[i] == kTranslucentHud) {
+                res.translucentHudMax = std::max(res.translucentHudMax, m);
+                continue;
+            }
             if (m > 0) { ++hudChanged; if (m > res.hudMax) hudAt = i; }
             res.hudMax = std::max(res.hudMax, m);
         }
@@ -608,20 +674,31 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
         printf("  note: %s: %zu HUD pixels changed, max %.0f levels at (%zu, %zu)\n", sd.name, hudChanged, res.hudMax, hudAt % W, hudAt / W);
     if (sd.hud) {
         Image generated;
-        for (float phase : {0.25f, 0.5f, 0.75f}) {
-            if (!hs.Apply(phase) || !hs.Read(generated)) { err = "generated HUD readback failed"; return false; }
-            for (size_t i = 0; i < f.hud.size(); ++i) {
-                if (!f.hud[i]) continue;
-                for (size_t c = 0; c < 3; ++c)
-                    res.generatedHudMax = std::max(res.generatedHudMax,
-                        double(std::abs(int(generated.px[4 * i + c]) - int(f.img.px[4 * i + c]))));
+        for (const bool filtered : {false, true}) {
+            if (filtered && !o.parallax) break;
+            for (float phase : {0.25f, 0.5f, 0.75f}) {
+                if (!hs.Apply(phase, filtered) || !hs.Read(generated)) { err = "generated HUD readback failed"; return false; }
+                for (size_t i = 0; i < f.hud.size(); ++i) {
+                    if (f.hud[i] != kOpaqueHud) continue;
+                    for (size_t c = 0; c < 3; ++c)
+                        res.generatedHudMax = std::max(res.generatedHudMax,
+                            double(std::abs(int(generated.px[4 * i + c]) - int(f.img.px[4 * i + c]))));
+                }
             }
         }
     }
     res.flicker = flickDen > 0 ? flickNum / flickDen : 0.0;
 
-    // Baselines: one gain per operator and strength, set on the bricks scene so that its textured-interior energy
-    // equals MoonSR's there, then used unchanged on every scene (no per-scene re-calibration).
+    char tagBuffer[64];
+    snprintf(tagBuffer, sizeof(tagBuffer), "%s_s%03d", sd.name, static_cast<int>(std::lround(strength * 100)));
+    const std::string tag = tagBuffer;
+    if (exportFidelity) {
+        std::error_code ec;
+        fs::create_directories(o.outDir, ec);
+        if (ec) { err = ec.message(); return false; }
+        if (!WritePng((o.outDir / (tag + "_reference.png")).wstring(), litReference, err)) return false;
+    }
+    // Set one gain per baseline and strength from bricks, then reuse it on every scene. Baseline() caps each pixel.
     for (int bi = 0; bi < 2; ++bi) {
         if (scene == 0) {
             const std::vector<float> unit = Baseline(f, bi == 0, 1.0f);
@@ -635,13 +712,22 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
         (bi == 0 ? res.embossCorr : res.clarityCorr) = corr;
         (bi == 0 ? res.embossFalse : res.clarityFalse) = fr;
         (bi == 0 ? res.embossHalo : res.clarityHalo) = halo;
+        if (exportFidelity) {
+            Image baseline = f.img;
+            for (size_t i = 0; i < bd.size(); ++i) {
+                for (size_t c = 0; c < 3; ++c) {
+                    uint8_t& v = baseline.px[i * 4 + c];
+                    v = static_cast<uint8_t>(std::lround(LinToSrgb(SrgbToLin(v / 255.0f) * (1.0f + bd[i])) * 255.0f));
+                }
+            }
+            const char* suffix = bi == 0 ? "_emboss.png" : "_clarity.png";
+            if (!WritePng((o.outDir / (tag + suffix)).wstring(), baseline, err)) return false;
+        }
     }
 
     if (o.saveImages) {
         std::error_code ec;
         fs::create_directories(o.outDir, ec);
-        char tag[64];
-        snprintf(tag, sizeof(tag), "%s_s%03d", sd.name, static_cast<int>(std::lround(strength * 100)));
         std::string e;
         WritePng((o.outDir / (std::string(tag) + "_input.png")).wstring(), f.img, e);
         WritePng((o.outDir / (std::string(tag) + "_relief.png")).wstring(), out, e);
@@ -657,11 +743,32 @@ bool RunScene(GpuDevice& dev, int scene, float strength, const ReliefBenchOption
         hs.pass->SetSettings(rs);
         if (hs.Apply() && hs.Read(split)) WritePng((o.outDir / (std::string(tag) + "_protection.png")).wstring(), split, e);
     }
+    if (scene == 0) {
+        // Stop the pan and let history settle on exactly the same textured input. Check subsequent output frames
+        // against both the input (relief is still active) and the first settled output (no new flicker).
+        rs.debugView = ReliefDebugView::None;
+        hs.pass->SetSettings(rs);
+        Image settled, next;
+        for (int k = 0; k < 40; ++k) {
+            if (!hs.Analyse()) { err = "static Analyse failed"; return false; }
+            if (k < 31) continue;
+            if (!hs.Apply() || !hs.Read(k == 31 ? settled : next)) { err = "static readback failed"; return false; }
+            if (k == 31) continue;
+            for (size_t i = 0; i < settled.px.size(); i += 4) {
+                for (size_t c = 0; c < 3; ++c) {
+                    const size_t index = i + c;
+                    res.staticChange = std::max(res.staticChange, std::abs(int(next.px[index]) - int(f.img.px[index])));
+                    res.staticFlicker = std::max(res.staticFlicker, std::abs(int(next.px[index]) - int(settled.px[index])));
+                }
+            }
+        }
+    }
     return true;
 }
 
 struct CameraPose {
     float x, z, yaw;
+    bool orbit = false;
 };
 
 // Trace rays against a flat wall and against the same wall displaced by a known height map.
@@ -686,6 +793,7 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
     rs.shading = rs.cavity = 0.0f;
     hs.pass->SetSettings(rs);
     Image input, output, prevInput, prevOutput;
+    CameraPose prevPose{};
     input.Alloc(W, H);
     std::vector<float> ref, flat, relief;
     const auto sample = [](const Image& image, float x, float y) {
@@ -697,8 +805,11 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
     };
     for (int frame = 0; frame < frames; ++frame) {
         const float t = static_cast<float>(frame);
-        const CameraPose p{step.x * t, step.z * t, step.yaw * t};
-        const float c = std::cos(p.yaw), s = std::sin(p.yaw);
+        const float yaw = step.yaw * t;
+        const float c = std::cos(yaw), s = std::sin(yaw);
+        // Orbit the wall centre at (0, 1), with the camera continually facing it.
+        const CameraPose p = step.orbit ? CameraPose{-s, 1.0f - c, yaw}
+                                       : CameraPose{step.x * t, step.z * t, yaw};
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
                 const float u = (static_cast<float>(x) + 0.5f - halfW) / focal;
@@ -713,7 +824,7 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
         hs.Upload(input);
         if (!hs.Analyse() || !hs.Apply() || !hs.Read(output)) { err = "parallax camera path render failed"; return false; }
         if (frame > 7) {
-            const float prevC = std::cos(p.yaw - step.yaw), prevS = std::sin(p.yaw - step.yaw);
+            const float prevC = std::cos(prevPose.yaw), prevS = std::sin(prevPose.yaw);
             double warpDelta = 0.0;
             ref.clear();
             flat.clear();
@@ -733,7 +844,7 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
                     flat.push_back(input.Row(static_cast<uint32_t>(y))[4 * x]);
                     relief.push_back(output.Row(static_cast<uint32_t>(y))[4 * x]);
 
-                    const float dx = wx - p.x + step.x, dz = 1.0f - p.z + step.z;
+                    const float dx = wx - prevPose.x, dz = 1.0f - prevPose.z;
                     const float prevZ = prevS * dx + prevC * dz;
                     const float prevX = focal * (prevC * dx - prevS * dz) / prevZ + halfW - 0.5f;
                     const float prevY = focal * wy / prevZ + halfH - 0.5f;
@@ -746,6 +857,7 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
         }
         prevInput = input;
         prevOutput = output;
+        prevPose = p;
     }
     flatSsim /= frames - 8;
     reliefSsim /= frames - 8;
@@ -770,9 +882,9 @@ bool MeasureParallaxPath(GpuDevice& dev, const CameraPose& step, float capPx, do
     return true;
 }
 
-// Time only the stage, with filler copies to keep GPU clocks up or with a 2 ms gap every eight frames.
-bool TimeRelief(GpuDevice& dev, uint32_t gw, uint32_t gh, uint32_t ow, uint32_t oh, int mode, ReliefTier tier, double& analyseMs,
-                double& applyMs, std::string& err) {
+// Time only the stage, with filler copies to keep GPU clocks up or with a requested 2 ms sleep every eight frames.
+bool TimeRelief(GpuDevice& dev, uint32_t gw, uint32_t gh, uint32_t ow, uint32_t oh, int mode, ReliefTier tier,
+                double& analyseMs, double& applyMs, std::string& err, int phases = 1) {
     World wd;
     GenWorld(0, static_cast<int>(2 * (gw + 16)), static_cast<int>(2 * (gh + 8)), wd);
     Frame f;
@@ -780,10 +892,10 @@ bool TimeRelief(GpuDevice& dev, uint32_t gw, uint32_t gh, uint32_t ow, uint32_t 
     Harness g;
     if (!g.Init(dev, gw, gh, err)) return false;
     g.Upload(f.img);
-    // Output-size input. Use the textured scene at 1:1 so the colour lookup samples representative data.
+    // Supply the same textured input at the output size. Upscaling happens once on the CPU outside the GPU timers.
     Harness o;
     if (!o.Init(dev, ow, oh, err)) return false;
-    if (ow == gw && oh == gh) o.Upload(f.img);
+    o.Upload(ow == gw && oh == gh ? f.img : BilinearUpscale(f.img, ow, oh));
     ReliefSettings rs;
     rs.tier = tier;
     if (tier == ReliefTier::Parallax) {
@@ -792,6 +904,9 @@ bool TimeRelief(GpuDevice& dev, uint32_t gw, uint32_t gh, uint32_t ow, uint32_t 
     }
     g.pass->SetSettings(rs);
     ID3D11DeviceContext1* ctx = dev.Context();
+    ComPtr<ID3D11Query> batchDone;
+    const D3D11_QUERY_DESC batchDesc{D3D11_QUERY_EVENT, 0};
+    if (FAILED(dev.Device()->CreateQuery(&batchDesc, &batchDone))) { err = "GPU timing batch query"; return false; }
     ComPtr<ID3D11Texture2D> fillA, fillB;
     if (mode == 0) {
         D3D11_TEXTURE2D_DESC td{};
@@ -808,17 +923,32 @@ bool TimeRelief(GpuDevice& dev, uint32_t gw, uint32_t gh, uint32_t ow, uint32_t 
     for (int i = 0; i < 400; ++i) {
         filler();
         if (!g.Analyse()) { err = "Analyse failed"; return false; }
-        if (!g.pass->Apply(o.inSrv.Get(), Size{ow, oh}, o.outRtv.Get(), Size{ow, oh}, RectI{0, 0, static_cast<int32_t>(ow), static_cast<int32_t>(oh)}, 1.0f)) {
-            err = "Apply failed"; return false;
+        for (int k = 1; k <= phases; ++k) {
+            const float phase = static_cast<float>(k) / phases;
+            if (!g.pass->Apply(o.inSrv.Get(), Size{ow, oh}, o.outRtv.Get(), Size{ow, oh},
+                               RectI{0, 0, static_cast<int32_t>(ow), static_cast<int32_t>(oh)}, phase, 1.0f, phases > 1)) {
+                err = "Apply failed"; return false;
+            }
         }
-        if ((i & 7) == 7) { ctx->Flush(); if (mode == 1) Sleep(2); }
+        if ((i & 7) == 7) {
+            // Bound the queued work so the pass can collect completed timestamp sets in the next batch.
+            // The wait and optional idle gap are outside the Analyse and Apply timestamp intervals.
+            ctx->End(batchDone.Get());
+            ctx->Flush();
+            const ULONGLONG deadline = GetTickCount64() + 5000;
+            HRESULT ready;
+            while ((ready = ctx->GetData(batchDone.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE &&
+                   GetTickCount64() < deadline) {
+                SwitchToThread();
+            }
+            if (ready != S_OK) { err = "GPU timing batch did not complete"; return false; }
+            if (mode == 1) Sleep(2);
+        }
     }
-    ctx->Flush();
-    Sleep(50);
-    for (int i = 0; i < 8; ++i) { g.Analyse(); ctx->Flush(); Sleep(5); } // collect the last timestamps
     const ReliefStats st = g.pass->Stats();
     analyseMs = st.analyseGpuMs;
     applyMs = st.applyGpuMs;
+    if (analyseMs <= 0.0 || applyMs <= 0.0) { err = "GPU timestamp samples unavailable"; return false; }
     return true;
 }
 
@@ -884,7 +1014,7 @@ int RunReliefMotionBench(const moonsr::AdapterInfo& adapter) {
         return x >= static_cast<float>(area.left) && x < static_cast<float>(area.right) &&
                y >= static_cast<float>(area.top) && y < static_cast<float>(area.bottom);
     };
-    auto upload = [&](bool rotation, uint32_t cut, bool still = false) {
+    auto upload = [&](bool rotation, uint32_t cut, bool still = false, float forwardConfidence = 1.0f) {
         for (uint32_t y = 0; y < cells.height; ++y)
             for (uint32_t x = 0; x < cells.width; ++x) {
                 const float px = (static_cast<float>(x) + 0.5f) * cellPx;
@@ -907,7 +1037,7 @@ int RunReliefMotionBench(const moonsr::AdapterInfo& adapter) {
             }
         auto* ctx = dev->Context();
         ctx->UpdateSubresource(flow.Get(), 1, nullptr, vectors.data(), cells.width * 4 * sizeof(float), 0);
-        for (auto& v : vectors) { v[0] = -v[0]; v[1] = -v[1]; }
+        for (auto& v : vectors) { v[0] = -v[0]; v[1] = -v[1]; v[2] = forwardConfidence; }
         ctx->UpdateSubresource(flow.Get(), 0, nullptr, vectors.data(), cells.width * 4 * sizeof(float), 0);
         ctx->UpdateSubresource(cutBuffer.Get(), 0, nullptr, &cut, 0, 0);
     };
@@ -986,6 +1116,70 @@ int RunReliefMotionBench(const moonsr::AdapterInfo& adapter) {
     printf("  %ux%u GPU timestamp medians: analyse %.4f ms, apply %.4f ms (Parallax, same flow)\n",
            W, H, base.analyseGpuMs, base.applyGpuMs);
 
+    // With asymmetric confidence, relief should recover across generated phases instead of switching on at phase 1.
+    upload(false, 0, true, 0.0f);
+    if (!render(&motion, 24)) return 1;
+    const double newestChange = delta(out, background);
+    double earlyChange = 0.0;
+    bool smoothRecovery = true;
+    for (const float phase : {0.25f, 0.5f, 0.75f}) {
+        if (!hs.Apply(phase) || !hs.Read(out)) return 1;
+        const double change = delta(out, background);
+        smoothRecovery &= change > earlyChange && change < newestChange;
+        earlyChange = change;
+    }
+    check(smoothRecovery, "asymmetric motion confidence ramps relief toward the newest real frame");
+
+    // The post-generation filter keeps the displacement visible while attenuating the colour sweep.
+    rs.shading = rs.cavity = 0.0f;
+    hs.pass->SetSettings(rs);
+    upload(false, 0, true);
+    if (!render(&motion, 24)) return 1;
+    bool filtered = true;
+    for (const float phase : {0.25f, 0.5f, 0.75f, 1.0f}) {
+        if (!hs.Apply(phase) || !hs.Read(out)) return 1;
+        const double regularChange = delta(out, foregroundInterior);
+        if (!hs.Apply(phase, true) || !hs.Read(out)) return 1;
+        const double filteredChange = delta(out, foregroundInterior);
+        filtered &= filteredChange > regularChange * 0.35 && filteredChange < regularChange * 0.8;
+    }
+    check(filtered, "filtered Parallax retains displacement on real and generated frames");
+
+    // A coherent selected warp may shift height lookups on generated frames only.
+    D3D11_TEXTURE2D_DESC selectionDesc{};
+    selectionDesc.Width = W / 2;
+    selectionDesc.Height = H / 2;
+    selectionDesc.MipLevels = selectionDesc.ArraySize = 1;
+    selectionDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    selectionDesc.SampleDesc.Count = 1;
+    selectionDesc.Usage = D3D11_USAGE_DEFAULT;
+    selectionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> selection;
+    ComPtr<ID3D11ShaderResourceView> selectionView;
+    hr = dev->Device()->CreateTexture2D(&selectionDesc, nullptr, &selection);
+    if (SUCCEEDED(hr)) hr = dev->Device()->CreateShaderResourceView(selection.Get(), nullptr, &selectionView);
+    if (FAILED(hr)) { printf("error: synthetic selection resource creation failed (0x%08lx)\n", static_cast<unsigned long>(hr)); return 1; }
+    std::vector<std::array<float, 4>> hypotheses(static_cast<size_t>(selectionDesc.Width) * selectionDesc.Height);
+    auto setSelection = [&](float confidence) {
+        std::fill(hypotheses.begin(), hypotheses.end(), std::array{5.0f, 0.0f, 0.5f, confidence});
+        dev->Context()->UpdateSubresource(selection.Get(), 0, nullptr, hypotheses.data(),
+                                         selectionDesc.Width * static_cast<UINT>(sizeof(hypotheses.front())), 0);
+    };
+    setSelection(1.0f);
+    Image baseline;
+    if (!hs.Apply(0.5f, true) || !hs.Read(baseline) ||
+        !hs.Apply(0.5f, true, selectionView.Get()) || !hs.Read(out)) return 1;
+    check(out.px != baseline.px, "coherent selected motion changes generated height sampling");
+    setSelection(0.0f);
+    if (!hs.Apply(0.5f, true, selectionView.Get()) || !hs.Read(out)) return 1;
+    check(out.px == baseline.px, "unreliable selected motion falls back to coarse flow");
+    setSelection(1.0f);
+    if (!hs.Apply(1.0f, true) || !hs.Read(baseline) ||
+        !hs.Apply(1.0f, true, selectionView.Get()) || !hs.Read(out)) return 1;
+    check(out.px == baseline.px, "interpolation selection leaves real frames pixel-exact");
+
+    rs.shading = rs.cavity = 1.0f;
+
     rs.tier = ReliefTier::MotionDepth;
     hs.pass->SetSettings(rs);
     upload(false, 0, true);
@@ -997,11 +1191,42 @@ int RunReliefMotionBench(const moonsr::AdapterInfo& adapter) {
         steady &= out.px == real.px;
     }
     check(steady, "stationary generated frames match the real frame at 2x and 4x phases");
+
+    // Keep the analysed height and depth fixed and only vary the colour passed to Apply.
+    rs.debugView = ReliefDebugView::Offset;
+    hs.pass->SetSettings(rs);
+    if (!hs.Apply() || !hs.Read(out)) return 1;
+    const auto offsetCode = [](const uint8_t* p) { return double(p[0]); };
+    const RectI wholeFrame{0, 0, W, H};
+    const double normalOffset = mean(out, wholeFrame, offsetCode);
+    Image highlighted = frame.img;
+    for (size_t i = 0; i < highlighted.px.size(); i += 4)
+        for (size_t c = 0; c < 3; ++c)
+            highlighted.px[i + c] = static_cast<uint8_t>(220 + (35 * highlighted.px[i + c]) / 255);
+    hs.Upload(highlighted);
+    if (!hs.Apply() || !hs.Read(out)) return 1;
+    const double brightOffset = mean(out, wholeFrame, offsetCode);
+    check(normalOffset > 0.0 && brightOffset < 0.8 * normalOffset, "bright output rolls off Motion depth displacement");
+    hs.Upload(frame.img);
+    rs.debugView = ReliefDebugView::None;
+    hs.pass->SetSettings(rs);
+
+    // The unchanged motion pair represents a large exposure change. An unwarped luminance
+    // comparison can mistake it for a scene cut even though the motion analysis remains valid.
+    Image darkened = frame.img;
+    for (size_t i = 0; i < darkened.px.size(); i += 4)
+        for (size_t c = 0; c < 3; ++c)
+            darkened.px[i + c] /= 3;
+    hs.Upload(darkened);
+    if (!render(&motion, 1)) return 1;
+    check(out.px != darkened.px, "large luminance change with a valid motion pair keeps relief active");
+    hs.Upload(frame.img);
+
     upload(false, 1);
     if (!render(&motion, 1)) return 1;
     bool noFlash = out.px == frame.img.px;
     for (const float phase : {0.25f, 0.5f, 0.75f}) {
-        if (!hs.Apply(phase) || !hs.Read(out)) return 1;
+        if (!hs.Apply(phase, true, selectionView.Get()) || !hs.Read(out)) return 1;
         noFlash &= out.px == frame.img.px;
     }
     check(noFlash, "scene cut passes real and generated colours through without a flash");
@@ -1009,6 +1234,29 @@ int RunReliefMotionBench(const moonsr::AdapterInfo& adapter) {
     hs.pass->SetSettings(rs);
     if (!hs.Apply() || !hs.Read(out)) return 1;
     check(mean(out, foreground, neutralError) <= 1.0, "scene cut clears depth immediately");
+
+    hs.pass->Reset();
+    rs.tier = ReliefTier::Parallax;
+    rs.debugView = ReliefDebugView::None;
+    hs.pass->SetSettings(rs);
+    upload(false, 0, true);
+    Frame overlay;
+    for (int k = 0; k < 48; ++k) {
+        RenderFrame(world, W, H, 0.25f * k, 0.1f * k, true, overlay);
+        hs.Upload(overlay.img);
+        if (!hs.Analyse(&motion)) return 1;
+    }
+    bool hudExact = true;
+    size_t hudPixels = 0;
+    for (const float phase : {0.25f, 0.5f, 0.75f}) {
+        if (!hs.Apply(phase, true, selectionView.Get()) || !hs.Read(out)) return 1;
+        for (size_t i = 0; i < overlay.hud.size(); ++i) {
+            if (overlay.hud[i] != kOpaqueHud) continue;
+            ++hudPixels;
+            hudExact &= std::memcmp(&out.px[4 * i], &overlay.img.px[4 * i], 4) == 0;
+        }
+    }
+    check(hudExact && hudPixels > 0 && out.px != overlay.img.px, "selected motion leaves opaque HUD pixels untouched");
     printf("Motion depth checks: %d failures\n", failures);
     return failures == 0 ? 0 : 1;
 }
@@ -1100,11 +1348,14 @@ int RunReliefImage(const ReliefBenchOptions& o, const moonsr::AdapterInfo& adapt
             const std::string stem = path.stem().string();
             std::string e;
             WritePng((o.outDir / (stem + "_input.png")).wstring(), frame, e);
+            hs.Upload(frame);
             for (float s : o.strengths) {
                 rs.strength = s;
                 char tag[32];
                 snprintf(tag, sizeof(tag), "_s%03d", static_cast<int>(std::lround(s * 100)));
-                for (auto [view, name] : {std::pair{ReliefDebugView::Split, "_split"}, std::pair{ReliefDebugView::Protection, "_protection"},
+                for (auto [view, name] : {std::pair{ReliefDebugView::Split, "_split"},
+                                          std::pair{ReliefDebugView::Protection, "_protection"},
+                                          std::pair{ReliefDebugView::Height, "_height"},
                                           std::pair{ReliefDebugView::None, "_relief"}}) {
                     rs.debugView = view;
                     hs.pass->SetSettings(rs);
@@ -1150,6 +1401,8 @@ int RunReliefBench(const ReliefBenchOptions& o, const moonsr::AdapterInfo& adapt
                    100 * r.embossFalse, halo(r.embossHalo), r.clarityCorr, 100 * r.clarityFalse, halo(r.clarityHalo),
                    r.reason.empty() ? "" : " | ", Narrow(r.reason).c_str());
             if (r.hudHalo >= 0) printf("%-16s HUD-adjacent band / interior: %.2f\n", "", r.hudHalo);
+            if (kScenes[s].hud) printf("%-16s translucent HUD maximum RGB change: %.0f levels\n", "", r.translucentHudMax);
+            if (r.heightHalo >= 0) printf("%-16s raw height halo-band / interior energy: %.3f\n", "", r.heightHalo);
             if (o.parallax) printf("%-16s maximum offset %.3f px, opaque HUD maximum %.3f px\n",
                                   "", r.maxOffsetPx, r.maxHudOffsetPx);
             if (kScenes[s].texturedTruth)
@@ -1164,6 +1417,11 @@ int RunReliefBench(const ReliefBenchOptions& o, const moonsr::AdapterInfo& adapt
         for (int s = 0; s < kSceneCount; ++s) {
             const SceneResult& r = results[s];
             const SceneDef& d = kScenes[s];
+            if (s == 0) {
+                check(strength == 0.0f || r.staticChange > 0, "bricks: relief remains visible after the camera stops");
+                check(r.staticFlicker <= 1, "bricks: settled still frames vary by at most one RGB code value (max " +
+                                            std::to_string(r.staticFlicker) + ")");
+            }
             if (d.expectAutoDisable) check(r.autoDisabled, std::string(d.name) + ": auto-disabled");
             else if (d.texturedTruth) {
                 check(!r.autoDisabled && r.active, std::string(d.name) + ": active, not auto-disabled");
@@ -1197,6 +1455,7 @@ int RunReliefBench(const ReliefBenchOptions& o, const moonsr::AdapterInfo& adapt
     if (o.parallax) {
         constexpr std::pair<const char*, CameraPose> paths[] = {
             {"strafe", {0.0025f, 0.0f, 0.0f}}, {"dolly", {0.0f, 0.0025f, 0.0f}}, {"yaw", {0.0f, 0.0f, 0.002f}},
+            {"orbit", {0.0f, 0.0f, 0.002f, true}},
         };
         printf("\nWall displacement reference (shading/cavity off, SSIM and mean extra 8-bit warp error)\n");
         for (const float capPx : {2.0f, 3.0f}) {
@@ -1226,12 +1485,26 @@ int RunReliefBench(const ReliefBenchOptions& o, const moonsr::AdapterInfo& adapt
         (void)TimeRelief(*dev, 1280, 720, 1920, 1080, 0, tier, warmA, warmP, warmErr); // warm-up (first-use paging), discarded
         for (const int mode : {0, 1}) {
             printf("  %s\n", mode == 0 ? "loaded (GPU kept busy by a filler copy between frames, as under a running game)"
-                                       : "idle gaps (2 ms pause every 8 frames; the GPU drops to low clocks)");
+                                       : "idle gaps (Windows Sleep(2) every 8 frames)");
             for (const auto& s : sizes) {
                 double a = 0, p = 0;
                 std::string err;
                 if (!TimeRelief(*dev, s[0], s[1], s[2], s[3], mode, tier, a, p, err)) { printf("error: timing: %s\n", err.c_str()); return 1; }
                 printf("    %4ux%-4u -> %4ux%-4u  analyse %.4f ms  apply %.4f ms  total %.4f ms\n", s[0], s[1], s[2], s[3], a, p, a + p);
+            }
+        }
+        printf("  loaded, synthetic generated phases on a still input (no motion field or generator cost)\n");
+        for (const auto& s : sizes) {
+            if (s[0] == s[2] && s[1] == s[3]) continue;
+            for (const int phases : {2, 4}) {
+                double a = 0, p = 0;
+                std::string err;
+                if (!TimeRelief(*dev, s[0], s[1], s[2], s[3], 0, tier, a, p, err, phases)) {
+                    printf("error: phase timing: %s\n", err.c_str());
+                    return 1;
+                }
+                printf("    %4ux%-4u -> %4ux%-4u  %dx  analyse %.4f ms per real frame  apply %.4f ms per display phase\n",
+                       s[0], s[1], s[2], s[3], phases, a, p);
             }
         }
     }

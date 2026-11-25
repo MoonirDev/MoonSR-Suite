@@ -120,21 +120,25 @@ capture drops real frames latest-wins); the status note says so.
 Smart parallax runs at its position in Load order and on its selected GPU. Legacy three-stage orders keep their
 existing relative order, with Smart parallax appended. The engine analyses the original capture once per real frame.
 When Smart parallax comes before frame generation, its result feeds the generator. When it comes after, it processes
-both real and generated frames. The software cursor and frame counter are drawn after all stages. The engine creates
+both real and generated frames. With frame generation enabled, that path blends the colour change along each safe
+displacement segment. It uses the same blend on both frame types to limit changes in fine detail at phase boundaries.
+When frame generation uses the same GPU and matching capture input, the generated phases can borrow its
+half-resolution motion selection for height lookups in confidently tracked regions. Motion boundaries, scene
+cuts and incompatible devices or inputs keep the coarse-flow path. HUD and edge checks retain their original
+sampling positions.
+The software cursor and frame counter are drawn after all stages. The engine creates
 the pass only while enabled. Analysis stores two game-size height maps and half-size protection maps. Shading uses a
 directional light and cavity darkening. Parallax adds a screen-position-driven colour lookup with an output-pixel
 cap, a gradient limit, and protection checks along the sampling path.
 
-Motion depth reuses capture-size cell flow when it is available from an earlier stage on the same GPU. Otherwise,
-it runs the existing motion analysis on its own GPU using the original captures at half flow resolution. This
-analysis never schedules or creates generated frames. A robust projective fit removes the dominant plane's motion.
+Motion depth reuses capture-size cell flow when frame generation runs earlier on the same GPU. It uses
+Parallax when compatible motion is unavailable. A robust projective fit removes the dominant plane's motion.
 The remaining motion estimates relative depth, geometry boundaries, and independent motion. The pass keeps
 reprojected depth through reliable turns, fades it on unreliable motion, and resets it on cuts.
 
 When the relief GPU differs from the main device, the original capture and the stage's colour input travel over
 separate size-cached cross-adapter links. A return link supplies the relief result to the rest of the pipeline. The engine
-leaves the input frame usable if a transfer or relief render fails. The links and dedicated motion estimator are
-released when the stage is disabled.
+leaves the input frame usable if a transfer or relief render fails. The links are released when the stage is disabled.
 
 For generated frames, apply samples both real-frame height maps at their motion-warped positions when flow is
 available, blending by display phase. It uses the stronger protection from the two frames, keeps HUD protection in

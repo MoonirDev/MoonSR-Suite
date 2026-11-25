@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.1.1**
+**Version 1.1.2**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -32,7 +32,7 @@ It is an experimental personal project. Quality and speed claims come only from 
   runs in a small helper process (`MoonSR_NrHost.exe`).
 - **Smart parallax (experimental):** adds surface relief to textured parts of the captured picture. Shading adds
   highlights and shadows. Parallax also shifts surface detail by up to 3 output pixels. Motion depth reuses compatible
-  frame-generation motion or estimates motion independently, even with frame generation off. See the
+  frame-generation motion and uses Parallax when that motion is unavailable. See the
   [Smart parallax design](documentation/research/screen_space_relief.md).
 - **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
   ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.
@@ -97,6 +97,8 @@ Binaries are written to `build\main\bin`:
 
 ## Releases
 
+- **1.1.2** (2026-11-25): improves Smart parallax around edges and during frame generation, reduces false pauses
+  from grain, and explains when Motion depth falls back to Parallax.
 - **1.1.1** (2026-11-24): restores the close button on notices and warnings, including the short closing animation.
 - **1.1.0** (2026-11-23): adds experimental Smart parallax with Shading, Parallax and Motion depth. Smart parallax
   can move in Load order and run on a GPU of its own. Motion depth works with frame generation off. Home adds an

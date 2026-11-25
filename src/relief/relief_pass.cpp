@@ -88,7 +88,7 @@ constexpr float kSigmaFloor = 0.02f;     // stops noise / grain / dark regions f
 constexpr float kTexGate[4] = {0.012f, 0.045f, 0.8f, 1.4f}; // sigma_local ramps (log2 luma)
 constexpr float kEdgeGate[2] = {0.22f, 0.55f};              // |grad B| ramp (stops per px), dilated 3 px
 constexpr float kHistoryAlpha = 0.35f;   // new-estimate weight where history is valid
-constexpr float kFrameChangedMin = 0.1f; // share of pixels changing beyond the noise floor for the HUD counter to advance
+constexpr float kFrameChangedMin = 0.1f; // share of pixels with spatially supported change for HUD learning
 constexpr float kMaxDelta = 0.15f;       // soft cap of the luminance change (fraction of linear luminance)
 // Gains per unit strength. Directional shading dominates cavity darkening, so borders read as lit bevels (highlight on
 // the light-facing edge, shadow on the opposite edge) rather than as uniformly darkened outlines.
@@ -123,6 +123,7 @@ struct alignas(16) ApplyCB {
     float parallaxPx;
     float outTexel[2];
     uint32_t protectCharacters, hasMotion, hasHistory, hasDepthHistory;
+    uint32_t filteredParallax, hasSelection, padding[2];
 };
 static_assert(sizeof(ApplyCB) % 16 == 0);
 
@@ -180,8 +181,8 @@ public:
         sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
         if (SUCCEEDED(hr)) hr = d->CreateSamplerState(&sd, &linClamp_);
         // Small raw buffers: the frame statistics (slot-spread counters) and the persistent frame state (64 bytes).
-        // Statistic counters, each spread over 64 slots (relief_common.hlsli RS_SLOTS): 3 counters in A, 2 in B.
-        if (SUCCEEDED(hr)) hr = CreateRawBuffer((5 * 64 + 4) * 4, stats_); // 5 counters x 64 slots + finished-group counter (relief_common.hlsli)
+        // Six counters spread over 64 slots, followed by the completion counter. See relief_common.hlsli.
+        if (SUCCEEDED(hr)) hr = CreateRawBuffer((6 * 64 + 4) * 4, stats_);
         if (SUCCEEDED(hr)) hr = CreateRawBuffer(kStateSlots * 4, state_);
         D3D11_BUFFER_DESC st{};
         st.ByteWidth = kStateSlots * 4;
@@ -311,23 +312,23 @@ public:
         ctx->ClearUnorderedAccessViewUint(stats_.uav.Get(), zeros);
         ctx->CSSetConstantBuffers(0, 1, cbAnalyse_.GetAddressOf());
         ctx->CSSetSamplers(0, 1, linClamp_.GetAddressOf());
-        const UINT gLumaX = (size.width + 15) / 16, gLumaY = (size.height + 15) / 16;
-        const UINT g8fx = (size.width + 7) / 8, g8fy = (size.height + 7) / 8;
+        // Luma covers 16×16 directly. Height covers the same area with 8×8 threads and four pixels per thread.
+        const UINT gFullX = (size.width + 15) / 16, gFullY = (size.height + 15) / 16;
 
         const UINT gHx = ((size.width + 1) / 2 + 15) / 16, gHy = ((size.height + 1) / 2 + 15) / 16; // half size
-        Dispatch(csLuma_.Get(), {srcView}, {l_[cur_].uav.Get()}, gLumaX, gLumaY);
+        Dispatch(csLuma_.Get(), {srcView}, {l_[cur_].uav.Get()}, gFullX, gFullY);
         const auto& boxShaders = c.radius == 3 ? csBoxR3_ : csBox_;
         Dispatch(boxShaders[0].Get(), {l_[cur_].srv.Get()}, {t1_.uav.Get()}, gHx, gHy);
         Dispatch(boxShaders[1].Get(), {t1_.srv.Get()}, {t2_.uav.Get()}, gHx, gHy);
         Dispatch(csGate_.Get(),
                  {l_[cur_].srv.Get(), t2_.srv.Get(), count_[prev].srv.Get(), l_[prev].srv.Get(),
                   motionValid_ ? motion->stats : nullptr},
-                 {p_[cur_].uav.Get(), stats_.uav.Get(), state_.uav.Get(), count_[cur_].uav.Get()}, gHx, gHy);
+                 {p_[cur_].uav.Get(), stats_.uav.Get(), state_.uav.Get(), count_[cur_].uav.Get(), heightEdge_.uav.Get()}, gHx, gHy);
         Dispatch(csHeight_.Get(),
                  {t2_.srv.Get(), l_[cur_].srv.Get(), nullptr, h_[prev].srv.Get(),
                   motionValid_ ? motion->flow : nullptr, motionValid_ ? motion->stats : nullptr, state_.srv.Get(),
-                  p_[cur_].srv.Get()},
-                 {h_[cur_].uav.Get()}, g8fx, g8fy);
+                  p_[cur_].srv.Get(), heightEdge_.srv.Get()},
+                 {h_[cur_].uav.Get()}, gFullX, gFullY);
         depthAnalysed_ = useDepth;
         if (useDepth) {
             Dispatch(csMotionFit_.Get(), {motionFlow_.Get(), p_[cur_].srv.Get()}, {motionFit_.uav.Get(), state_.uav.Get()}, 1, 1);
@@ -351,7 +352,8 @@ public:
     }
 
     bool Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
-               const RectI& contentInDst, float phase, float outputPixelScale) override {
+               const RectI& contentInDst, float phase, float outputPixelScale, bool filteredParallax,
+               ID3D11ShaderResourceView* selection) override {
         if (!src || !dst || srcSize.Empty() || srcSize != dstSize) {
             if (!applyArgsLogged_) {
                 applyArgsLogged_ = true;
@@ -411,6 +413,9 @@ public:
         c.hasDepthHistory = depthHistoryValid_ ? 1u : 0u;
         c.srcLinear = IsLinearFormat(svd.Format) ? 1u : 0u;
         c.protectCharacters = settings_.protectCharacters ? 1u : 0u;
+        c.filteredParallax = filteredParallax ? 1u : 0u;
+        c.hasSelection = selection && hasMotion && historyValid_ && filteredParallax && c.phase < 1.0f &&
+                         c.parallaxPx > 0.0f ? 1u : 0u;
         if (hasMotion) {
             c.cellInv[0] = c.cellInv[1] = 1.0f / motionCellPx_;
             c.cells[0] = motionCells_.width;
@@ -438,7 +443,8 @@ public:
                                                depth ? motionDepth_[cur_].srv.Get() : nullptr,
                                                historyValid_ ? h_[prev].srv.Get() : nullptr,
                                                historyValid_ ? p_[prev].srv.Get() : nullptr,
-                                               depth && depthHistoryValid_ ? motionDepth_[prev].srv.Get() : nullptr};
+                                               depth && depthHistoryValid_ ? motionDepth_[prev].srv.Get() : nullptr,
+                                               c.hasSelection ? selection : nullptr};
             ctx->PSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
             ctx->PSSetConstantBuffers(0, 1, cbApply_.GetAddressOf());
             ctx->PSSetSamplers(0, 1, linClamp_.GetAddressOf());
@@ -477,7 +483,7 @@ public:
         std::wstring why;
         if (settings_.tier == ReliefTier::MotionDepth && !depthAnalysed_)
             why = depthFailed_ ? L"Motion depth resources unavailable. Using Parallax."
-                               : L"Waiting for motion from a pair of real frames. Using Parallax.";
+                               : L"Compatible frame-generation motion is unavailable. Using Parallax.";
         else if (depthAnalysed_ && haveState && stateVals_[kMotionFit] > 2.5f && stateVals_[kCut] < 0.5f)
             why = L"Motion depth is waiting for reliable flow.";
         auto add = [&why](const wchar_t* s) {
@@ -652,6 +658,7 @@ private:
             hr = CreateTex(halfSize, DXGI_FORMAT_R16G16_UNORM, count_[i]);
         if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R32G32_FLOAT, t1_);
         if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R16G16_FLOAT, t2_);
+        if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R8_UNORM, heightEdge_);
         for (Tex& gate : p_)
             if (SUCCEEDED(hr)) hr = CreateTex(halfSize, DXGI_FORMAT_R8G8B8A8_UNORM, gate);
         if (FAILED(hr)) {
@@ -794,7 +801,7 @@ private:
     ComPtr<ID3D11ShaderResourceView> srcSrv_;
     DXGI_FORMAT srcFormat_ = DXGI_FORMAT_UNKNOWN;
     std::array<Tex, 2> l_, h_, count_, p_;
-    Tex t1_, t2_;
+    Tex t1_, t2_, heightEdge_;
     std::array<Tex, 2> motionDepth_;
     RawBuf motionFit_;
     Size depthCells_;

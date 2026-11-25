@@ -13,14 +13,13 @@ Texture2DArray<float4> flowTex     : register(t4); // MotionFieldView::flow (opt
 Buffer<uint>           motionStats : register(t5); // MotionFieldView::stats (optional)
 ByteAddressBuffer      state       : register(t6); // frame state (relief_frame.hlsli)
 Texture2D<float4>      gateTex     : register(t7); // half-size gates (hud, edge * tex, changed, SigmaEnc(sigma))
+Texture2D<float>       edgeTex     : register(t8);
 SamplerState           linClamp    : register(s0);
 
 RWTexture2D<float>  outH     : register(u0);
 
-[numthreads(8, 8, 1)]
-void main(uint3 dtid : SV_DispatchThreadID)
+void HeightPixel(int2 p, bool cut)
 {
-    const int2 p = int2(dtid.xy);
     if (any(p >= int2(cSize))) return;
     const float2 uv = (float2(p) + 0.5) / float2(cSize);
 
@@ -29,11 +28,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     const float d = lNow - (ab.x * lNow + ab.y);
     const float4 gate = gateTex.SampleLevel(linClamp, uv, 0);
     const float sigma = SigmaDec(gate.w);
-    const float hRaw = tanh(d / (cSigmaK * sigma + cSigmaFloor));
-
-    // Scene cut of THIS frame: written by the gate pass's last group (frame state), or the motion field's flag.
-    bool cut = (cFlags & RELIEF_F_RESET) != 0 || asfloat(state.Load(RST_CUT)) > 0.5;
-    if (cFlags & RELIEF_F_MOTION_CUT) cut = cut || motionStats.Load(cSceneCutIndex) != 0;
+    const float edge = edgeTex.SampleLevel(linClamp, uv, 0);
+    const float keep = smoothstep(0.08, 0.95, edge);
+    const float hRaw = keep * ReliefTanh(d / (cSigmaK * sigma + cSigmaFloor));
 
     const bool pixelChanged = gate.z > 0.25; // change exceeded the gate pass's luminance-dependent noise floor
 
@@ -52,6 +49,21 @@ void main(uint3 dtid : SV_DispatchThreadID)
         if (any(prevPos < 0.0) || any(prevPos > float2(cSize))) alpha = 1.0;
     }
     float h = hRaw;
+    alpha = lerp(1.0, alpha, keep);
     if (alpha < 1.0) h = lerp(prevH.SampleLevel(linClamp, prevPos / float2(cSize), 0), hRaw, alpha);
     outH[p] = h;
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dtid : SV_DispatchThreadID)
+{
+    // The gate pass finishes the scene-cut decision before this dispatch. Share it across adjacent pixels.
+    bool cut = (cFlags & RELIEF_F_RESET) != 0 || asfloat(state.Load(RST_CUT)) > 0.5;
+    if (cFlags & RELIEF_F_MOTION_CUT) cut = cut || motionStats.Load(cSceneCutIndex) != 0;
+
+    const int2 origin = int2(dtid.xy) * 2;
+    HeightPixel(origin, cut);
+    HeightPixel(origin + int2(1, 0), cut);
+    HeightPixel(origin + int2(0, 1), cut);
+    HeightPixel(origin + int2(1, 1), cut);
 }

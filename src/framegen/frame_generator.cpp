@@ -321,7 +321,8 @@ public:
 
     Size FrameSize() const override { return frameSize_; }
 
-    bool Interpolate(float t, ID3D11RenderTargetView* dst) override {
+    bool Interpolate(float t, ID3D11RenderTargetView* dst, ID3D11ShaderResourceView** selection) override {
+        if (selection) *selection = nullptr;
         if (!dst || histCount_ < 2 || !info_.valid) return false;
         t = std::clamp(t, 0.0f, 1.0f);
         const TierParams tp = Tier(settings_.quality);
@@ -400,6 +401,7 @@ public:
         ctx_->PSSetShaderResources(0, 2, nullSrv);
         ID3D11RenderTargetView* nullRtv[2] = {};
         ctx_->OMSetRenderTargets(2, nullRtv, nullptr);
+        if (selection && debugView_ == FrameGenDebugView::None) *selection = sel_.srv.Get();
         return true;
     }
 

@@ -37,6 +37,8 @@ cbuffer ReliefApplyCB : register(b0)
     uint   aHasMotion;
     uint   aHasHistory;
     uint   aHasDepthHistory;
+    uint   aFilteredParallax;
+    uint   aHasSelection;
 };
 
 Texture2D<float4>      srcTex   : register(t0);
@@ -50,6 +52,9 @@ Texture2D<float4> prevDepth    : register(t8);
 #endif
 Texture2D<float>       prevH   : register(t6);
 Texture2D<float4>      prevP   : register(t7);
+#if defined(RELIEF_PAIR) && defined(RELIEF_PARALLAX)
+Texture2D<float4>      selectionTex : register(t9); // phase motion (xy), frame share and confidence from FG
+#endif
 SamplerState           linClamp : register(s0);
 
 struct VsOut
@@ -150,6 +155,45 @@ float2 ParallaxOffset(float2 local, float2 uv, float2 prevUv, bool generated, fl
     }
     return accepted;
 }
+
+float3 SampleParallax(float3 source, float2 pixel, float2 offset)
+{
+    const float3 shifted = srcTex.SampleLevel(linClamp, (pixel + offset) * aOutTexel, 0).rgb;
+    if (aFilteredParallax == 0) return shifted;
+
+    // Shift the lower-frequency colour variation along the accepted segment and retain fine detail from
+    // the frame generator. Every tap stays between the original and protected destination samples.
+    const float3 nearSource = srcTex.SampleLevel(linClamp, (pixel + 0.45 * offset) * aOutTexel, 0).rgb;
+    const float3 nearShifted = srcTex.SampleLevel(linClamp, (pixel + 0.55 * offset) * aOutTexel, 0).rgb;
+    const float3 difference = 0.5 * ((shifted - nearSource) + (nearShifted - source));
+    return clamp(source + difference, min(source, shifted), max(source, shifted));
+}
+#ifdef RELIEF_PAIR
+// Use the generator's smooth-region motion for the height lookup where its neighbouring hypotheses agree.
+// The original flow and the most protective masks still control where lighting and displacement can apply.
+void AlignHeightToSelection(float2 screen, inout float2 currentUv, inout float2 previousUv)
+{
+    const int2 last = int2(ceil(0.5 * aGameSize)) - 1;
+    const float2 grid = 0.5 * (screen - 1.0);
+    const int2 base = int2(floor(grid));
+    const float2 f = frac(grid);
+    const float4 topLeft = selectionTex.Load(int3(clamp(base, 0, last), 0));
+    const float4 topRight = selectionTex.Load(int3(clamp(base + int2(1, 0), 0, last), 0));
+    const float4 bottomLeft = selectionTex.Load(int3(clamp(base + int2(0, 1), 0, last), 0));
+    const float4 bottomRight = selectionTex.Load(int3(clamp(base + 1, 0, last), 0));
+    const float4 selected = lerp(lerp(topLeft, topRight, f.x), lerp(bottomLeft, bottomRight, f.x), f.y);
+    const float spread = max(max(length(topLeft.xy - selected.xy), length(topRight.xy - selected.xy)),
+                             max(length(bottomLeft.xy - selected.xy), length(bottomRight.xy - selected.xy)));
+    const float weight = smoothstep(0.3, 0.7, selected.w) * (1.0 - smoothstep(0.5, 1.0, spread));
+    const float2 current = screen + (1.0 - aPhase) * selected.xy;
+    const float2 previous = screen - aPhase * selected.xy;
+    if (all(current >= 0.5) && all(current <= aGameSize - 0.5) &&
+        all(previous >= 0.5) && all(previous <= aGameSize - 0.5)) {
+        currentUv = lerp(currentUv, current * aGameTexel, weight);
+        previousUv = lerp(previousUv, previous * aGameTexel, weight);
+    }
+}
+#endif
 #endif
 
 float3 ScaleSrgb(float3 colour, float gain)
@@ -183,15 +227,18 @@ float4 main(VsOut i) : SV_Target
         const int2 hi = int2(aCells) - 1;
         const int2 cell = min(int2(g * aCellInv), hi);
         const float4 backward = flowTex.Load(int4(cell, 1, 0));
+        const float backwardProtection = FlowProtection(cell, backward);
+        motionProtection = backwardProtection;
         if (generated) {
             const float4 forward = flowTex.Load(int4(cell, 0, 0));
             previous -= aPhase * forward.xy;
             g -= (1.0 - aPhase) * backward.xy;
-            motionProtection = smoothstep(0.1, 0.65, forward.z) * (1.0 - smoothstep(0.22, 0.65, forward.w));
+            const float forwardProtection = smoothstep(0.1, 0.65, forward.z) * (1.0 - smoothstep(0.22, 0.65, forward.w));
+            // The older frame's confidence matters less as the generated frame approaches the newest real one.
+            motionProtection = lerp(min(forwardProtection, backwardProtection), backwardProtection, aPhase);
         } else {
             previous += backward.xy;
         }
-        motionProtection = min(motionProtection, FlowProtection(cell, backward));
         if (any(g < 0.0) || any(g >= aGameSize) || any(previous < 0.0) || any(previous >= aGameSize))
             motionProtection = 0.0;
     }
@@ -205,8 +252,14 @@ float4 main(VsOut i) : SV_Target
 #ifdef RELIEF_PAIR
     if (generated || (aHasHistory != 0 && aHasMotion != 0 && motionProtection > 0.0)) {
         const float2 old = ReadProtection(prevP, prevUv).xy;
-        // Suppression applies immediately, and recovering surface pixels regain relief gradually.
-        prot.xy = generated ? min(old, prot.xy) : min(prot.xy, lerp(prot.xy, old, 0.35 * motionProtection));
+        const float2 recovering = min(prot.xy, lerp(prot.xy, old, 0.35 * motionProtection));
+        if (generated) {
+            // Keep the stricter HUD mask. Let the surface strength approach the newest frame's strength.
+            prot.x = min(old.x, prot.x);
+            prot.y = lerp(min(old.y, prot.y), recovering.y, aPhase);
+        } else {
+            prot.xy = recovering;
+        }
     }
     if (generated && aHasMotion != 0) {
         const float2 screenUv = local / aContent.zw;
@@ -217,6 +270,10 @@ float4 main(VsOut i) : SV_Target
     const float fade = asfloat(state.Load(RST_FADE));
     float depthGain = 1.0, groundHint = 0.0, depthProtection = 1.0;
 #ifdef RELIEF_MOTION_DEPTH
+    // Small sampling shifts are particularly visible on highlights. Roll off the depth boost and
+    // displacement across bright tones so changing flow does not make shiny detail shimmer.
+    const float luminance = dot(src.rgb, kRec709);
+    const float bright = aSrcLinear ? smoothstep(0.45, 0.85, luminance) : smoothstep(0.70, 0.93, luminance);
     const float2 cellUv = g * aCellInv / float2(aCells);
     float4 depth = motionDepth.SampleLevel(linClamp, cellUv, 0);
     if (generated && aHasDepthHistory != 0) {
@@ -234,22 +291,28 @@ float4 main(VsOut i) : SV_Target
     }
     const float gx = 0.5 * (nearby.y + nearby.z - nearby.x - nearby.w);
     const float gy = 0.5 * (nearby.x + nearby.y - nearby.z - nearby.w);
-    groundHint = 0.3 * depth.y * smoothstep(0.025, 0.2, abs(gy) - abs(gx)) *
+    groundHint = 0.3 * (1.0 - bright) * depth.y * smoothstep(0.025, 0.2, abs(gy) - abs(gx)) *
                  smoothstep(0.0, 0.2, local.y / aContent.w - 0.5);
-    depthGain += 0.35 * depth.x * depth.y;
+    depthGain = (1.0 + 0.35 * depth.x * depth.y * (1.0 - bright)) * (1.0 - 0.5 * bright);
     if (aDebug == DBG_DEPTH)
         return float4(lerp((0.5 + 0.5 * depth.x * depth.y).xxx, float3(1.0, 0.0, 0.0), 1.0 - depthProtection), src.a);
 #else
     if (aDebug == DBG_DEPTH) return float4(0.5, 0.5, 0.5, src.a);
 #endif
-    prot.w *= depthProtection;
+    prot.w *= depthProtection * smoothstep(0.10, 0.55, prot.y);
     // Protected, faded-out or unprocessed pixels skip the height taps (normal output only; debug views need them).
     if ((aDebug == DBG_NONE || aDebug == DBG_SPLIT) && prot.w * fade <= 0.0) return src;
-    const float h0 = HeightAt(uv, prevUv, 0.0, generated);
-    const float hA = HeightAt(uv, prevUv, float2(t.x, t.y), generated);
-    const float hB = HeightAt(uv, prevUv, float2(-t.x, t.y), generated);
-    const float hC = HeightAt(uv, prevUv, float2(t.x, -t.y), generated);
-    const float hD = HeightAt(uv, prevUv, float2(-t.x, -t.y), generated);
+    float2 heightUv = uv, prevHeightUv = prevUv;
+#if defined(RELIEF_PAIR) && defined(RELIEF_PARALLAX)
+    if (generated && aHasSelection != 0 && asfloat(state.Load(RST_CUT)) < 0.5)
+        AlignHeightToSelection(local / aContent.zw * aGameSize, heightUv, prevHeightUv);
+#endif
+    const float h0 = HeightAt(heightUv, prevHeightUv, 0.0, generated);
+    const float4 neighbourhood = smoothstep(0.15, 0.65, pTex.GatherGreen(linClamp, uv));
+    const float hA = lerp(h0, HeightAt(heightUv, prevHeightUv, float2(t.x, t.y), generated), neighbourhood.y);
+    const float hB = lerp(h0, HeightAt(heightUv, prevHeightUv, float2(-t.x, t.y), generated), neighbourhood.x);
+    const float hC = lerp(h0, HeightAt(heightUv, prevHeightUv, float2(t.x, -t.y), generated), neighbourhood.z);
+    const float hD = lerp(h0, HeightAt(heightUv, prevHeightUv, float2(-t.x, -t.y), generated), neighbourhood.w);
 
     const float dhx = 0.25 * ((hA + hC) - (hB + hD));
     const float dhy = 0.25 * ((hA + hB) - (hC + hD));
@@ -257,8 +320,9 @@ float4 main(VsOut i) : SV_Target
     // Directional term, symmetric for slopes facing towards and away from the light (N.L - L.z is not: a slope can
     // darken by up to L.z but brighten only by 1 - L.z), so light-facing bevel edges get a highlight as strong as the
     // shadow on the opposite edge.
-    const float shade = tanh(-aBump * dot(float2(dhx, dhy), aLight.xy));
-    const float cavity = max(0.0, 0.25 * (hA + hB + hC + hD) - h0);
+    const float shade = ReliefTanh(-aBump * dot(float2(dhx, dhy), aLight.xy));
+    const float neighbourHeight = 0.25 * (hA + hB + hC + hD);
+    const float cavity = max(0.0, neighbourHeight - h0);
 
     if (aDebug == DBG_HEIGHT) return float4((0.5 + 0.5 * h0).xxx, src.a);
     if (aDebug == DBG_NORMALS) return float4(0.5 + 0.5 * n, src.a);
@@ -271,15 +335,18 @@ float4 main(VsOut i) : SV_Target
     if (aParallaxPx > 0.0 && prot.x >= 0.75 && prot.y >= kWarpSurfaceMin && fade > 0.0) {
         const float2 gradient = float2(dhx, dhy) * aGameSize / (aTapPx * aContent.zw);
         const float warpProtection = prot.x * smoothstep(kWarpSurfaceMin, 1.0, prot.y) * depthProtection * motionProtection * fade;
-        offset = ParallaxOffset(local, uv, prevUv, generated, h0, gradient, warpProtection, depthGain, groundHint);
+        // The generator already interpolated fine detail. Use the local height average for most of the
+        // displacement after generation, while retaining the centre estimate for lighting and cavity.
+        const float warpHeight = aFilteredParallax != 0 ? lerp(h0, neighbourHeight, 0.65) : h0;
+        offset = ParallaxOffset(local, uv, prevUv, generated, warpHeight, gradient, warpProtection, depthGain, groundHint);
         if (any(offset != 0.0) && aDebug != DBG_OFFSET)
-            colour.rgb = srcTex.SampleLevel(linClamp, (i.pos.xy + offset) * aOutTexel, 0).rgb;
+            colour.rgb = SampleParallax(src.rgb, i.pos.xy, offset);
     }
 #endif
     if (aDebug == DBG_OFFSET) return float4(0.5 + offset / 6.0, length(offset) / 3.0, src.a);
 
     const float d = aShadeGain * shade - aCavityGain * cavity;
-    const float delta = aMaxDelta * tanh(d / aMaxDelta) * prot.w * fade;
+    const float delta = aMaxDelta * ReliefTanh(d / aMaxDelta) * prot.w * fade;
     if (abs(delta) < (1.0 / 2048.0)) return colour;
     if (aSrcLinear) return float4(colour.rgb * (1.0 + delta), colour.a);
     return float4(ScaleSrgb(saturate(colour.rgb), 1.0 + delta), colour.a);

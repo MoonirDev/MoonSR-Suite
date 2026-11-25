@@ -20,6 +20,504 @@ photodiode. Compatibility with those is therefore unverified.
 
 The notice dismissal patch changed the app UI. No new performance measurements were taken for that patch.
 
+## Smart parallax verification on 1.1.1 (2026-11-24)
+
+Build `1e3220bf65fd5eb311e448d14a5318702c134596`, source fingerprint `beb377f9e7b45f63`. The RTX 5060 used
+driver 32.0.16.2114. Commands were `moonsr_bench --relief --relief-strengths 0.5,1 --adapter 5060` and the same
+command with `--relief-parallax`. Both passed the synthetic checks, including zero change on the opaque HUD and
+auto-pause on the sky and cel-shaded scenes. The timing used 1920×1080 input and output, default detail, and frame
+generation off. These are sums of the GPU timestamp medians for Analyse and Apply.
+
+| Tier and timing strength | Loaded total (ms) | Idle-gap total (ms) |
+|---|---:|---:|
+| Shading, 50% | 0.2419 | 0.2413 |
+| Parallax, 100%, 3 px cap | 0.2812 | 0.3344 |
+
+Shading's idle-gap result varied between runs and was above target on the previous playtest build below.
+`--relief-image` also kept the saved Helldivers 2 and ATLYSS crops active in the still, pan, and noisy-still
+sequences. These inputs were already cropped before the benchmark applied its own inset.
+
+`moonsr_bench --relief-motion-depth --adapter 5060 --adapter A400 --adapter Radeon` passed the motion mask,
+rotation-only, stationary generated-phase, and scene-cut checks on all three adapters. At 640×352, default detail,
+100% strength, 2 px cap, and known 8 px cell flow, the RTX 5060 took 0.0832 ms for Analyse plus 0.0226 ms for
+Apply. The A400 (driver 32.0.16.2114) took 0.2742 ms plus 0.1679 ms. This excludes the cost of producing the
+flow. The Radeon iGPU (driver 31.0.24002.92) was used for correctness. Live 2× and 4× playtests are pending.
+
+### Shading reference comparisons
+
+The expanded benchmark used the 1.1.1 relief code, RTX 5060 and driver 32.0.16.2114. It exports the final 960×540
+frame from the procedural brick and rock pans, including the flat input, Shading result, two CPU baselines, and a reference lit
+from the known height-map normals. This reference checks lighting fidelity. The displaced-wall reference below
+checks geometric displacement. Run `moonsr_bench --relief --relief-strengths 0.5,1 --adapter 5060 --relief-no-time`
+with `--save-images`, then compare each image with its `_reference.png` in FLIP 1.7 (LDR defaults). The values are
+mean FLIP error at the default 2 px detail.
+
+| Scene and strength | Flat | Shading | Emboss | Clarity |
+|---|---:|---:|---:|---:|
+| Bricks, 50% | 0.118795 | 0.096228 | 0.111371 | 0.141673 |
+| Bricks, 100% | 0.118795 | 0.105855 | 0.112619 | 0.143345 |
+| Rock, 50% | 0.087354 | 0.056506 | 0.051421 | 0.108013 |
+| Rock, 100% | 0.087354 | 0.059276 | 0.052422 | 0.109196 |
+
+Shading improved on the flat input in both scenes. Emboss had lower error on rock at both strengths. Testing
+1.5 px detail at 50% raised the rock Shading error to 0.061956, so this run gives no reason to lower the default.
+
+Two isolated gain trials used the later 1.1.1-based relief candidate (`1e3220b`, benchmark fingerprint
+`3e173597fc0e373b`) and the same RTX 5060, driver, 960×540 scenes, and FLIP settings. The Shading suite passed
+at both strengths for each trial. Lower gain helped at full strength in the second trial, while its 50% rock
+result worsened and emboss still scored lower at both strengths. The playtest keeps the current gains.
+
+| Trial (directional / cavity gain) | Bricks FLIP, 50% / 100% | Rock FLIP, 50% / 100% | Rock emboss FLIP, 50% / 100% |
+|---|---:|---:|---:|
+| 0.60 / 0.08 | 0.096796 / 0.106812 | 0.056759 / 0.059464 | 0.051419 / 0.052416 |
+| 0.38 / 0.08 | 0.096819 / 0.099053 | 0.062940 / 0.055776 | 0.050275 / 0.052017 |
+
+Two further isolated trials used the same benchmark, default gains and estimated height. One projected the
+normalized normal onto the light's horizontal direction. The other used a clamped Lambert dot product and
+subtracted the flat-surface light contribution. Both passed the Shading checks, and neither beat emboss on rock.
+
+| Lighting trial | Bricks FLIP, 50% / 100% | Rock FLIP, 50% / 100% | Rock emboss FLIP, 50% / 100% |
+|---|---:|---:|---:|
+| Normalized directional | 0.098188 / 0.104733 | 0.057897 / 0.057985 | 0.050872 / 0.052337 |
+| Lambert | 0.098160 / 0.103586 | 0.059422 / 0.058673 | 0.050888 / 0.052118 |
+
+### Measured height on CC0 materials
+
+The expanded `--relief-image --save-images --relief-strengths 0.5 --adapter 5060` fixture ran on 1.1.1-based
+relief code, RTX 5060 and driver 32.0.16.2114. The 1K maps came from [Poly Haven's CC0 library](https://polyhaven.com/license).
+Plain input used the diffuse map. The AO input multiplied diffuse in linear light by `0.6 + 0.4 × AO`, with
+the red channel of the ARM map used where a separate AO map was unavailable. The estimate came from the Height
+debug export, matched to the displacement map at the final pan offset. Both measurements exclude the outer
+eight analysed pixels. The reference height subtracts a Gaussian blur with sigma 3 px, as in the synthetic test.
+
+To reproduce this offline, save the 1K map files as `<slug>_Diffuse.png`, `<slug>_Displacement.png`, and
+`<slug>_AO.png` under `build/relief-materials/maps`. Use each linked asset page's final URL segment for `<slug>`.
+If a material has only the ARM map, save that map as `<slug>_AO.png`. Build the benchmark from the current source
+to get the Height export. With Python, NumPy and Pillow available, run the following from the repository root.
+
+```powershell
+$root = 'build/relief-materials'
+python tools/bench/relief_material_report.py "$root/maps" "$root/inputs"
+$t = @('--adapter','5060','--relief-strengths','0.5','--save-images','--out-dir',"$root/results")
+Get-ChildItem "$root/inputs" -Filter '*.png' | ForEach-Object { $t += @('--relief-image', $_.FullName) }
+& build/main/bin/moonsr_bench.exe @t
+python tools/bench/relief_material_report.py "$root/maps" "$root/inputs" "$root/results/relief"
+```
+
+| Material | Spearman, diffuse / with AO | Sign agreement, diffuse / with AO |
+|---|---:|---:|
+| [Brick Wall 005](https://polyhaven.com/a/brick_wall_005) | −0.2960 / −0.2522 | 26.02% / 30.50% |
+| [Cobblestone 01](https://polyhaven.com/a/cobblestone_01) | 0.0423 / 0.0453 | 56.65% / 56.51% |
+| [Rock Ground](https://polyhaven.com/a/rock_ground) | 0.3807 / 0.4634 | 80.41% / 86.12% |
+| [Stone Brick Wall 001](https://polyhaven.com/a/stone_brick_wall_001) | 0.0363 / 0.0793 | No qualifying pixels |
+| [Wood Planks](https://polyhaven.com/a/wood_planks) | −0.0029 / −0.0052 | 72.31% / 66.76% |
+
+Sign agreement covers pixels with an absolute estimated height above 0.02 and an absolute band-passed reference
+height above 0.05.
+
+None reached the M1 target of 0.5. Brick Wall 005 showed the strongest reversed polarity. The synthetic materials
+with known lighting remain regression fixtures. The measured materials show where colour-based height estimation
+can diverge from the displacement map.
+
+An offline diagnostic checked whether the low scores came from a shifted reference or the choice of colour
+channel. It sampled every fourth pixel, excluded another eight pixels at each border and tested horizontal
+and vertical shifts from −12 to +12 pixels in four-pixel steps. The strongest absolute brick and rock
+correlations occurred at zero shift (−0.300 and +0.383). For the other three materials, even the strongest
+shift had an absolute correlation below 0.12.
+
+Using the same grid and the same Gaussian band-pass, the largest absolute diffuse RGB channel correlations
+were 0.246, 0.080, 0.434, 0.055 and 0.126 in table order. Directly filtering the separate AO inputs gave
++0.381, −0.035, +0.771, +0.570 and +0.480. The AO scores describe source maps that MoonSR cannot read from
+a game capture. These checks narrow the failure to the information available in the captured colour for this
+fixture and the tested estimators. The three-of-five target remains unmet.
+
+An offline multiscale trial filtered the diffuse maps' log luminance. It subtracted Gaussian blurs at
+1.5, 3, 6 and 12 pixels from a 1 px Gaussian blur. Two additional variants took the mean or median of
+the four bands after separately normalizing each band's variance. Scores use the same one-in-four
+interior sampling and Gaussian-filtered displacement reference as the alignment diagnostic above.
+
+| Material | 1.5 px | 3 px | 6 px | 12 px | Normalized mean | Normalized median |
+|---|---:|---:|---:|---:|---:|---:|
+| Brick Wall 005 | −0.133 | −0.231 | −0.318 | −0.311 | −0.277 | −0.280 |
+| Cobblestone 01 | 0.057 | 0.092 | 0.110 | 0.103 | 0.100 | 0.102 |
+| Rock Ground | 0.407 | 0.429 | 0.414 | 0.392 | 0.431 | 0.427 |
+| Stone Brick Wall 001 | 0.049 | 0.064 | 0.047 | 0.027 | 0.050 | 0.053 |
+| Wood Planks | 0.087 | 0.148 | 0.183 | 0.137 | 0.169 | 0.167 |
+
+None of the six variants reached 0.5 on any material. The multiscale methods stayed out of the shader.
+
+The rebuilt halo playtest (`1e3220b` plus pending changes, RTX 5060 driver 32.0.16.2114) was
+retested with the ten saved inputs at 50% Shading and default detail. All stayed active during the
+noisy-still sequence. Spearman diffuse/AO pairs, in original table order, were −0.2837/−0.2435,
+0.0363/0.0400, 0.2680/0.3153, 0.0351/0.0777 and −0.0199/−0.0300.
+Rock lost the most correlation. The combined halo suppression helps the silhouette fixture but
+does not meet the three-material accuracy gate.
+
+A matched comparison of the height and halo playtests split the Rock Ground crop by whether the Height
+PNG changed by at least four 8-bit codes. On diffuse input, 48.6% of pixels met that threshold. Their
+Spearman correlation fell from 0.4594 to 0.3055. The rest stayed near 0.273. With AO, 54.4% met the
+threshold and fell from 0.5400 to 0.3554. The rest stayed near 0.322. This split is defined by the observed
+height change and does not identify which pixels correspond to geometry edges.
+
+An isolated comparison on the same GPU and inputs replaced the stored-height ramp's 0.08–0.95 range with
+0.30–0.65. Raw silhouette leakage increased from 0.218 to 0.278 at both strengths. Rendered Shading halo
+ratios were 0.03/0.05 at 50%/100% and the Shading suite passed. Diffuse/AO rank correlations for rock fell
+from 0.2680/0.3153 to 0.2511/0.2896. The narrower ramp stayed out of the playtest.
+
+A later isolated trial kept the 0.08–0.95 ramp and reduced its attenuation as local band-pass variation
+rose from 0.035 to 0.095 stops. On the same RTX 5060 and inputs, rock correlation rose to 0.2973/0.3537
+on diffuse/AO. The raw silhouette ratio was 0.225 and rendered Shading halo remained 0.04/0.05 at 50%/100%.
+The Shading suite passed. The trial still missed the material accuracy target. Its timing and generated-frame
+behaviour have yet to be verified.
+
+### Generated-phase timing fixture
+
+The expanded harness uploads a bilinearly resized copy of the textured input outside the GPU timers. The same
+RTX 5060 and 1.1.1 relief code processed a settled brick scene at synthetic 2× and 4× display phases with no
+motion field. These loaded GPU timestamp medians measure the relief passes. They exclude frame-generation cost
+and motion-guided sampling. Shading used 50% strength and Parallax used 100% strength with a 3 px cap.
+
+| Input → output | Phases | Shading Analyse / Apply (ms) | Parallax Analyse / Apply (ms) |
+|---|---:|---:|---:|
+| 720p → 1080p | 2× | 0.0811 / 0.0550 | 0.0805 / 0.0955 |
+| 720p → 1080p | 4× | 0.0819 / 0.0472 | 0.0862 / 0.0389 |
+| 1080p → 1440p | 2× | 0.1727 / 0.1013 | 0.1738 / 0.0748 |
+| 1080p → 1440p | 4× | 0.1728 / 0.0840 | 0.1748 / 0.0750 |
+
+As in the main pipeline, Analyse runs once per real input and Apply runs per displayed phase. The Apply column is
+the median across the mixture of real and generated phases. In the same expanded run, 1080p → 1080p Shading took
+0.2423 ms loaded and 0.2953 ms with idle gaps. Parallax took 0.2801 ms loaded and 0.2822 ms with idle gaps.
+Both modes stayed active on settled bricks with zero variation across the checked frames. Both paused on the
+pixel-art fixture at 50% and 100% strength. The 1.1.1 silhouette fixture's raw height-band energy ratio was 0.866.
+
+An isolated RTX 5060 replay (driver 32.0.16.2114, `1e3220b` with pending relief changes, default detail)
+multiplied the Height debug sample by the existing application protection weight. The resulting silhouette
+band-to-interior energy ratio was 0.091 at both 50% and 100% Shading. The rendered shading halo ratios
+were 0.05 and 0.08, respectively, and the self-checks passed. The masked height is a diagnostic
+intermediate. The original pre-protection height still exceeds the M1 limit of 0.25.
+
+Two stored-height experiments followed on the same RTX 5060 and driver. Applying the combined edge and texture
+gate to the stored height changed opaque HUD pixels and failed the painted-wall check at 50%. A separate
+half-resolution edge texture let the next experiment attenuate the current height estimate and reduce temporal
+carry-over near strong edges without applying the texture gate twice. The 0.05–0.85 edge ramp produced a raw
+silhouette energy ratio of 0.273. The 0.08–0.95 ramp brought it to 0.218 at both strengths and preserved opaque
+HUD pixels. The stronger ramp raised the rendered Shading halo ratios from 0.05 and 0.08 to 0.15 and 0.15.
+The ramp meets the raw-height gate in this fixture but remains an isolated variant because it increased the
+rendered halo compared with the playtest shader.
+Both Shading and Parallax passed their synthetic self-checks at 50% and 100%. At native 1080p, five
+50% Shading timing blocks with default detail and frame generation off gave a loaded median of 0.2437 ms.
+The high-resolution 2 ms idle-gap totals ranged from 0.2427 to 0.2968 ms.
+
+A subsequent trial kept that raw height map and faded the final relief contribution with the existing surface
+protection weight. The raw silhouette ratio remained 0.218. At 50% and 100%, the rendered halo ratios fell
+from 0.15/0.15 to 0.08/0.09 for Shading and measured 0.07/0.09 for Parallax. The playtest baseline was
+0.05/0.08 for both modes. Shading and Parallax self-checks passed at both strengths, including the opaque HUD
+checks. This was an isolated benchmark build.
+On the same RTX 5060, the 960×540 Shading exports at default detail were scored against the saved reference
+renders with FLIP 1.7 LDR defaults. Brick means at 50%/100% were 0.096228/0.105855 for the playtest and
+0.096227/0.105795 for the trial. Rock means were 0.056506/0.059276 and 0.057263/0.060012, respectively.
+The rock emboss baseline scored 0.051421/0.052422. The trial was kept out of the playtest because rock fidelity
+regressed and the rendered halo remained above the playtest baseline.
+
+A gradient trial used protected neighbours to move each of the four height taps toward the centre height.
+Raw height remained at 0.218. At 50%/100% Shading the rendered halo was 0.07/0.09, and all the Shading
+self-checks passed. On the RTX 5060 with the same 1080p settings, the five loaded timing blocks had a median
+of 0.2600 ms and high-resolution 2 ms idle-gap totals ranged from 0.2595 to 0.3177 ms.
+One gather from the centre of the protection texture gave a raw height ratio of 0.218 and rendered halo ratios
+of 0.08/0.09. All Shading checks passed, including opaque HUD preservation. Five loaded blocks gave a median
+of 0.2471 ms and the high-resolution idle-gap range was 0.2466–0.3021 ms. This trial met the loaded budget
+and the raw-height target in the fixture. It is still a benchmark variant. The rendered halo remained above
+the playtest baseline of 0.05/0.08.
+
+Combining that gather with a 0.10–0.55 smooth fade on the centre surface weight brought the rendered halo to
+0.04/0.05 at 50%/100% for both Shading and Parallax. The raw ratio remained 0.218. Both suites passed,
+including opaque HUD protection. On the RTX 5060 with driver 32.0.16.2114, the same isolated build kept
+Parallax active on the owner's Helldivers 2 and ATLYSS screenshots throughout static, pan and noisy-still runs.
+Noisy-still coverage was 0.554 and 0.636, respectively. The screenshot runs check coverage and pausing.
+Matched Parallax exports from the height and halo playtests on the RTX 5060 used the same captures, input
+crop and default detail. At 100% strength, mean absolute RGB change from the input fell from 1.881 to
+1.732 code values in Helldivers 2 and from 0.891 to 0.842 in ATLYSS. The two outputs differed by at least
+two codes in any RGB channel on 5.65% and 0.84% of pixels, respectively. These are still-frame measurements.
+Using the same 960×540 reference renders and FLIP 1.7 LDR settings, the combined playtest scored
+0.096189/0.105702 on brick and 0.057875/0.060475 on rock at 50%/100% Shading. The pre-halo build
+scored 0.096228/0.105855 and 0.056506/0.059276. Rock fidelity thus got worse in this fixture, and
+the rock emboss comparison still had lower mean error.
+The standalone playtest includes the combined variant. Native 1080p timing used default detail, frame
+generation off, 50% Shading, and 100% Parallax with a 3 px cap on the same RTX 5060. Across five loaded
+blocks the medians were 0.2481 ms and 0.2893 ms, respectively. Five high-resolution 2 ms idle-gap blocks
+ranged from 0.2469 to 0.2476 ms for Shading and from 0.2889 to 0.3460 ms for Parallax. Earlier Shading
+variants showed a slower idle cluster, so this sample does not establish that it has disappeared.
+A repeat on the same RTX 5060 used the byte-matched playtest shaders and the same 1080p Shading settings.
+All 15 loaded blocks met the 0.25 ms target (0.2469–0.2492 ms, median 0.2478 ms). With high-resolution
+2 ms idle gaps, eight of 15 blocks exceeded the target (0.2471–0.3031 ms, median 0.2518 ms).
+Motion depth passed on all three adapters. The standalone build passed the upscaling, frame generation,
+theme and strength-zero self-tests. In-game appearance remains unverified.
+The combined build also passed live Windows Graphics Capture on the RTX 5060. Four-second runs of a
+640×360 moving pattern at 20 fps used Bilinear upscaling, 100% Parallax, and the order Frame generation →
+Upscaling → Smart parallax. Parallax stayed active and the runs presented 75 generated frames at fixed
+2× and 237 at fixed 4×, with zero reported scheduler skips.
+With Smart Parallax Off, a four-second 640×360 → 1920×1080 Bilinear run on the same adapter presented
+79 generated frames at fixed 2× with zero reported skips or drops. The stage was absent from diagnostics.
+The engine's Off path returns before creating the relief pass and releases its resources when switched off.
+
+### Generated-frame stability playtest candidate
+
+An offline diagnostic harness replayed the four owner recordings through the same frame generator and compared
+each output with and without Parallax. Hardware was the RTX 5060 with driver 32.0.16.2114. Both runs used 1.1.1
+(`1e3220b`) as the source base, 1920×1080 capture, 100% Parallax strength, 3 px cap, 3 px detail, and Performance
+frame generation at half flow resolution with precise motion. This replay uses raw inputs and omits temporal
+upscaling and presentation. Each check excludes the first eight captured input frames to let the history settle.
+
+| Recording | Real frames with zero RGB change, baseline → candidate | Mean relief-strength gap at phase 0.75, baseline → candidate (RGB code values) |
+|---|---:|---:|
+| ATLYSS 2× | 33 / 59 → 8 / 59 | 0.1149 → 0.0730 |
+| ATLYSS 4× | 17 / 36 → 10 / 36 | 0.0560 → 0.0329 |
+| Helldivers 2 2× | 38 / 81 → 0 / 81 | 0.0989 → 0.0769 |
+| Helldivers 2 4× | 56 / 67 → 4 / 67 | 0.0531 → 0.0335 |
+
+The gap is the absolute difference between the generated and newest real frames' mean absolute RGB changes from
+relief. It covers pairs where both builds applied relief to the real frame. All recordings were replayed at all
+four phases for comparison. The remaining zero-change frames were not classified individually.
+
+The follow-up candidate limits the colour shift when Parallax follows frame generation. It passed the 50% and
+100% synthetic Shading and Parallax checks with the opaque HUD unchanged, including filtered Parallax on generated
+phases. Filtered displacement and the Motion depth regressions passed on the RTX 5060, RTX A400 and Radeon iGPU.
+
+On the 1.1.1-based follow-up build and RTX 5060 driver 32.0.16.2114, the revised GPU timing harness waits for
+each queued batch before collecting another set of timestamps. The `--relief --relief-strengths 0.5,1 --adapter 5060`
+run and its `--relief-parallax` counterpart measured these medians at 1920×1080 input and output with default
+detail and no generated phases:
+
+| Tier and strength | Loaded total (ms) | Idle-gap total (ms) |
+|---|---:|---:|
+| Shading, 50% | 0.2428 | 0.2423 |
+| Parallax, 100%, 3 px cap | 0.2842 | 0.2836 |
+
+With synthetic 2× and 4× phases and the new filter, Parallax Apply took 0.2240 ms and 0.2219 ms per displayed
+phase respectively at 720p → 1080p. Analyse took 0.0836 ms and 0.0856 ms per real frame. Those measurements
+exclude frame generation and motion-guided sampling. The owner's second live test found the shimmer less apparent,
+with some shimmer still visible after frame generation.
+
+Two later Helldivers 2 recordings were replayed with the filter off and on, otherwise using the same RTX 5060
+replay settings above. Among pairs with more than 0.05 code values of mean relief change on the real frame,
+the phase 0.75 gap as a share of real-frame relief fell from 8.96% to 7.53% for the 2× recording (77 pairs)
+and from 12.86% to 10.93% for the 4× recording (40 pairs). Mean real-frame relief also fell from 0.810 to 0.758
+RGB code values and from 0.590 to 0.552 respectively. The replay uses phase 0.75 for both recordings to compare
+the behaviour just before the newest real frame. The original 2× output used phase 0.5.
+
+### Grain-tolerant HUD learning
+
+The 1.1.1-based candidate counts a pixel toward HUD learning only when changes in the same direction are also
+present on both sides along at least one axis. On the RTX 5060 with driver 32.0.16.2114, six of the ten material
+inputs above paused with the previous detector during the 90-frame `--relief-image` grain sequence. All ten
+stayed active with the candidate. The `--relief --relief-strengths 0.5,1 --adapter 5060` suite and its Parallax
+counterpart kept the opaque HUD pixel-exact on real and generated phases. Sky and stylised frames still paused.
+
+At 1920×1080 input and output, 50% Shading took 0.2491 ms loaded and 0.2495 ms with idle gaps. At 100% and
+a 3 px cap, Parallax took 0.2909 ms loaded and 0.2906 ms with idle gaps. Both used default detail and no frame
+generation. The Motion depth correctness checks passed on the RTX 5060, RTX A400 and Radeon iGPU.
+
+### Flow-aligned post-generation replay
+
+The next candidate averages neighbouring height for post-generation displacement. In an offline replay of the
+owner's two newest Helldivers 2 recordings on the RTX 5060 (driver 32.0.16.2114), generated-frame relief was
+compared with real-frame relief sampled at the backward-flow position. Flow cells needed at least 0.65 confidence
+and at most 0.22 residual. The 1920×1080 replay used 100% strength, a 3 px cap, 3 px detail, and Performance frame
+generation with half-resolution flow and precise motion. The baseline is the previous post-generation filter,
+using the same 1.1.1-based grain candidate in both runs.
+
+| Recording | Pairs | Phase | Mean aligned RGB error, baseline → candidate | Error as a share of aligned real-frame relief |
+|---|---:|---:|---:|---:|
+| Helldivers 2 2× | 83 | 0.50 | 0.2411 → 0.2341 | 28.08% → 27.65% |
+| Helldivers 2 4× | 70 | 0.75 | 0.1436 → 0.1383 | 15.44% → 15.10% |
+
+Aligned real-frame relief fell from 0.8585 to 0.8469 and from 0.9300 to 0.9161 RGB code values in the two
+recordings. A live playtest is still needed to evaluate the visible change.
+
+An isolated replay compared the combined playtest's two-height blend with using only the newest warped height.
+Both tests used the same settings above and measured against the phase-weighted relief contribution from both real
+frames, sampled along forward and backward flow. The table shows mean RGB error divided by mean reference relief
+on pixels with reliable flow in both directions. Both variants used identical reference frames and pixel masks.
+
+| Recording | Pairs | Phase | Two heights | Newest height |
+|---|---:|---:|---:|---:|
+| Helldivers 2 2× | 82 | 0.50 | 29.21% | 30.24% |
+| Helldivers 2 4× | 69 | 0.25 | 26.06% | 28.71% |
+| Helldivers 2 4× | 69 | 0.50 | 22.09% | 22.68% |
+| Helldivers 2 4× | 69 | 0.75 | 17.11% | 17.23% |
+
+The two-height blend had lower error at each tested phase. This comparison isolates height selection and leaves
+the existing colour filter and motion protection in place.
+
+The original recording manifests contain 25 generated outputs at phase 0.50 out of 120 recorded outputs at
+requested 2×. At requested 4×, 42 of 120 were generated, with 14 each at phases 0.25, 0.50 and 0.75.
+All generated outputs have a matching newest input frame in the manifest. These counts describe the captured
+output mix. The replay scores use fresh interpolation phases from the recorded input pairs.
+
+Two further variants recomputed height from each generated image without height history. The full variant ran
+the existing guided filter and learned protection for the generated images. The band-pass variant ran prefiltered
+log luminance, the guided base and a height pass normalized with four local luminance samples. It kept the original
+real-frame protection, motion confidence, fade and colour filtering. The real-frame relief statistics, scene-cut
+decisions and aligned reference energy matched across all three runs.
+
+| Recording | Pairs | Phase | Two real heights | Full recompute | Band-pass recompute |
+|---|---:|---:|---:|---:|---:|
+| Helldivers 2 2× | 82 | 0.50 | 29.21% | 50.77% | 73.80% |
+| Helldivers 2 4× | 69 | 0.25 | 26.06% | 39.57% | 73.83% |
+| Helldivers 2 4× | 69 | 0.50 | 22.09% | 38.03% | 71.33% |
+| Helldivers 2 4× | 69 | 0.75 | 17.11% | 35.13% | 69.23% |
+
+The RTX 5060 GPU timestamp medians at the end of the 2× and 4× replay runs were 0.2194 and 0.2194 ms
+per additional analysis with the full variant, and 0.1610 and 0.1614 ms with the band-pass variant.
+These timings cover the additional GPU analysis in the offline replay. Both variants increased total analysis work
+and had higher aligned error at every tested phase. The two-height blend remains in the playtest build.
+
+Three more trials used the same RTX 5060, driver, settings and isolated 1.1.1-based replay. One tapered the
+displacement by up to 25% at mid-phase where the two warped heights disagreed. One interpolated the motion field
+within a cell and retained nearest-cell motion where the two estimates differed by at least one pixel. The third
+used the generator's finer motion selection for height sampling when confidence was high. All three retained
+the real-frame relief output in the replay. The selected-motion trial retained the existing protection coordinates.
+
+| Recording | Phase | Two real heights | Displacement taper | Interpolated cell flow | Generator selection |
+|---|---:|---:|---:|---:|---:|
+| Helldivers 2 2× | 0.50 | 29.21% | 29.20% | 29.27% | 32.00% |
+| Helldivers 2 4× | 0.25 | 26.06% | 26.05% | 26.06% | 26.51% |
+| Helldivers 2 4× | 0.50 | 22.09% | 22.09% | 22.12% | 23.14% |
+| Helldivers 2 4× | 0.75 | 17.11% | 17.11% | 17.10% | 17.46% |
+
+The displacement taper changed the aligned error by at most 0.012 percentage points in this replay. Cell-flow
+interpolation was mixed. These measurements use the original coarse flow to align the reference.
+
+A second replay ran the coarse and selected-motion candidates on the same generated images. It aligned the
+reference using the generator's half-resolution selection motion and blend share. It measured pixels where both
+the coarse flow and selected motion were confident and the four neighbouring selection vectors agreed within one
+pixel of their interpolated value. This models the generator's smooth-region warp. It omits the colour evidence
+used at motion boundaries and does not reproduce the generator's final anti-aliasing pass.
+
+| Recording | Pairs | Phase | Coarse sampling | Generator selection |
+|---|---:|---:|---:|---:|
+| Helldivers 2 2× | 82 | 0.50 | 30.49% | 27.61% |
+| Helldivers 2 4× | 69 | 0.25 | 25.74% | 25.14% |
+| Helldivers 2 4× | 69 | 0.50 | 22.31% | 21.04% |
+| Helldivers 2 4× | 69 | 0.75 | 16.99% | 16.22% |
+
+Selected motion reduced the error on the alternative reference at each phase. The change needs game testing
+to judge visible shimmer across motion boundaries and bright surfaces.
+
+The integrated playtest also falls back progressively as neighbouring selection vectors disagree. In the same
+RTX 5060 replay against the smooth-region reference, the final candidate measured 27.72% at 2×. At 4×, it
+measured 25.16%, 21.08% and 16.25% at phases 0.25, 0.50 and 0.75. Its coarse-sampling baseline and pair
+counts were the same as in the preceding table.
+
+The standalone build used `1e3220b` with the pending relief changes. The selected-motion fixtures kept opaque
+HUD pixels exact and passed scene-cut, real-frame identity and unreliable-selection checks on the RTX 5060,
+RTX A400 and Radeon iGPU. The RTX 5060 also passed the upscaling, frame generation, theme, relief and
+strength-zero tests. A three-second Windows Graphics Capture check with a 640×360, 20 fps moving pattern
+and Bilinear 1920×1080 output presented 55 generated frames with Parallax after fixed 2× and 178 with Motion
+depth after fixed 4×. Separate live cases ran with upscaling before frame generation, Motion depth before
+frame generation and with it off, and Parallax on the RTX A400 with frame generation on the RTX 5060.
+
+At 1080p input and output without frame generation, the standalone build measured 0.2475 ms under load and
+0.2976 ms with idle gaps for 50% Shading. Parallax measured 0.2898 ms under load and 0.3399 ms with idle
+gaps at 100% and a 3 px cap. Both used default detail and the same RTX 5060 and driver as the replay.
+
+### Shading timing investigation
+
+An isolated fixture at `1e3220b` with the pending selection changes ran blocks of 400 frames at 1920×1080 on
+the RTX 5060 (driver 32.0.16.2114). It used 50% Shading with default detail and frame generation off.
+The reported time is the sum of the Analyse and Apply GPU timestamp medians. The baseline and each sRGB
+trial ran ten blocks under load and ten with a requested 2 ms idle gap every eight frames.
+
+| sRGB decode | Loaded median (ms) | Idle-gap median (ms) | Idle-gap range (ms) |
+|---|---:|---:|---:|
+| Baseline for polynomial trial | 0.2478 | 0.2472 | 0.2466–0.2984 |
+| Degree-eight polynomial | 0.2514 | 0.2503 | 0.2500–0.3015 |
+| Baseline for lookup-table trial | 0.2481 | 0.2476 | 0.2468–0.2976 |
+| 256-entry sRGB lookup table | 0.2564 | 0.2565 | 0.2553–0.3118 |
+
+A separate instrumented build bracketed each analysis pass individually. The per-pass medians across five
+loaded blocks were 0.0551 ms for luminance, 0.0152 and 0.0139 ms for the two box passes, 0.0481 ms for
+gating and 0.0474 ms for height. The two slower idle-gap blocks had medians of 0.0681 ms, 0.0156 ms,
+0.0156 ms, 0.0593 ms and 0.0577 ms in the same order. The extra timestamps perturb the total, so these
+measurements locate the cost and the uninstrumented runs above measure the budget. The gate cache trial
+raised the loaded median gate cost to 0.0491 ms. Loading the previous height from the exact texel in the
+no-motion branch reduced the loaded height pass to 0.0461 ms, with no corresponding improvement in the
+slower idle-gap total. These variants stayed in the benchmark build.
+
+The same uninstrumented shader was run with Windows `Sleep(2)` and with a high-resolution waitable timer
+requesting 2 ms. The median wall-clock pause for each block was 13.36–13.86 ms with `Sleep(2)` and
+2.01–2.05 ms with the waitable timer. Across five blocks per mode, the GPU total ranged from 0.2468 to
+0.2982 ms with `Sleep(2)` and from 0.2472 to 0.2976 ms with the waitable timer. The 0.25 ms budget is
+met under load in these runs. Meeting it consistently after a gap remains unverified.
+
+The next trial changed only height-pass scheduling. Each thread used the original height calculation for a
+2×2 block, and read the frame's cut flag once for the block. At the same 1080p settings and on the same GPU,
+two interleaved five-block runs produced these results:
+
+| Height dispatch | Loaded median by run (ms) | Pooled range with high-resolution 2 ms gaps (ms) |
+|---|---:|---:|
+| Original 8×8 workgroup, one pixel per thread | 0.2481, 0.2483 | 0.2472–0.2978 |
+| 8×8 workgroup, four pixels per thread | 0.2399, 0.2398 | 0.2386–0.2892 |
+
+Two one-run alternatives were slower under load. Caching half-resolution inputs in group-shared memory
+with four pixels per thread took 0.2440 ms. A 16×16 workgroup with one pixel per thread took 0.2491 ms.
+The four-pixel trial improved the loaded timings and reduced the slowest observed idle-gap result.
+All 312 benchmark PNGs matched the original by SHA-256. They cover the Shading and Parallax synthetic
+fixtures at 50% and 100%, and the saved 1857×1017 Helldivers 2 and 1856×1016 ATLYSS inputs. The captures
+also stayed active through both motion and the noisy-still sequence. Motion depth checks passed on all three
+test adapters.
+
+The combined playtest build uses commit `1e3220b` plus the pending relief changes (source fingerprint
+`3e173597fc0e373b`). On the same RTX 5060, at 1920×1080 input and output, the Shading run measured 0.2492 ms
+under load and 0.2486 ms with idle gaps. Parallax measured 0.2912 ms and 0.2910 ms under the same conditions
+at 100% strength with a 3 px cap. The CLI strength-zero test copied every pixel exactly for both BGRA8
+and RGBA8 output. The true Off mode still leaves the relief pass uncreated.
+
+The combined build also ran both saved game crops through `--relief-image --relief-strengths 0.5,1 --adapter 5060`.
+Helldivers 2 (1793×953 analysed) and ATLYSS (1792×952 analysed) both stayed active throughout the still, pan,
+and noisy-still sequences. Their noisy-still textured coverage was 0.565 and 0.656 respectively.
+
+The same playtest ran against `moonsr_testpattern --width 640 --height 360 --fps 20 --motion-pattern 1` through
+Windows Graphics Capture on the RTX 5060. The CLI used Bilinear at 1920×1080 output with a three-second window
+per case. It presented 59 generated frames with Parallax after fixed 2× generation, 177 after fixed 4×, and 177
+with Parallax before fixed 4×. Parallax reported active in all three cases. With relief and generation off, the
+reported pipeline contained only Upscaling. This checks routing and presentation on a synthetic window.
+
+The expanded synthetic suite adds a 55%-opaque panel and dense smoke over bricks. On the same RTX 5060,
+`--relief --relief-strengths 0.5,1 --relief-no-time --adapter 5060` and its `--relief-parallax` counterpart passed.
+The 960×540 scenes used default detail and a 40-frame pan. The table reports the largest absolute 8-bit channel
+change on the translucent panel and mean absolute relative luminance change over the dense smoke core. The
+opaque HUD remained pixel-exact, including on the synthetic generated phases.
+
+| Mode and strength | Translucent HUD max (RGB levels) | Dense smoke mean change |
+|---|---:|---:|
+| Shading, 50% | 9 | 0.142% |
+| Shading, 100% | 11 | 0.286% |
+| Parallax, 50% | 10 | 0.142% |
+| Parallax, 100% | 14 | 0.286% |
+
+An isolated test moved the edge protection ramp from 0.22–0.55 to 0.12–0.40 stops per pixel. Both suites passed,
+and the translucent panel's four peak changes were identical to the table. The playtest retains the original ramp.
+
+The wall-path suite now includes an orbit around the wall centre, with the camera continuously facing it. In the
+same 1.1.1-based playtest on the RTX 5060 (driver 32.0.16.2114), the 480×270 orbit used default detail, 100%
+Parallax, and no lighting or cavity modulation. With a 2 px cap, SSIM to the displaced-wall reference rose from
+0.973525 to 0.976178, and mean extra warp error was 0.1111 RGB code values. With a 3 px cap, SSIM rose from
+0.973525 to 0.975862, and mean extra warp error was 0.1550 code values. Both caps passed the 0.5-code-value check.
+
+The rebuilt halo playtest (`1e3220b` plus pending changes) passed the Parallax suite on the RTX 5060 with
+driver 32.0.16.2114. For the final 448×119 wall crop at the 3 px cap, FLIP 1.7 LDR mean error moved
+from 0.053595 to 0.047176 on strafe and from 0.055473 to 0.048095 on dolly. The earlier height playtest
+scored 0.047177 and 0.048097 with Parallax. Shading and cavity are disabled in this fixture to isolate
+displacement. Mean extra warp error stayed below 0.5 RGB codes on strafe, dolly, yaw and orbit at both caps.
+
+A second isolated replay rendered Shading and Parallax with their default lighting and cavity settings at
+100% strength. The displaced wall reference used a directional light derived from the wall's known height
+gradient, with a linear-light gain capped at 15%. On the same RTX 5060 and driver, FLIP 1.7 LDR mean error
+at the 3 px cap fell from 0.070066 to 0.066214 on strafe and from 0.074439 to 0.069701 on dolly. SSIM
+improved on both paths at both caps. All four paths passed the 0.5-code-value extra warp-error check.
+This is a synthetic geometry and lighting comparison.
+
 ## Smart parallax playtest build (2026-11-23)
 
 Working tree based on `8a975b9`, benchmark source fingerprint `ddcc6a97fd59b8e4`. Hardware and driver versions

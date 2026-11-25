@@ -43,13 +43,14 @@ cbuffer ReliefAnalyseCB : register(b0)
 // addresses (chosen by thread group) so that thousands of groups do not serialise on one global atomic. The LAST group
 // of the pass to finish (finished-group counter) sums the slots in parallel and updates the frame state.
 #define RS_SLOTS       64
-#define RS_COUNTERS    5
+#define RS_COUNTERS    6
 #define RS_ADDR(c, slot) ((((c) * RS_SLOTS) + (slot)) * 4)
 #define RS_TEXTURED    0   // textured pixels (edge gate x texture gate > 0.25; HUD-protected pixels included)
 #define RS_HUD         1   // textured pixels (texture gate > 0.1) with HUD protection > 0.5
 #define RS_CHANGED     2   // pixels whose L (2x2 mean) changed beyond the luminance-dependent noise floor
 #define RS_ABSDL       3   // sum of truncated |dL| * 32 per pixel (|dL| saturates at 8 stops; no overflow up to 4K)
 #define RS_SUMY        4   // sum of truncated linear Y * 64 per pixel
+#define RS_COHERENT    5   // changes supported by both neighbours on either axis
 #define RS_DONE        ((RS_COUNTERS * RS_SLOTS) * 4) // finished-group counter
 // Persistent state buffer (frame pass), float slots, byte offsets.
 #define RST_FADE       0
@@ -61,7 +62,7 @@ cbuffer ReliefAnalyseCB : register(b0)
 #define RST_COV        24
 #define RST_HUD        28
 #define RST_CUT        32
-#define RST_CHANGED    36
+#define RST_CHANGED    36  // share of pixels with same-sign temporal change supported by surrounding texels
 #define RST_MOTION_FIT 40  // mode from motion fit, as float
 #define RST_SLOTS      16  // buffer size in 32-bit slots
 
@@ -75,6 +76,9 @@ float LinearToSrgb(float c)
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
 }
 float3 LinearToSrgb3(float3 c) { return float3(LinearToSrgb(c.r), LinearToSrgb(c.g), LinearToSrgb(c.b)); }
+
+// The logistic form of tanh uses one base-2 exponential on Shader Model 5.
+float ReliefTanh(float x) { return 2.0 / (1.0 + exp2(-2.885390082 * x)) - 1.0; }
 
 uint RsSlot(uint2 gid) { return (gid.x * 7u + gid.y * 13u) & (RS_SLOTS - 1u); }
 

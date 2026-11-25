@@ -27,6 +27,7 @@ SamplerState       linClamp    : register(s0);
 RWTexture2D<unorm float4> outG : register(u0); // (hud, edge * tex, changed, SigmaEnc(sigma))
 globallycoherent RWByteAddressBuffer stats : register(u1); // coherent: the last group reads the other groups' sums
 RWByteAddressBuffer state   : register(u2);  // persistent frame state (relief_frame.hlsli)
+RWTexture2D<unorm float> outEdge : register(u4);
 RWTexture2D<unorm float2> outCount : register(u3); // half-size (count / 64, LEnc(reference L))
 #include "relief/relief_frame.hlsli"
 
@@ -34,12 +35,12 @@ RWTexture2D<unorm float2> outCount : register(u3); // half-size (count / 64, LEn
 #define HALO 2
 #define SIDE (TILE + 2 * HALO)
 #define GS (TILE + 2) // gradient tile: 1 half texel around the tile for the 3x3 dilations
-groupshared float2 gsBD[SIDE * SIDE]; // (B, D)
+groupshared float3 gsBD[SIDE * SIDE]; // (B, D, signed change in L)
 groupshared float gsCnt[SIDE * SIDE];
 groupshared float gsG[GS * GS];
 groupshared float3 gsHorizontal[TILE * SIDE]; // horizontal sums of D² and flat samples, and maximum HUD count
 groupshared uint4 gsRed[TILE * TILE];  // (textured, hud, changed, |dL|)
-groupshared uint gsRedY[TILE * TILE];  // sum Y
+groupshared uint2 gsRedY[TILE * TILE];  // sum Y and coherent change
 groupshared uint gsLast;
 
 [numthreads(TILE, TILE, 1)]
@@ -51,9 +52,11 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
     for (uint i = gi; i < SIDE * SIDE; i += TILE * TILE) {
         const int2 q = clamp(tile0 - HALO + int2(i % SIDE, i / SIDE), int2(0, 0), hi);
         const float2 ab = abTex.Load(int3(q, 0));
-        const float l = LDec(curL.SampleLevel(linClamp, (float2(q) * 2.0 + 1.0) / float2(cSize), 0)); // 2x2 mean
+        const float2 uv = (float2(q) * 2.0 + 1.0) / float2(cSize);
+        const float l = LDec(curL.SampleLevel(linClamp, uv, 0)); // 2x2 mean
         const float b = ab.x * l + ab.y;
-        gsBD[i] = float2(b, l - b);
+        const float previous = reset ? l : LDec(prevL.SampleLevel(linClamp, uv, 0));
+        gsBD[i] = float3(b, l - b, l - previous);
         gsCnt[i] = reset ? 0.0 : 64.0 * prevCount.Load(int3(q, 0)).x;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -103,8 +106,9 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         // Change against the previous frame (frame statistics) and the static counter of this texel.
         const uint k0 = t.y * SIDE + t.x;
         const float l = gsBD[k0].x + gsBD[k0].y;
-        const float lPrev = LDec(prevL.SampleLevel(linClamp, (float2(p) * 2.0 + 1.0) / float2(cSize), 0));
-        const float dl = abs(l - lPrev);
+        const float signedChange = gsBD[k0].z;
+        const float lPrev = l - signedChange;
+        const float dl = abs(signedChange);
         // Log luminance amplifies small code-value changes in shadows. Give prefiltered shadow noise
         // more room without losing the small changes that identify a slow pan in brighter areas.
         const float noiseFloor = lerp(0.01, 0.045, saturate((-min(l, lPrev) - 3.0) / 4.0));
@@ -123,6 +127,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         outCount[p] = float2(cs.x / 64.0, LEnc(cs.y));
         cmax = cut ? 0.0 : max(cmax, cs.x);
         const float hudGate = (cFlags & RELIEF_F_PROTECT_HUD) ? 1.0 - smoothstep(6.0, 16.0, cmax) : 1.0;
+        outEdge[p] = edgeGate;
         outG[p] = float4(hudGate, edgeGate * texGate, texelChanged ? 1.0 : 0.0, SigmaEnc(sigma));
 
         const uint area = (uint)(min(2, int(cSize.x) - 2 * p.x) * min(2, int(cSize.y) - 2 * p.y)); // pixels covered
@@ -131,21 +136,28 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         counts.z = texelChanged ? area : 0u;
         counts.w = (uint)(min(dl, 8.0) * 32.0) * area;
         countY = (uint)(saturate(exp2(l) - kLogEps) * 64.0) * area;
+        const float polarity = signedChange < 0.0 ? -1.0 : 1.0;
+        // Look past the closest neighbours, whose prefilter footprints overlap most of this texel's.
+        // Real motion tends to change both sides along at least one axis. Grain seldom does so.
+        const float supportX = min(gsBD[k0 - 2].z * polarity, gsBD[k0 + 2].z * polarity);
+        const float supportY = min(gsBD[k0 - 2 * SIDE].z * polarity, gsBD[k0 + 2 * SIDE].z * polarity);
+        // Group-local counts are at most 16 × 16 × 4, so carry coherent and raw change in one lane.
+        if (texelChanged && max(supportX, supportY) > 0.5 * noiseFloor) counts.z |= area << 16;
     }
     gsRed[gi] = counts;
-    gsRedY[gi] = countY;
+    gsRedY[gi].x = countY;
     GroupMemoryBarrierWithGroupSync();
     // The first row sums the columns before the group leader combines them. This needs one
     // barrier between the two sums, independent of wave size and without SM6 wave operations.
     if (gi < TILE) {
         uint4 column = gsRed[gi];
-        uint sumY = gsRedY[gi];
+        uint sumY = gsRedY[gi].x;
         [unroll] for (uint y = 1; y < TILE; ++y) {
             column += gsRed[y * TILE + gi];
-            sumY += gsRedY[y * TILE + gi];
+            sumY += gsRedY[y * TILE + gi].x;
         }
         gsRed[gi] = column;
-        gsRedY[gi] = sumY;
+        gsRedY[gi].x = sumY;
     }
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0) {
@@ -153,15 +165,16 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         uint groupY = 0;
         [unroll] for (uint x = 0; x < TILE; ++x) {
             groupTotals += gsRed[x];
-            groupY += gsRedY[x];
+            groupY += gsRedY[x].x;
         }
         uint dummy;
         const uint slot = RsSlot(gid.xy);
         stats.InterlockedAdd(RS_ADDR(RS_TEXTURED, slot), groupTotals.x, dummy);
         stats.InterlockedAdd(RS_ADDR(RS_HUD, slot), groupTotals.y, dummy);
-        stats.InterlockedAdd(RS_ADDR(RS_CHANGED, slot), groupTotals.z, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_CHANGED, slot), groupTotals.z & 0xFFFFu, dummy);
         stats.InterlockedAdd(RS_ADDR(RS_ABSDL, slot), groupTotals.w, dummy);
         stats.InterlockedAdd(RS_ADDR(RS_SUMY, slot), groupY, dummy);
+        stats.InterlockedAdd(RS_ADDR(RS_COHERENT, slot), groupTotals.z >> 16, dummy);
         DeviceMemoryBarrier();
         uint done;
         stats.InterlockedAdd(RS_DONE, 1u, done);
@@ -172,7 +185,8 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
     if (gsLast != 0) { // the last group to finish sums the frame statistics and updates the frame state
         gsRed[gi] = gi < RS_SLOTS ? uint4(stats.Load(RS_ADDR(RS_TEXTURED, gi)), stats.Load(RS_ADDR(RS_HUD, gi)),
                                           stats.Load(RS_ADDR(RS_CHANGED, gi)), stats.Load(RS_ADDR(RS_ABSDL, gi))) : 0u;
-        gsRedY[gi] = gi < RS_SLOTS ? stats.Load(RS_ADDR(RS_SUMY, gi)) : 0u;
+        gsRedY[gi] = gi < RS_SLOTS ? uint2(stats.Load(RS_ADDR(RS_SUMY, gi)),
+                                           stats.Load(RS_ADDR(RS_COHERENT, gi))) : 0u;
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint s = RS_SLOTS / 2; s > 0; s >>= 1) {
             if (gi < s) { gsRed[gi] += gsRed[gi + s]; gsRedY[gi] += gsRedY[gi + s]; }
@@ -180,7 +194,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gi : SV_Gr
         }
         if (gi == 0) {
             const bool motionCut = (cFlags & RELIEF_F_MOTION_CUT) != 0 && motionStats.Load(cSceneCutIndex) != 0;
-            ReliefFrameUpdate(gsRed[0].x, gsRed[0].y, gsRed[0].z, gsRed[0].w, gsRedY[0], motionCut);
+            ReliefFrameUpdate(gsRed[0].x, gsRed[0].y, gsRed[0].z, gsRed[0].w, gsRedY[0].x, gsRedY[0].y, motionCut);
         }
     }
 }

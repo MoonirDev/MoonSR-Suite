@@ -417,7 +417,7 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.reliefModeNote = p->Make<ui::InfoBar>();
         u.reliefModeNote->Set(ui::InfoBar::Severity::Info,
                               L"Experimental. Motion depth reuses compatible frame-generation motion when available. "
-                              L"Otherwise it estimates motion on the selected Smart parallax GPU.");
+                              L"Otherwise it uses Parallax.");
         u.reliefModeNote->visible = false;
         u.reliefStrength = p->Make<Slider>();
         u.reliefStrength->Setup(0, 100, 5, L"%");

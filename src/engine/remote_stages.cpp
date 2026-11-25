@@ -78,7 +78,8 @@ public:
 
     Size FrameSize() const override { return size_; }
 
-    bool Interpolate(float t, ID3D11RenderTargetView* dst) override {
+    bool Interpolate(float t, ID3D11RenderTargetView* dst, ID3D11ShaderResourceView** selection) override {
+        if (selection) *selection = nullptr;
         if (!dst || size_.Empty()) return false;
         if ((!gen_ || genSize_ != size_) && !EnsureGenerated()) return false;
         if (!inner_->Interpolate(t, genRtv_.Get())) return false;

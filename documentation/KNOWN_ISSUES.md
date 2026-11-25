@@ -10,11 +10,16 @@ The missing notice and warning close buttons in 1.1.0 were restored in 1.1.1.
   can show almost no difference between Shading and Parallax.
 - Parallax assumes wall-like surfaces above the centre and ground-like surfaces lower on screen. Angled surfaces or
   pure turns can make texture displacement look different from the game's own parallax.
-- Motion depth estimates motion itself when frame-generation flow is unavailable or incompatible. This adds analysis
-  cost even with frame generation off. A different Smart parallax GPU adds capture and colour transfers. Rotation
+- Motion depth uses Parallax when frame-generation flow is unavailable or incompatible.
+  A different Smart parallax GPU adds capture and colour transfers. Rotation
   alone supplies no new depth, and unreliable motion fades prior depth.
-- Near the edge of a silhouette, translucent HUD, smoke, and foliage can still be misclassified. Generated-frame
-  protection has synthetic coverage. Live 2× and 4× playtests are pending.
+- Near the edge of a silhouette, translucent HUD, smoke, and foliage can still be misclassified. In 1.1.1, the
+  owner observed generated-frame Parallax flicker in ATLYSS at 4× and in Helldivers 2 at 2× and 4×. The owner
+  also observed Motion depth shimmer on bright surfaces. In the first live retest, shimmer remained after frame
+  generation. The owner saw better stability with Smart parallax before frame generation. The follow-up filter
+  made the remaining shimmer less apparent in the owner's live retest. The next playtest improves height
+  alignment on confidently tracked generated surfaces in offline replay. Its effect on visible shimmer in games
+  remains unverified.
 
 ## Frame generation (iteration 1)
 - Nobody has looked at live generated frames yet: the output window is excluded from capture, so live image
