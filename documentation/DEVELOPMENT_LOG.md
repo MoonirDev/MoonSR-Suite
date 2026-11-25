@@ -4,6 +4,12 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-25 - Restore notices button (1.1.3 follow-up)
+
+- Codex replaced the one-shot notice restore switch with a standard button and removed switch-reset code. The action still clears saved dismissals and immediately relayouts the page; the standard button supports mouse and keyboard activation.
+- Full build, upscaling and frame-generation self-tests, and theme self-test passed on the RTX 5060. No rendering changes. Version kept at 1.1.3 at the owner request.
+
+
 ## 2026-11-25 - Capture the final scaled output (1.1.3)
 
 - Codex disabled capture exclusion by default on the presenter. Input capture still targets the selected game window directly and excludes MoonSR windows from its source list.

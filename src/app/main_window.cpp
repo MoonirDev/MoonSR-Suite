@@ -900,7 +900,6 @@ void MainWindow::WireHandlers() {
     ui_.themePicker->onChange = [this] { OnThemeChosen(); };
     ui_.resetNotices->onChange = [this] {
         ui::InfoBar::ResetDismissals();
-        ui_.resetNotices->SetChecked(false);
         view_.RequestLayout();
         view_.Invalidate();
     };

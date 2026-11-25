@@ -32,7 +32,7 @@ struct AppUi {
     ui::ToggleSwitch *vsync = nullptr, *cursor = nullptr, *counter = nullptr;
     ui::ToggleSwitch* closeToTray = nullptr;  // Settings page, "Application" section
     ui::ToggleSwitch* visualEffects = nullptr;
-    ui::ToggleSwitch* resetNotices = nullptr;
+    ui::Button* resetNotices = nullptr;
     ui::Row* visualEffectsRow = nullptr;
     // MoonSR temporal upscaler (Upscaling page; shown while the scaler is MoonSR)
     ui::InfoBar *alsrInfo = nullptr, *alsrNote = nullptr;

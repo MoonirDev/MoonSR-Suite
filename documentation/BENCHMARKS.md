@@ -11,6 +11,10 @@ UI/settings change only; no new performance measurements. Existing rendering mea
 
 RTX 5060, driver 32.0.16.2114; source 6426888 plus the capture fix. Default capture inclusion, SDR output, V-Sync on. The GPU smoke test verified the expected presented colour through a desktop BitBlt screenshot and Windows Graphics Capture. No new performance measurements.
 
+## 1.1.3 restore-notices button
+
+UI control change only; no new performance measurements. Rendering paths are unchanged.
+
 ## Test machine
 
 | Item | Value |

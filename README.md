@@ -14,7 +14,7 @@ It is an experimental personal project. Quality and speed claims come only from 
 
 - **Screenshots and recording:** screen capture can include the final scaled image. Capture the display to include MoonSR processing; capturing the game alone records its original image.
 
-- **Notices:** closed notices and warnings stay dismissed across restarts. Restore them from Settings.
+- **Notices:** closed notices and warnings stay dismissed across restarts. Restore them with the Restore notices button in Settings.
 
 - **Capture:** Windows Graphics Capture of any window, with the cursor drawn in software.
 - **Upscaling:** Nearest, Bilinear, Catmull-Rom, Lanczos-3, MoonSR Spatial (edge-adaptive) and MoonSR
@@ -101,7 +101,7 @@ Binaries are written to `build\main\bin`:
 
 ## Releases
 
-- **1.1.3** (2026-11-25): Notices and warnings stay closed across restarts, with a Settings switch to restore them and the closing animations kept. Screenshots and screen recordings can now include the final scaled image.
+- **1.1.3** (2026-11-25): Notices and warnings stay closed across restarts, with a Settings button to restore them and the closing animations kept. Screenshots and screen recordings can now include the final scaled image.
 
 - **1.1.2** (2026-11-25): improves Smart parallax around edges and during frame generation, reduces false pauses
   from grain, and explains when Motion depth falls back to Parallax.
