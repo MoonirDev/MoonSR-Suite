@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.1.3**
+**Version 1.1.4**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -25,7 +25,7 @@ It is an experimental personal project. Quality and speed claims come only from 
   frames.
 - **Neural rendering (optional):** runs a vendor neural-rendering model on the captured frames. Supported cards:
   NVIDIA GeForce RTX, AMD Radeon RX 7000 and RX 9000 series, and Intel Arc A- and B-series (Intel is far from real
-  time). You supply the runtime and model yourself; the Neural rendering page guides you through it:
+  time). You supply the runtime and model yourself; the Neural rendering page explains the effect under About and guides you through setup:
   - NVIDIA: your DLSS Neural Rendering model (`nvngx_dlssnr.dll`).
   - AMD: the AMDNR runtime.
   - Intel: the DLSS5_INTEL runtime (experimental and far from real time).
@@ -100,6 +100,8 @@ Binaries are written to `build\main\bin`:
   tests in `tests/`.
 
 ## Releases
+
+- **1.1.4** (2026-11-25): Added a permanent explanation under About in the Neural rendering tab. Replaced the Settings switch for restoring dismissed notices with a button.
 
 - **1.1.3** (2026-11-25): Notices and warnings stay closed across restarts, with a Settings button to restore them and the closing animations kept. Screenshots and screen recordings can now include the final scaled image.
 

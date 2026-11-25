@@ -4,6 +4,12 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-25 - Neural rendering About description (1.1.4)
+
+- Codex added a permanent information card directly under About and before the dismissible notices. It describes neural model processing, changes to detail/lighting/material appearance, model-dependent results and user-provided files.
+- Includes the previously prepared Restore notices button. The owner authorized building and publishing 1.1.4. Full build, upscaling and frame-generation self-tests, and theme self-test passed on the RTX 5060.
+
+
 ## 2026-11-25 - Restore notices button (1.1.3 follow-up)
 
 - Codex replaced the one-shot notice restore switch with a standard button and removed switch-reset code. The action still clears saved dismissals and immediately relayouts the page; the standard button supports mouse and keyboard activation.

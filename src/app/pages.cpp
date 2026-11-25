@@ -312,6 +312,11 @@ void BuildPages(ui::View& view, AppUi& u) {
         }
 
         p->AddSection(L"About");
+        ui::Card& nrAbout = p->AddCard();
+        p->AddRow(nrAbout, kIconNeuralNav, L"What neural rendering does",
+                  L"Uses a neural-network model to enhance captured frames, changing details, lighting and material "
+                  L"appearance. Results depend on the model and settings and may differ from the game's original look. "
+                  L"Processing runs on your GPU using runtime and model files you provide.", {});
         p->AddInfo(u.neuralInfo);
         p->AddInfo(u.neuralDev);
         p->AddInfo(u.neuralNote);

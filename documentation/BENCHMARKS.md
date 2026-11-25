@@ -15,6 +15,10 @@ RTX 5060, driver 32.0.16.2114; source 6426888 plus the capture fix. Default capt
 
 UI control change only; no new performance measurements. Rendering paths are unchanged.
 
+## 1.1.4 NR About description and notice button
+
+UI changes only; no new performance measurements. Existing rendering measurements are unchanged.
+
 ## Test machine
 
 | Item | Value |

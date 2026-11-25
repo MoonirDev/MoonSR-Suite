@@ -3,7 +3,7 @@
 Updated: 2026-11-25
 
 The missing notice and warning close buttons in 1.1.0 were restored in 1.1.1.
-Version 1.1.3 remembers closed messages across restarts; 1.1.3 provides a Restore notices button. Restore them with Settings > Application > Restore dismissed notices. Changed message text appears again.
+Version 1.1.3 remembers closed messages across restarts; 1.1.4 provides a Restore notices button. The Neural rendering About description remains visible when notices are dismissed. Restore them with Settings > Application > Restore dismissed notices. Changed message text appears again.
 
 ## Smart parallax (experimental)
 
