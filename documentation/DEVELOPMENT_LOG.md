@@ -4,11 +4,11 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
-## 2026-11-25 - Capture the final scaled output (1.1.4)
+## 2026-11-25 - Capture the final scaled output (1.1.3)
 
 - Codex disabled capture exclusion by default on the presenter. Input capture still targets the selected game window directly and excludes MoonSR windows from its source list.
 - Added a GPU smoke check verifying unrestricted display affinity and expected rendered colour through both desktop screenshot and WGC capture. Full build, GPU self-tests, theme self-test and full scaling pipeline check passed on the RTX 5060.
-- Publication remains on hold at the owner request; the pending notice changes are included.
+- The owner approved publishing both fixes together as 1.1.3.
 
 
 ## 2026-11-25 - Persistent notice dismissal (1.1.3)

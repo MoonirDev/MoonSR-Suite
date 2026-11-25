@@ -7,7 +7,7 @@ No estimates, no third-party figures presented as ours. "Not measured" is a vali
 
 UI/settings change only; no new performance measurements. Existing rendering measurements below remain unchanged.
 
-## 1.1.4 capture compatibility check
+## 1.1.3 capture compatibility check
 
 RTX 5060, driver 32.0.16.2114; source 6426888 plus the capture fix. Default capture inclusion, SDR output, V-Sync on. The GPU smoke test verified the expected presented colour through a desktop BitBlt screenshot and Windows Graphics Capture. No new performance measurements.
 
