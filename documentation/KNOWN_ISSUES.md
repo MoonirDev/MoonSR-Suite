@@ -245,6 +245,10 @@ Still open:
 - The spatial tier is a three-pass pattern-based morphological filter (MLAA family): edge mask, run-length coverage
   weights, neighbourhood blend. Straight runs are not touched; only the ends of a staircase receive a weighted blend.
   It is original HLSL written from the published descriptions; no third-party shader code or lookup texture is bundled.
+- ATLYSS material exists too: four 1920x1080 captures (no AA, MoonSR Balanced, MoonSR Quality, game 8x MSAA) from the
+  same character and camera. They are at different in-game times, so only the isolated pass on the no-AA capture and the
+  per-image edge metrics are comparable. The game's 8x MSAA is smoother on geometry in the 4x crop, as expected; the
+  capture is not a like-for-like score. See BENCHMARKS.md.
 - Real-game material exists: 120-frame recordings of Helldivers 2 (game AA off, TAA, DLAA, two MoonSR AA runs) and
   Black Mesa (game AA off, two MoonSR AA runs), measured in BENCHMARKS.md. Two games, no ground truth, and the runs are
   not the same camera pose, so there is no objective quality score and no head-to-head against the game's TAA.

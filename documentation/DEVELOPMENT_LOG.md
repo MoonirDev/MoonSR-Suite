@@ -4,6 +4,27 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing: ATLYSS owner captures
+
+- The owner supplied four 1920x1080 ATLYSS captures: no AA, MoonSR Balanced, MoonSR Quality and game 8x MSAA. They are
+  at different in-game times (11 PM / 1 AM / 3 AM / 4 AM) and are not pixel-aligned, so cross-image pixel diffs mix AA
+  with lighting and animation. Recorded in BENCHMARKS.md with that limitation.
+- Isolated pass on the no-AA capture: 3.55 % changed, mean 0.62/255, high-pass 29.90 -> 27.79 (0.930), 0.207 ms.
+  In the 3D region the strongest-step measure falls 74.22 -> 63.74; on the character crop 117.37 -> 99.08.
+- The owner's Balanced capture measures 64.59 / 15.21 in the 3D region and 101.60 / 36.54 on the character; the isolated
+  pass on no-AA measures 63.74 / 15.26 and 99.08 / 36.55. The near-match is consistent with the capture using this
+  tier. Balanced vs Quality on the character is 101.60/36.54 vs 101.61/36.58; their 7.5 % region difference is not a
+  Quality comparison because the captures are at different times.
+- The game 8x MSAA capture measures 62.59 / 15.06 in the region and is visibly smoother on the weapon rim and blades in
+  the 4x crop. That is the expected advantage of geometry supersampling over a post-process; it is not a like-for-like
+  score.
+- Visual: the no-AA weapon, ring and emblem staircases are smoothed in both MoonSR captures and in the isolated pass
+  output; flat blade interiors keep their texture, and the HUD is not part of the filter. Next: the owner's in-motion
+  judgement. If geometry still looks weaker than 8x MSAA, that is the known post-process limit; a temporal or
+  SMAA-style Directional tier remains optional, not justified yet.
+
+---
+
 ## 2026-11-26 - Anti-aliasing rebuild: pattern-based spatial tier
 
 - Rebuilt the spatial tier after the owner's "not visible" reports and the clean-rebuild reset. The FXAA-style pass is

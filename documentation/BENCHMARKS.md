@@ -2691,3 +2691,50 @@ Self-tests: `moonsr_bench --selftest` and `moonsr_fgbench --selftest` pass (0 fa
 Honest limits: the pass is spatial; it cannot recover sub-pixel detail the game never rendered. Static HUD masking
 and temporal accumulation are not built. One-texel game features are protected rather than anti-aliased. The owner's
 same-scene in-game A/B is still pending, and no quality claim against the game's own AA is made.
+
+### ATLYSS owner captures (2026-11-26)
+
+Four 1920x1080 captures were supplied in `%LOCALAPPDATA%\MoonSR\recordings\AAtests`:
+`ATLYSS_noAA.png`, `ATLYSS_MoonAA_Balanced.png`, `ATLYSS_MoonAA_Quality.png` and `ATLYSS_8xMSAA.png`.
+They show the same character and camera, but they were taken at different in-game clock times (11 PM, 1 AM,
+3 AM, 4 AM) and are not pixel-aligned; cross-image pixel differences therefore mix anti-aliasing with lighting and
+animation changes. Only the isolated pass on the no-AA input and the per-image edge metrics below are comparable.
+The 3D metrics use x 300..1850, y 100..850 with the bottom-right HUD excluded; the character crop is
+x 850..1050, y 450..650.
+
+Command:
+
+```
+build\main\bin\moonsr_bench.exe --aa-image <capture>.png --save-images --out-dir build\atlyss
+```
+
+Isolated pass on each capture (Balanced):
+
+| Input | Pixels changed | Mean abs diff | High-pass energy | Ratio | GPU |
+|---|---:|---:|---|---:|---:|
+| ATLYSS no AA | 3.55 % | 0.62 | 29.90 -> 27.79 | 0.930 | 0.207 ms |
+| ATLYSS MoonSR Balanced capture | 1.48 % | 0.20 | 27.85 -> 27.47 | 0.986 | 0.198 ms |
+| ATLYSS MoonSR Quality capture | 1.49 % | 0.20 | 27.90 -> 27.54 | 0.987 | 0.191 ms |
+| ATLYSS game 8x MSAA capture | 3.39 % | 0.56 | 28.79 -> 26.99 | 0.937 | 0.204 ms |
+
+Edge metrics (strongest adjacent luma step, mean over rows/columns; lower is smoother):
+
+| Image | 3D region step | 3D region HP | Character step | Character HP |
+|---|---:|---:|---:|---:|
+| ATLYSS no AA | 74.22 | 17.15 | 117.37 | 41.20 |
+| ATLYSS MoonSR Balanced | 64.59 | 15.21 | 101.60 | 36.54 |
+| ATLYSS MoonSR Quality | 65.75 | 15.41 | 101.61 | 36.58 |
+| ATLYSS game 8x MSAA | 62.59 | 15.06 | 97.30 | 34.58 |
+| Isolated pass on no AA (ours) | 63.74 | 15.26 | 99.08 | 36.55 |
+
+The owner's Balanced capture and the isolated pass on the no-AA capture match within about 2 % on the character region
+(step 101.60 vs 99.08, high-pass 36.54 vs 36.55), which is consistent with the capture using this tier. Balanced and
+Quality are nearly identical on the character (101.60/36.54 vs 101.61/36.58); their 7.5 % region difference is not
+attributable to Quality because the captures are at different times. The game 8x MSAA capture is at a different time
+and is smoother on geometry (expected from geometry supersampling); it is not a like-for-like score.
+
+Visual check (4x nearest crop of the weapon and rim, `build\atlyss_compare_ours.png`, not committed): the no-AA
+capture has clear staircases on the red blades, the white ring and the emblem; both MoonSR captures and the isolated
+pass smooth them, while the flat blade interiors keep their texture. The 8x MSAA capture is at least as smooth on the
+geometry edges. This is the first same-character material from ATLYSS; one scene, one game, no ground truth, and the
+owner's in-motion judgement remains the deciding check.
