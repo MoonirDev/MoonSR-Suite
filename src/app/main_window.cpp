@@ -1021,7 +1021,7 @@ void MainWindow::WireHandlers() {
             OnLiveChange();
         };
     for (ui::Control* control : std::initializer_list<ui::Control*>{ui_.aa, ui_.aaMode, ui_.aaQuality, ui_.aaStrength,
-             ui_.aaEdgeThreshold, ui_.aaEdgeFloor, ui_.aaProtectText, ui_.aaProtectHud, ui_.aaAutoReduce})
+             ui_.aaProtectText, ui_.aaProtectHud})
         control->onChange = [this] {
             UpdateAaUi();
             if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
@@ -1217,11 +1217,8 @@ void MainWindow::ApplySettingsToUi() {
     ui_.aaMode->SetSelected(std::clamp(settings_.aaMode, 0, 2));
     ui_.aaQuality->SetSelected(std::clamp(settings_.aaQuality, 0, 2));
     ui_.aaStrength->SetValue(std::clamp(settings_.aaStrengthPercent, 0, 100));
-    ui_.aaEdgeThreshold->SetValue(std::clamp(settings_.aaEdgeThresholdHundredths, 2, 50));
-    ui_.aaEdgeFloor->SetValue(std::clamp(settings_.aaEdgeMinHundredths, 0, 20));
     ui_.aaProtectText->SetChecked(settings_.aaProtectText);
     ui_.aaProtectHud->SetChecked(settings_.aaProtectHud);
-    ui_.aaAutoReduce->SetChecked(settings_.aaAutoReduce);
     UpdateAaUi();
     if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
     SetOrderUi(OrderFromString(settings_.pipelineOrder));
@@ -1266,11 +1263,8 @@ AppSettings MainWindow::CaptureSettings() const {
     s.aaMode = std::clamp(ui_.aaMode->Selected(), 0, 2);
     s.aaQuality = std::clamp(ui_.aaQuality->Selected(), 0, 2);
     s.aaStrengthPercent = ui_.aaStrength->value();
-    s.aaEdgeThresholdHundredths = ui_.aaEdgeThreshold->value();
-    s.aaEdgeMinHundredths = ui_.aaEdgeFloor->value();
     s.aaProtectText = ui_.aaProtectText->checked();
     s.aaProtectHud = ui_.aaProtectHud->checked();
-    s.aaAutoReduce = ui_.aaAutoReduce->checked();
     s.pipelineOrder = OrderToString(CurrentOrder());
 
     s.monitorDevice.clear();
@@ -3139,11 +3133,9 @@ AaSettings MainWindow::CurrentAa() const {
     const long long quality = ui_.aaQuality->Selected() >= 0 ? ui_.aaQuality->ItemData(ui_.aaQuality->Selected()) : 1;
     a.quality = quality == 0 ? AaQuality::Performance : quality == 2 ? AaQuality::Quality : AaQuality::Balanced;
     a.strength = static_cast<float>(ui_.aaStrength->value()) / 100.0f;
-    a.edgeThreshold = static_cast<float>(ui_.aaEdgeThreshold->value()) / 100.0f;
-    a.edgeThresholdMin = static_cast<float>(ui_.aaEdgeFloor->value()) / 100.0f;
+    // The edge thresholds are internal tuning constants (see AaSettings): no UI exposes them.
     a.protectText = ui_.aaProtectText->checked();
     a.protectHud = ui_.aaProtectHud->checked();
-    a.autoReduce = ui_.aaAutoReduce->checked();
     // No diagnostic view on the page: the edge mask, blend weight and split views are developer tools, reached with
     // `moonsr_cli --aa-view`, and A/B compare on Home covers the split.
     a.debugView = AaDebugView::None;
@@ -3155,11 +3147,8 @@ void MainWindow::UpdateAaUi() {
     ui_.aaMode->SetEnabled(on);
     ui_.aaQuality->SetEnabled(on);
     ui_.aaStrength->SetEnabled(on);
-    ui_.aaEdgeThreshold->SetEnabled(on);
-    ui_.aaEdgeFloor->SetEnabled(on);
     ui_.aaProtectText->SetEnabled(on);
     ui_.aaProtectHud->SetEnabled(on);
-    ui_.aaAutoReduce->SetEnabled(on);
     const long long mode = ui_.aaMode->Selected() >= 0 ? ui_.aaMode->ItemData(ui_.aaMode->Selected()) : 0;
     const bool layoutChange = ui_.aaModeNote->visible != (mode != 0);
     ui_.aaModeNote->SetVisible(mode != 0);

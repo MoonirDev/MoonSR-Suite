@@ -433,15 +433,8 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.aaStrength = p->Make<Slider>();
         u.aaStrength->Setup(0, 100, 5, L"%");
         u.aaStrength->SetValue(100);
-        u.aaEdgeThreshold = p->Make<Slider>();
-        u.aaEdgeThreshold->Setup(2, 50, 1, L"%");
-        u.aaEdgeThreshold->SetValue(10);
-        u.aaEdgeFloor = p->Make<Slider>();
-        u.aaEdgeFloor->Setup(0, 20, 1, L"%");
-        u.aaEdgeFloor->SetValue(3);
         u.aaProtectText = p->Make<ToggleSwitch>();
         u.aaProtectHud = p->Make<ToggleSwitch>();
-        u.aaAutoReduce = p->Make<ToggleSwitch>();
 
         p->AddInfo(u.aaDev);
         p->AddInfo(about);
@@ -455,17 +448,11 @@ void BuildPages(ui::View& view, AppUi& u) {
                   {{u.aaStrength, 300.0f}});
         p->AddRow(look, kIconQuality, L"Quality", L"Performance is cheapest; Quality smooths diagonals further",
                   {{u.aaQuality, 200.0f}});
-        p->AddRow(look, kIconDetail, L"Edge threshold", L"Contrast that counts as an edge",
-                  {{u.aaEdgeThreshold, 300.0f}});
-        p->AddRow(look, kIconShadow, L"Dark-scene floor", L"Absolute contrast floor for dark scenes",
-                  {{u.aaEdgeFloor, 300.0f}});
         ui::Card& protect = p->AddCard();
         p->AddRow(protect, kIconShield, L"Protect text and thin lines", L"Keeps one-pixel strokes and fine text sharp",
                   {{u.aaProtectText, kToggleW}});
         p->AddRow(protect, kIconShield, L"Protect static HUD", L"Stored for later tiers; the spatial filter protects HUD strokes with the text test",
                   {{u.aaProtectHud, kToggleW}});
-        p->AddRow(protect, kIconShield, L"Reduce when already smooth", L"Experimental: lower the strength when the picture has few hard edges",
-                  {{u.aaAutoReduce, kToggleW}});
     }
 
     // ---------------------------------------------------------------- Smart parallax (experimental)

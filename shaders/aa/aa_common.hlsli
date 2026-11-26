@@ -71,9 +71,9 @@ float3 AaSample(float2 pTexels)
 // staircase step. Quality samples slightly further out and blends harder, which smooths diagonals more.
 void AaQualityParams(out float span, out float blend)
 {
-    if (aaQuality == 0)      { span = 0.95; blend = 0.45; } // Performance
-    else if (aaQuality == 2) { span = 1.25; blend = 0.70; } // Quality
-    else                     { span = 1.15; blend = 0.55; } // Balanced
+    if (aaQuality == 0)      { span = 1.30; blend = 0.70; } // Performance
+    else if (aaQuality == 2) { span = 1.30; blend = 1.00; } // Quality
+    else                     { span = 1.30; blend = 0.85; } // Balanced
 }
 
 #endif

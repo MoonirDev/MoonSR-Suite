@@ -82,15 +82,6 @@ AaSettings Sanitize(const AaSettings& in) {
     return s;
 }
 
-// Already-anti-aliased mapping: below 0.02 % long hard-edge coverage the image is treated as resolved (quarter
-// strength), above 0.1 % as aliased (full strength). First-iteration constants measured only on synthetic scenes; the
-// research note records them as unvalidated until real captures exist.
-float AutoStrength(float coverage) {
-    constexpr float kLo = 0.0002f, kHi = 0.0010f, kFloor = 0.25f;
-    if (coverage <= kLo) return kFloor;
-    if (coverage >= kHi) return 1.0f;
-    return kFloor + (1.0f - kFloor) * (coverage - kLo) / (kHi - kLo);
-}
 
 struct QuerySet {
     ComPtr<ID3D11Query> disjoint, begin, end;
@@ -140,10 +131,7 @@ private:
     void CollectTimings();
     void CollectStats();
 
-    float EffectiveStrength() const {
-        if (!settings_.autoReduce || coverageEma_ < 0.0f) return settings_.strength;
-        return settings_.strength * AutoStrength(coverageEma_);
-    }
+    float EffectiveStrength() const { return settings_.strength; }
 
     GpuDevice& device_;
     AaSettings settings_;
@@ -407,8 +395,6 @@ AaStats AaPassImpl::Stats() const {
     st.gpuMs = Median(timing_);
     if (settings_.mode == AaMode::Directional || settings_.mode == AaMode::Temporal)
         st.reason = L"The selected anti-aliasing mode is not built yet; the spatial filter is used.";
-    else if (settings_.autoReduce && coverageEma_ >= 0.0f && st.strengthInEffect < settings_.strength * 0.9f)
-        st.reason = L"The game already looks anti-aliased; MoonSR anti-aliasing is reduced.";
     return st;
 }
 

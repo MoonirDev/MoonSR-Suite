@@ -66,7 +66,7 @@ float4 main(AaVsOut i) : SV_Target
     // Gate 2: 1.0 for an edge that is exactly vertical or horizontal (already resolved by the pixel grid),
     // 0.5 for a 45 degree edge. Fade the blend out over the last ~5 degrees on either side.
     const float axisAlign = max(abs(gx), abs(gy)) / g1;
-    const float axisGate = 1.0 - saturate((axisAlign - 0.92) / 0.08);
+    const float axisGate = 1.0 - saturate((axisAlign - 0.96) / 0.035);
 
     float span, blend;
     AaQualityParams(span, blend);
@@ -92,7 +92,7 @@ float4 main(AaVsOut i) : SV_Target
         run += abs(AaLuma(AaSample(pos + tangent * d)) - lM) <= tol ? 1.0 : 0.0;
         run += abs(AaLuma(AaSample(pos - tangent * d)) - lM) <= tol ? 1.0 : 0.0;
     }
-    const bool continues = run >= 2.0;   // at least one sample each side
+    const bool continues = run >= 4.0;   // at least two samples each side: texture fails, edges pass
 
     // A real step has two different sides and the centre lies between them. A thin ridge (a one-texel highlight, a
     // railing, a glyph stem) has the background on both sides, so its side contrast is near zero and the centre is
@@ -105,13 +105,13 @@ float4 main(AaVsOut i) : SV_Target
     float w = 0.0;
     if (ok)
     {
-        // How far the centre sits from the two-side average. A pixel that is already the average needs no change (the
-        // filter must not compound on content it already smoothed); a staircase step, which sits on one side, gets the
-        // full weight. The floor keeps a thin ridge (side contrast near zero) from amplifying to a full blend by
-        // accident of division.
-        const float sideAvg = (lPos + lNeg) * 0.5;
-        const float dev = saturate(abs(lM - sideAvg) / max(sideContrast, 0.25 * range));
-        w = aaStrength * blend * saturate(dev * 2.0) * axisGate;
+        // Blend fully towards the two-side average. Anything already at the average stays put (the average equals the
+        // centre), so this does not compound; a staircase step moves to the middle, which is the pixel value a proper
+        // area resolve would have produced.
+        // Hard steps get the full weight; content that is already close to the two-side average (soft edges, texture)
+        // gets proportionally less, so the filter sharpens the staircase and not the whole picture.
+        const float dev = saturate(abs(lM - (lPos + lNeg) * 0.5) / max(sideContrast, 0.25 * range));
+        w = aaStrength * blend * saturate(dev * 3.0) * axisGate;
         if (thinRidge && aaProtectText != 0) w *= 0.5;   // half weight on stroke-shaped features
     }
     w = saturate(w);

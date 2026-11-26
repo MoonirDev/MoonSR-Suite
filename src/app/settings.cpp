@@ -183,11 +183,8 @@ AppSettings LoadSettings() {
     s.aaMode = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"Mode", 0), 0, 2);
     s.aaQuality = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"Quality", 1), 0, 2);
     s.aaStrengthPercent = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"StrengthPercent", 100), 0, 100);
-    s.aaEdgeThresholdHundredths = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"EdgeThreshold", 10), 2, 50);
-    s.aaEdgeMinHundredths = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"EdgeFloor", 3), 0, 20);
     s.aaProtectText = ReadSignedInt(path, L"AntiAliasing", L"ProtectText", 1) != 0;
     s.aaProtectHud = ReadSignedInt(path, L"AntiAliasing", L"ProtectHud", 1) != 0;
-    s.aaAutoReduce = ReadSignedInt(path, L"AntiAliasing", L"AutoReduce", 0) != 0;
     s.pipelineOrder = ReadString(path, L"Pipeline", L"Order");
     s.hasWindowPos = ReadInt(path, L"Window", L"HasPosition", 0) != 0;
     s.windowX = ReadSignedInt(path, L"Window", L"X", 0);
@@ -281,11 +278,8 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"AntiAliasing", L"Mode", s.aaMode);
     ok &= WriteInt(path, L"AntiAliasing", L"Quality", s.aaQuality);
     ok &= WriteInt(path, L"AntiAliasing", L"StrengthPercent", s.aaStrengthPercent);
-    ok &= WriteInt(path, L"AntiAliasing", L"EdgeThreshold", s.aaEdgeThresholdHundredths);
-    ok &= WriteInt(path, L"AntiAliasing", L"EdgeFloor", s.aaEdgeMinHundredths);
     ok &= WriteInt(path, L"AntiAliasing", L"ProtectText", s.aaProtectText ? 1 : 0);
     ok &= WriteInt(path, L"AntiAliasing", L"ProtectHud", s.aaProtectHud ? 1 : 0);
-    ok &= WriteInt(path, L"AntiAliasing", L"AutoReduce", s.aaAutoReduce ? 1 : 0);
     ok &= WriteString(path, L"Pipeline", L"Order", s.pipelineOrder);
     ok &= WriteInt(path, L"Window", L"HasPosition", s.hasWindowPos ? 1 : 0);
     ok &= WriteInt(path, L"Window", L"X", s.windowX);

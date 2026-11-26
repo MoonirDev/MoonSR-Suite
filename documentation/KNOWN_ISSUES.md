@@ -244,34 +244,35 @@ Still open:
   reason says so. There is no temporal history, no motion input, no depth and no MSAA sample reconstruction.
 - Real-game material exists: five 120-frame Helldivers 2 recordings (game AA off, TAA, DLAA, two with MoonSR AA on)
   measured in BENCHMARKS.md. It is one game, one room, no ground truth, and the runs are not the same camera pose, so
-  there is no objective quality score and no head-to-head against the game's TAA. What the numbers show is scale: the
-  filter changes 17 % of pixels in a 1080p frame by a mean of 1.0/255 and lowers high-pass energy by 8.7 % on a no-AA
-  frame - a spatial filter, not a temporal anti-aliasing replacement.
-- The first real-game build changed only 11 % of pixels by a mean of 0.7/255 and the owner could not see it. The current
-  build blends thin one-texel ridges at half weight (instead of rejecting them) and normalises the edge normal properly;
-  that is what makes it visible. The trade-off is real: thin bright features widen by about half a pixel.
-- Balanced is the default because Quality visibly softens thin bright features more (a 1-2 px specular rim gets dimmer
-  and wider). Performance leaves more aliasing. All three presets pass the synthetic checks but only Balanced and Quality
-  were looked at on real frames.
+  there is no objective quality score and no head-to-head against the game's TAA.
+- The filter has been strengthened twice after in-game reports that it was not visible: the edge normal is now unit
+  length, thin one-texel ridges are blended (half weight while text protection is on), and the weight is no longer
+  scaled down when the centre sits near the two-side average. On a no-AA 1080p frame it now changes 13.4 % of pixels by
+  a mean of 1.36/255. The trade-off is real: thin bright features widen by about half a pixel and the finest texture
+  loses a little micro-contrast.
+- Balanced is the default; Quality uses the same sample distance with a full blend towards the two-side average and is
+  the setting to try when Balanced still looks too subtle. Performance leaves more aliasing.
+- The edge threshold (10 %) and dark-scene floor (3 %) are internal constants now, and the "reduce when already smooth"
+  option was removed: the coverage number is a density, not a measure of how well the edges are resolved, so it is shown
+  on Home but never changes the strength.
 - Text/HUD protection is a geometric weight, not a HUD mask: a thin ridge shaped like a glyph stem is blended at half
   strength while the toggle is on and at full strength when it is off. Glyph stems two or more pixels wide, coloured
   text on a similar-luma background and UI elements at 45 degrees can still soften. Synthetic text keeps 100.0 % of its
-  stroke mean, with 0.88 % of stroke pixels changing (worst pixel 51/255 at a glyph corner); the game's HUD looked
+  stroke mean, with 0.15 % of stroke pixels changing (worst pixel 76/255 at a glyph corner); the game's HUD looked
   unchanged at 2x, but small white labels inside the 3D scene do get softer.
-- Dense high-frequency textures lose about 8 % of their high-pass energy (2 px checker, 0.919). That is inside the bench
-  limit but it is visible softening of the finest detail.
+- Dense high-frequency textures keep 99.6 % of their high-pass energy on the 2 px checker, but the finest texture does
+  lose a little micro-contrast on real frames (the mean |d| of 1.36/255 includes those pixels).
 - The "already anti-aliased" detector counts hard steps on a 128x128 sample grid with a long-edge coherence test. It
   reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the one-pixel text and 2 px checker scenes, and 1.0 % on a real
   already-anti-aliased screenshot. That is a hard-edge *density*, not a measure of how well the edges are resolved, so
-  a frame with a single aliased silhouette reads lower than a text-heavy frame with smooth text. Auto-reduce is
-  therefore off by default; when enabled, the 0.02 % / 0.1 % thresholds are synthetic-only constants and it can lower
-  the strength on content that still needs it.
+  a frame with a single aliased silhouette reads lower than a text-heavy frame with smooth text. It is displayed on
+  Home only and never changes the strength.
 - Everything runs on gamma-encoded SDR, like the rest of the pipeline. Dark scenes rely on the absolute edge floor
   (0.03). No HDR or linear-light path.
 - Load order: when Anti-aliasing and Smart parallax both run, the engine always applies anti-aliasing first so relief
   shading is not blurred. A custom order with Relief before Anti-aliasing is not honoured.
 - GPU per stage is supported for the AA stage. Only the RTX 5060, RTX A400 and the Radeon 610M iGPU were measured; the
-  iGPU is far over budget (1.67 ms at 1080p, 2.87 ms at 1440p).
+  iGPU is far over budget (3.49 ms at 1080p, 5.76 ms at 1440p).
 - The debug views (edge mask, blend weight, split) are developer tools with no control on the page: they are selected
   with `moonsr_cli --aa-view`, and the split view is also reachable as A/B compare on Home. The setting is not
   persisted, so a debug view can never survive a restart.

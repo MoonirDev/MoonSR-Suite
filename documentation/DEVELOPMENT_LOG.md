@@ -4,6 +4,27 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing: stronger default, fewer controls
+
+- Owner: still not noticeable in Black Mesa; remove the edge-threshold and dark-scene-floor sliders and tune them
+  internally; remove "Reduce when already smooth".
+- Filter: the weight is no longer scaled down when the centre sits near the two-side average, so a hard step always gets
+  the full preset weight; the sample distance is fixed at 1.30 texels and the presets set the weight (0.70 / 0.85 /
+  1.00). Thin ridges keep their half weight under text protection.
+- Measured (Balanced, 1080p): slanted edges 0.42-0.56 (was 0.45-0.57 but with half the per-pixel magnitude), 2 px
+  checker 0.996, text stroke mean 1.000 with 0.15 % changed, exact 0/90 and gradient unchanged. Real HD2 frame: 13.4 %
+  of pixels changed by a mean of 1.36/255 (was 0.99); TAA 0.97, DLAA 1.15. Cost 0.130 / 0.202 ms, A400 1.51 / 2.36 ms,
+  Radeon iGPU 3.49 / 5.76 ms.
+- Controls: the Anti-aliasing page is now enable, method, strength, quality, protect text, protect HUD. The edge
+  threshold (10 %) and floor (3 %) are constants in `AaSettings`; `autoReduce` is gone from the contract, the pass and
+  the settings file (old files still load, the keys are ignored). The coverage figure stays as a Home indicator only.
+- Verified: full `build\main` and `build\aa` builds; `--aa` passes at all three presets; both self-tests pass; page
+  captured in Windows 11 Dark and Retro with the three rows gone. The owner's running MoonSR instance blocked relinking
+  `build\main\bin\MoonSR.exe` (LNK1168), so the app was built and captured from `build\aa`.
+- Next: owner's in-game check in Black Mesa (AA off in the game, MoonSR Balanced then Quality).
+
+---
+
 ## 2026-11-26 - Anti-aliasing: make the spatial tier visible
 
 - The owner reported that AA still had no visual effect and supplied `HD2_1080p_MoonSR_AA_2`. The stage was running

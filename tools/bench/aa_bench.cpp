@@ -343,7 +343,6 @@ AaSettings DefaultSettings(const AaBenchOptions& o) {
                 : o.debugView == 2   ? AaDebugView::BlendWeight
                 : o.debugView == 3   ? AaDebugView::Split
                                      : AaDebugView::None;
-    s.autoReduce = false; // the self-checks measure the filter at full strength
     return s;
 }
 

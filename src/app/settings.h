@@ -66,11 +66,8 @@ struct AppSettings {
     int aaMode = 0;                   // 0 = Spatial, 1 = Directional, 2 = Temporal (moonsr::AaMode - 1)
     int aaQuality = 1;                // 0 = Performance, 1 = Balanced, 2 = Quality
     int aaStrengthPercent = 100;      // 0..100
-    int aaEdgeThresholdHundredths = 10;   // relative luma contrast x100, 2..50
-    int aaEdgeMinHundredths = 3;          // absolute luma floor x100, 0..20
     bool aaProtectText = true;
     bool aaProtectHud = true;
-    bool aaAutoReduce = false;        // opt-in: lower the strength when the picture already looks resolved
     // Processing order, e.g. "neural,framegen,upscaling,aa,relief"; empty / invalid = default
     std::wstring pipelineOrder;
     // Window position (top-left, virtual-desktop pixels)

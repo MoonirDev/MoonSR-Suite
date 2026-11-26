@@ -38,15 +38,16 @@ enum class AaQuality : uint32_t { Performance = 0, Balanced = 1, Quality = 2 };
 enum class AaDebugView : uint32_t { None = 0, EdgeMask, BlendWeight, Split };
 
 // Every field is clamped by the implementation. Ranges and defaults: research note section 7.2.
+// The edge thresholds are internal tuning constants (no UI): a relative luma contrast of 0.10 with an absolute floor of
+// 0.03 for dark scenes. Exposing them invited more misconfiguration than it prevented.
 struct AaSettings {
     AaMode mode = AaMode::Off;
     AaQuality quality = AaQuality::Balanced;
     float strength = 1.0f;          // master 0..1 blend
     float edgeThreshold = 0.10f;    // relative luma contrast, 0.02..0.5
     float edgeThresholdMin = 0.03f; // absolute floor for dark scenes, 0..0.2
-    bool protectText = true;        // thin-stroke / text protection
-    bool protectHud = true;         // static pixels (T2 and later; T1 uses the stroke test only)
-    bool autoReduce = false;        // opt-in: lower the strength when the picture already looks resolved
+    bool protectText = true;        // thin-stroke / text protection (half weight on stroke-shaped features)
+    bool protectHud = true;         // static pixels (T2 and later; the spatial filter uses the stroke test)
     AaDebugView debugView = AaDebugView::None; // EdgeMask / BlendWeight / Split are diagnostic
     bool operator==(const AaSettings&) const = default;
 };
@@ -55,7 +56,7 @@ struct AaStats {                 // read with a lag; never stalls the CPU
     bool active = false;
     AaMode modeInEffect = AaMode::Off;
     float edgeCoverage = 0.0f;    // share of sampled pixels classified as an aliased edge, 0..1
-    float strengthInEffect = 1.0f; // after autoReduce
+    float strengthInEffect = 1.0f; // the strength the pass used (settings.strength)
     std::wstring reason;          // plain-language state when reduced or not active; empty otherwise
     double gpuMs = 0.0;           // GPU timestamp median over recent Apply calls
 };
