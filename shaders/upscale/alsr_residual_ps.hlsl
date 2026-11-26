@@ -21,22 +21,13 @@ struct VsOut
 Texture2D<float4> gHw : register(t0);   // output res
 Texture2D<float4> gWork : register(t1); // source res
 Texture2D<float2> gLayer : register(t2); // overlay layer / boundary ring (alsr_motion MRT1)
+#ifdef ALSR_ADAPTIVE_FOOTPRINT
+Texture2D<float4> gSampling : register(t3);
+#endif
+
+#include "upscale/alsr_residual.hlsli"
 
 float4 main(VsOut i) : SV_Target
 {
-    // Overlay boundary ring: no residual, so the back-projection never carries information across the layer boundary.
-    if (gLayer.Load(int3(int2(i.pos.xy), 0)).y > 0.5) return float4(0, 0, 0, 0);
-    const float3 c = gWork.Load(int3(int2(i.pos.xy), 0)).rgb;
-    const float2 q = i.pos.xy * gScale.xy;
-    float3 pred;
-    if ((gU1.w & 32u) == 0) {
-        // Area model (default): mean of 4 bilinear taps at +-1/4 of the footprint (exactly the 2x2 box at 2x).
-        const float2 d = 0.25 * gScale.xy;
-        pred = 0.25 * (gHw.SampleLevel(gLinear, (q + float2(-d.x, -d.y)) * gOut.zw, 0).rgb + gHw.SampleLevel(gLinear, (q + float2(d.x, -d.y)) * gOut.zw, 0).rgb +
-                       gHw.SampleLevel(gLinear, (q + float2(-d.x, d.y)) * gOut.zw, 0).rgb + gHw.SampleLevel(gLinear, (q + float2(d.x, d.y)) * gOut.zw, 0).rgb);
-    } else {
-        // Development flag 32: point model, Catmull-Rom of Hw at the sample position.
-        pred = SampleCR(gHw, q, gOut.zw, false).rgb;
-    }
-    return float4(c - pred, 0.0);
+    return float4(MeasurementResidual(int2(i.pos.xy)), 0);
 }

@@ -189,6 +189,9 @@ private:
     ReliefSettings CurrentRelief() const;  // Smart parallax; tier Off while the switch is off
     void UpdateReliefUi();                 // enabled / visible state of the Smart parallax controls
     std::wstring ReliefSummary(const EngineStats* st) const;  // Home "Smart parallax" detail
+    AaSettings CurrentAa() const;          // Anti-aliasing; mode Off while the switch is off
+    void UpdateAaUi();                     // enabled / visible state of the anti-aliasing controls
+    std::wstring AaSummary(const EngineStats* st) const;      // Home "Anti-aliasing" detail
 
     // Load order
     PipelineOrder CurrentOrder() const;

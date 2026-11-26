@@ -8,6 +8,7 @@
 #include "framegen/frame_generator.h"
 #include "upscale/alsr_upscaler.h"
 
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -35,13 +36,22 @@ public:
     // Returns null for an unknown name. frames >= 1; ss = supersampling factor per axis for the ground truth.
     static std::unique_ptr<Sequence> Create(const std::string& name, uint32_t gtW, uint32_t gtH, int frames, int ss);
     // Test hook: a pure translation with the given velocity (ground-truth pixels per frame).
+    static std::unique_ptr<Sequence> CreateRecorded(uint32_t gtW, uint32_t gtH, int frames);
     static std::unique_ptr<Sequence> CreatePan(uint32_t gtW, uint32_t gtH, int frames, int ss, double vx, double vy);
+
+    // Backward displacement at an output-space sample centre, in output pixels.
+    // False where no unambiguous correspondence is scored.
+    bool BackwardFlow(double x, double y, int frame, double& dx, double& dy) const;
+    const char* ContentClass() const;
 
     const std::string& Name() const { return name_; }
     uint32_t W() const { return w_; }
     uint32_t H() const { return h_; }
     int Frames() const { return frames_; }
     int CutFrame() const { return cut_; }                // first frame of the new scene, or -1
+    int StopFrame() const { return stop_; }
+    int ResumeFrame() const { return resume_; }
+    bool HasGroundTruthFlow() const { return !recorded_; }
     bool IsStatic() const { return static_; }            // every frame identical
     const std::vector<HudRect>& Hud() const { return hud_; } // empty if the sequence has no overlay
 
@@ -57,9 +67,13 @@ private:
     std::string name_;
     uint32_t w_ = 0, h_ = 0;
     int frames_ = 0, cut_ = -1, ss_ = 3;
+    int stop_ = -1, resume_ = -1;
     bool static_ = false;
+    bool recorded_ = false;
     std::vector<HudRect> hud_;
     EvalFn eval_;
+    double panX_ = 0, panY_ = 0;
+    double postCutPanX_ = 0, postCutPanY_ = 0;
 };
 
 const std::vector<std::string>& SequenceNames();
@@ -68,6 +82,13 @@ struct SeqScore {
     double psnr = 0;     // luma PSNR vs ground truth, dB
     double ssim = 0;     // luma SSIM (11x11 Gaussian), whole frame
     double flicker = kNaN; // mean |e_t - e_{t-1}| of the luma error e = out - gt, 8-bit levels; NaN for the first frame
+    double staticBlend = kNaN;
+    int samplingModel = -1;  // GPU classification when enabled
+    int samplingEdgeCount = 0;
+    double samplingConcentration = kNaN, samplingAbruptFraction = kNaN;
+    bool samplingPointCandidate = false, samplingRestart = false;
+    double refinedFlowEpe = kNaN, movingRefinedFlowEpe = kNaN;
+    double flowEpe = kNaN; // shared estimator backward-flow error, in input pixels
     bool hasHud = false;
     double hudPsnr = 0, hudSsim = 0, hudFlicker = kNaN; // inside the overlay rectangles only
 };
@@ -89,13 +110,25 @@ struct MethodSpec {
     bool alsr = false;
     moonsr::ScalerKind kind = moonsr::ScalerKind::Lanczos;
     float sharpness = 0.0f;
+    bool single = false;
+    moonsr::AlsrSeed seed = moonsr::AlsrSeed::Spatial;
+    moonsr::AlsrAccumulation accumulation = moonsr::AlsrAccumulation::Separate;
+    bool robustHistory = false;
+    bool tiledReference = false;
+    bool pixelRefine = false;
+    bool affineMotion = false;
+    bool scoreRefinedFlow = false;
+    bool persistentHud = false;
+    bool lite = false;
 };
 
 struct RunOut {
     std::vector<SeqScore> scores;
     std::vector<double> msMain;   // spatial: ScalePass::Render; ALSR: AlsrUpscaler::Render. NaN if the query was disjoint
     std::vector<double> msMotion; // ALSR only: FrameGenerator::PushFrame (the motion estimator)
+    std::array<std::vector<double>, static_cast<size_t>(moonsr::AlsrPass::Count)> msPass;
     uint64_t outHash = 0;         // FNV-1a over all output frames (determinism check)
+    Image keptSingle;              // adaptive seed result on the kept input frame
     Image keptFrame;              // output at frame keepFrame, if requested
 };
 
@@ -114,14 +147,19 @@ struct TemporalOptions {
     std::vector<float> sharpness{0.0f};
     uint32_t gtW = 1920, gtH = 1080;
     int frames = 64, warmup = 8, ss = 3;
+    int timingSweeps = 1;
     bool saveImages = false;
+    bool scoreRefinedFlow = false;
     int saveFrame = 40;
     std::filesystem::path outDir;
+    std::filesystem::path nativeFrames;
     std::string tag;
 };
 
 int RunTemporalBench(const TemporalOptions& o, const std::vector<std::unique_ptr<GpuRunner>>& gpus, const SystemInfo& si,
                      const std::string& tag);
+
+int ScoreCaptureSet(const std::filesystem::path& captures, const std::filesystem::path& results, const std::string& tag);
 
 // --selftest coverage for the temporal mode; returns the number of failed checks (prints PASS/FAIL lines).
 int RunTemporalSelfTest(GpuRunner* gpu);

@@ -438,6 +438,10 @@ void Canvas::Icon(wchar_t glyph, const Rect& r, Font f, const D2D1_COLOR_F& c) {
         ReliefLayersGlyph(r, gfx_.Format(f)->GetFontSize(), c);
         return;
     }
+    if (glyph == kGlyphAntiAlias) {
+        AntiAliasGlyph(r, gfx_.Format(f)->GetFontSize(), c);
+        return;
+    }
     if (glyph == 0xE7A1 && !gfx_.hasFluentIcons()) glyph = 0xE9E9; // Contrast uses Equalizer in MDL2.
     Text(std::wstring(1, glyph), r, f, c, HAlign::Center);
 }
@@ -662,6 +666,32 @@ void Canvas::ReliefLayersGlyph(const Rect& r, float em, const D2D1_COLOR_F& c) {
     brush_->SetColor(c);
     for (int i = 0; i < 4; ++i) rt_->DrawLine(d[i], d[(i + 1) % 4], brush_.Get(), line, gfx_.roundStroke());
     rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0, top), 1.1f * u, 1.1f * u), brush_.Get());  // surface point
+}
+
+// Anti-aliasing: a hard stepped edge on the left and the same edge smoothed on the right. Two short diagonals of equal
+// height and width, the left one drawn as three right-angled steps, the right one as a single straight line, so the
+// difference reads at 18 DIP.
+void Canvas::AntiAliasGlyph(const Rect& r, float em, const D2D1_COLOR_F& c) {
+    if (!rt_) return;
+    const float u = em / 18.0f;  // the nav icons are 18 DIP glyphs
+    const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f;
+    const float w = 5.2f * u, h = 4.6f * u, gap = 1.6f * u, line = std::max(0.8f, 0.9f * u);
+    const float jagX = cx - gap * 0.5f - w, smoothX = cx + gap * 0.5f;
+    brush_->SetColor(c);
+    // Stepped edge: bottom to top in three hard steps.
+    D2D1_POINT_2F prev{jagX, cy + h};
+    constexpr int kSteps = 3;
+    for (int i = 1; i <= kSteps; ++i) {
+        const float x = jagX + w * static_cast<float>(i) / kSteps;
+        const float yStep = cy + h - 2.0f * h * static_cast<float>(i - 1) / kSteps;
+        const float yUp = cy + h - 2.0f * h * static_cast<float>(i) / kSteps;
+        rt_->DrawLine(prev, D2D1::Point2F(x, yStep), brush_.Get(), line, gfx_.roundStroke());
+        rt_->DrawLine(D2D1::Point2F(x, yStep), D2D1::Point2F(x, yUp), brush_.Get(), line, gfx_.roundStroke());
+        prev = D2D1::Point2F(x, yUp);
+    }
+    // Smoothed edge: the same slope as one straight diagonal.
+    rt_->DrawLine(D2D1::Point2F(smoothX, cy + h), D2D1::Point2F(smoothX + w, cy - h), brush_.Get(), line,
+                  gfx_.roundStroke());
 }
 
 void Canvas::PushClip(const Rect& r) {

@@ -108,6 +108,7 @@ const wchar_t* StageToken(PipelineStage s) {
     case PipelineStage::NeuralRendering: return L"neural";
     case PipelineStage::FrameGeneration: return L"framegen";
     case PipelineStage::Relief: return L"relief";
+    case PipelineStage::AntiAliasing: return L"aa";
     default: return L"upscaling";
     }
 }
@@ -117,6 +118,7 @@ wchar_t StageIcon(PipelineStage s) {
     case PipelineStage::NeuralRendering: return 0xE9F3;
     case PipelineStage::FrameGeneration: return 0xE786;
     case PipelineStage::Relief: return ui::kGlyphReliefLayers;
+    case PipelineStage::AntiAliasing: return ui::kGlyphAntiAlias;
     default: return 0xE740;
     }
 }
@@ -1018,6 +1020,13 @@ void MainWindow::WireHandlers() {
             if (!engineActive_) ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
             OnLiveChange();
         };
+    for (ui::Control* control : std::initializer_list<ui::Control*>{ui_.aa, ui_.aaMode, ui_.aaQuality, ui_.aaStrength,
+             ui_.aaEdgeThreshold, ui_.aaEdgeFloor, ui_.aaProtectText, ui_.aaProtectHud, ui_.aaAutoReduce, ui_.aaDebug})
+        control->onChange = [this] {
+            UpdateAaUi();
+            if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
+            OnLiveChange();
+        };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1204,6 +1213,18 @@ void MainWindow::ApplySettingsToUi() {
     ui_.reliefSplit->SetChecked(settings_.reliefSplit);
     UpdateReliefUi();
     if (!engineActive_) ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
+    ui_.aa->SetChecked(settings_.aaEnabled);
+    ui_.aaMode->SetSelected(std::clamp(settings_.aaMode, 0, 2));
+    ui_.aaQuality->SetSelected(std::clamp(settings_.aaQuality, 0, 2));
+    ui_.aaStrength->SetValue(std::clamp(settings_.aaStrengthPercent, 0, 100));
+    ui_.aaEdgeThreshold->SetValue(std::clamp(settings_.aaEdgeThresholdHundredths, 2, 50));
+    ui_.aaEdgeFloor->SetValue(std::clamp(settings_.aaEdgeMinHundredths, 0, 20));
+    ui_.aaProtectText->SetChecked(settings_.aaProtectText);
+    ui_.aaProtectHud->SetChecked(settings_.aaProtectHud);
+    ui_.aaAutoReduce->SetChecked(settings_.aaAutoReduce);
+    ui_.aaDebug->SetSelected(std::clamp(settings_.aaDebugView, 0, 3));
+    UpdateAaUi();
+    if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
     SetOrderUi(OrderFromString(settings_.pipelineOrder));
 }
 
@@ -1242,6 +1263,16 @@ AppSettings MainWindow::CaptureSettings() const {
     s.reliefParallaxHundredths = ui_.reliefParallax->value();
     s.reliefDetailHundredths = ui_.reliefDetail->value();
     s.reliefSplit = ui_.reliefSplit->checked();
+    s.aaEnabled = ui_.aa->checked();
+    s.aaMode = std::clamp(ui_.aaMode->Selected(), 0, 2);
+    s.aaQuality = std::clamp(ui_.aaQuality->Selected(), 0, 2);
+    s.aaStrengthPercent = ui_.aaStrength->value();
+    s.aaEdgeThresholdHundredths = ui_.aaEdgeThreshold->value();
+    s.aaEdgeMinHundredths = ui_.aaEdgeFloor->value();
+    s.aaProtectText = ui_.aaProtectText->checked();
+    s.aaProtectHud = ui_.aaProtectHud->checked();
+    s.aaAutoReduce = ui_.aaAutoReduce->checked();
+    s.aaDebugView = std::clamp(ui_.aaDebug->Selected(), 0, 3);
     s.pipelineOrder = OrderToString(CurrentOrder());
 
     s.monitorDevice.clear();
@@ -1664,6 +1695,7 @@ void MainWindow::ApplyLiveSettings() {
     engine_.SetAlsrSettings(CurrentAlsr());
     engine_.SetPictureSettings(CurrentPictureSettings());
     engine_.SetReliefSettings(CurrentRelief());
+    engine_.SetAaSettings(CurrentAa());
 }
 
 void MainWindow::StartScaling(HWND target) {
@@ -1684,6 +1716,7 @@ void MainWindow::StartScaling(HWND target) {
     cfg.neuralSettings = CurrentNeuralSettings();
     cfg.pictureSettings = CurrentPictureSettings();
     cfg.relief = CurrentRelief();
+    cfg.aa = CurrentAa();
     cfg.splitView = ui_.reliefSplit->checked();
 
     // Re-resolve the monitor handle in case the display configuration changed since the list was built.
@@ -1857,6 +1890,14 @@ void MainWindow::ShowStats(const EngineStats& st) {
     ui_.alsrNote->Set(Severity::Warning, st.alsrNote);
     ui_.alsrNote->SetVisible(!st.alsrNote.empty() && AlsrSelected());
     {
+        std::wstring aa = AaSummary(&st);
+        if (ui_.aa->checked() && st.aaGpuMs > 0.0) aa += std::format(L" · {:.3f} ms GPU", st.aaGpuMs);
+        ui_.details->SetValue(DetAa, aa);
+        const bool extra = ui_.aa->checked() && !st.aaNote.empty();
+        if (extra) ui_.aaNote->Set(Severity::Warning, st.aaNote);
+        ui_.aaNote->SetVisible(extra);
+    }
+    {
         std::wstring relief = ReliefSummary(&st);
         if (ui_.relief->checked() && st.reliefGpuMs > 0.0) relief += std::format(L" · {:.3f} ms GPU", st.reliefGpuMs);
         ui_.details->SetValue(DetRelief, relief);
@@ -1886,9 +1927,11 @@ void MainWindow::ClearStats(const wchar_t* stateText) {
         t->SetValue(L"-");
     for (size_t i = 0; i < DetCount; ++i) ui_.details->SetValue(i, i == DetState ? stateText : L"-");
     ui_.details->SetVisible(DetStageGpus, false);
-    for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote, ui_.reliefNote})
+    for (ui::InfoBar* bar : {ui_.orderNow, ui_.orderNote, ui_.neuralNote, ui_.neuralHomeNote, ui_.alsrNote, ui_.reliefNote,
+                             ui_.aaNote})
         bar->SetVisible(false);
     ui_.details->SetValue(DetRelief, ReliefSummary(nullptr));
+    ui_.details->SetValue(DetAa, AaSummary(nullptr));
     status_ = TestStatus{};
     status_.state = stateText;
 }
@@ -1981,7 +2024,8 @@ void MainWindow::ApplyTestOptionsEarly() {
         static const struct { const wchar_t* name; int page; } kPages[] = {
             {L"home", PageHome}, {L"upscaling", PageUpscaling}, {L"framegen", PageFrameGen},
             {L"settings", PageSettings}, {L"diagnostics", PageSettings}, {L"neural", PageNeural},
-            {L"loadorder", PageLoadOrder}, {L"relief", PageRelief}, {L"parallax", PageRelief}};
+            {L"loadorder", PageLoadOrder}, {L"relief", PageRelief}, {L"parallax", PageRelief},
+            {L"aa", PageAa}, {L"antialiasing", PageAa}, {L"anti-aliasing", PageAa}};
         for (const auto& p : kPages)
             if (EqualNoCase(test_.page, p.name)) view_.Navigate(p.page);
     }
@@ -3084,6 +3128,63 @@ std::wstring MainWindow::ReliefSummary(const EngineStats* st) const {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Anti-aliasing (experimental)
+// ---------------------------------------------------------------------------------------------------------------------
+
+AaSettings MainWindow::CurrentAa() const {
+    AaSettings a;
+    const long long mode = ui_.aaMode->Selected() >= 0 ? ui_.aaMode->ItemData(ui_.aaMode->Selected()) : 0;
+    a.mode = !ui_.aa->checked() ? AaMode::Off
+           : mode == 2          ? AaMode::Temporal
+           : mode == 1          ? AaMode::Directional
+                                : AaMode::Spatial;
+    const long long quality = ui_.aaQuality->Selected() >= 0 ? ui_.aaQuality->ItemData(ui_.aaQuality->Selected()) : 1;
+    a.quality = quality == 0 ? AaQuality::Performance : quality == 2 ? AaQuality::Quality : AaQuality::Balanced;
+    a.strength = static_cast<float>(ui_.aaStrength->value()) / 100.0f;
+    a.edgeThreshold = static_cast<float>(ui_.aaEdgeThreshold->value()) / 100.0f;
+    a.edgeThresholdMin = static_cast<float>(ui_.aaEdgeFloor->value()) / 100.0f;
+    a.protectText = ui_.aaProtectText->checked();
+    a.protectHud = ui_.aaProtectHud->checked();
+    a.autoReduce = ui_.aaAutoReduce->checked();
+    const long long debug = ui_.aaDebug->Selected() >= 0 ? ui_.aaDebug->ItemData(ui_.aaDebug->Selected()) : 0;
+    a.debugView = debug == 1 ? AaDebugView::EdgeMask : debug == 2 ? AaDebugView::BlendWeight
+                : debug == 3 ? AaDebugView::Split : AaDebugView::None;
+    return a;
+}
+
+void MainWindow::UpdateAaUi() {
+    const bool on = ui_.aa->checked();
+    ui_.aaMode->SetEnabled(on);
+    ui_.aaQuality->SetEnabled(on);
+    ui_.aaStrength->SetEnabled(on);
+    ui_.aaEdgeThreshold->SetEnabled(on);
+    ui_.aaEdgeFloor->SetEnabled(on);
+    ui_.aaProtectText->SetEnabled(on);
+    ui_.aaProtectHud->SetEnabled(on);
+    ui_.aaAutoReduce->SetEnabled(on);
+    ui_.aaDebug->SetEnabled(on);
+    const long long mode = ui_.aaMode->Selected() >= 0 ? ui_.aaMode->ItemData(ui_.aaMode->Selected()) : 0;
+    const bool layoutChange = ui_.aaModeNote->visible != (mode != 0);
+    ui_.aaModeNote->SetVisible(mode != 0);
+    if (layoutChange) view_.RequestLayout();
+}
+
+std::wstring MainWindow::AaSummary(const EngineStats* st) const {
+    if (!ui_.aa->checked()) return L"Off";
+    if (st && st->aaActive) {
+        std::wstring text = st->aaMode == AaMode::Directional ? L"Directional"
+                          : st->aaMode == AaMode::Temporal    ? L"Temporal" : L"Spatial";
+        if (st->aaEdgeCoverage > 0.0f) text += std::format(L" · {:.1f}% edges", st->aaEdgeCoverage * 100.0f);
+        if (st->aaStrength > 0.0f && st->aaStrength < 0.95f)
+            text += std::format(L" · {:.0f}% strength", st->aaStrength * 100.0f);
+        return text;
+    }
+    if (st && !st->aaNote.empty()) return st->aaNote;
+    if (st && st->aaMode == AaMode::Off) return L"On (could not start)";
+    return L"On";
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Load order
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -3119,6 +3220,7 @@ void MainWindow::RefreshOrderUi() {
     badge(PipelineStage::FrameGeneration, ui_.frameGen->checked());
     badge(PipelineStage::NeuralRendering, ui_.neural->checked());
     badge(PipelineStage::Relief, ui_.relief->checked());
+    badge(PipelineStage::AntiAliasing, ui_.aa->checked());
 
     const PipelineOrder o = CurrentOrder();
     std::wstring t = L"Frames move through the enabled stages from top to bottom.";
@@ -3128,7 +3230,8 @@ void MainWindow::RefreshOrderUi() {
         const PipelineStage stage = o.stages[i];
         const bool active = stage == PipelineStage::Upscaling ? ui_.upscaling->checked() :
                             stage == PipelineStage::FrameGeneration ? ui_.frameGen->checked() :
-                            stage == PipelineStage::Relief ? ui_.relief->checked() : ui_.neural->checked();
+                            stage == PipelineStage::Relief ? ui_.relief->checked() :
+                            stage == PipelineStage::AntiAliasing ? ui_.aa->checked() : ui_.neural->checked();
         t += std::format(L"\n\n{}. {}: ", i + 1, Engine::StageName(stage));
         if (!active) {
             t += L"Off; this stage is skipped.";
@@ -3158,6 +3261,10 @@ void MainWindow::RefreshOrderUi() {
         case PipelineStage::Relief:
             t += generated ? L"Adds relief to real and generated frames." : L"Adds relief to each game frame.";
             t += L" Motion depth uses Parallax until compatible frame-generation motion is available.";
+            break;
+        case PipelineStage::AntiAliasing:
+            t += upscaled ? L"Smooths edges at output resolution on every displayed frame."
+                          : L"Smooths edges at game resolution before upscaling (cheaper, once per real frame).";
             break;
         }
     }

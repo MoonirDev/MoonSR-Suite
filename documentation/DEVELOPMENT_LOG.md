@@ -4,6 +4,107 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-25 - Anti-aliasing stage, spatial tier T1
+
+- Added the anti-aliasing section: research and contract note `documentation/research/anti_aliasing.md` (FXAA, SMAA,
+  CMAA2, DLAA/TAA concepts, licence review, decisions D1-D12), a new `src/aa` module with `aa_pass.h`, and
+  `shaders/aa/aa_spatial_ps.hlsl` plus `aa_stats_cs.hlsl`. The shaders are clean-room from the published detect /
+  orient / average / blend method; no third-party code was read or copied.
+- The stage is `PipelineStage::AntiAliasing` with a `StageAdapters` entry, the `aa` order token, a GPU-per-stage slot
+  and an `[AntiAliasing]` settings section. Default position is after upscaling (owner's decision), before relief.
+  `NormalizeOrder` keeps an existing order and inserts the missing stage before relief, so 1.1.x settings files load.
+- Added the Anti-aliasing page with its own glyph (stepped versus smooth diagonal), live apply through
+  `Engine::SetAaSettings`, Home status text and a statistics panel row.
+- `moonsr_bench --aa` builds nine synthetic scenes, runs the real pass and checks edge-step reduction, exact edges,
+  texture energy, one-pixel lines, text/HUD pixels and gradients; `--aa-image` runs a real PNG. `moonsr_cli` gained
+  `--aa`, `--aa-strength`, `--aa-quality`, `--aa-view` and `--gpu-aa`.
+- Measured on the RTX 5060: slanted edges lose 30-38 % of their strongest scanline step, exact 0/90 degree edges are
+  bit-identical, text strokes and one-pixel lines are unchanged, the 2 px checker keeps 89 % of its high-pass energy,
+  the gradient is unchanged. Isolated pass: 0.072 ms at 1080p, 0.119 ms at 1440p (budget 0.3 / 0.6 ms). RTX A400
+  0.536 / 0.816 ms, Radeon 610M iGPU 2.131 / 3.235 ms; output matches across adapters.
+- `moonsr_cli --window ... --aa spatial` ran the full engine against a local 1280x720 test window (hard 45 degree edge,
+  one-pixel grid, text) upscaled to 1080p: 455 frames, anti-aliasing active at strength 1.00, 0.035 ms, clean stop to
+  Idle. With auto-reduce on, the same window reported strength 0.25-0.30, so the detector path runs.
+- The coverage detector counts hard-edge density on a 128x128 grid with a long-edge coherence test; text and dense
+  textures no longer read as aliased (0.0 %). Auto-reduce stays off by default because density is not the same as "the
+  edges are already resolved". Recorded in KNOWN_ISSUES.md together with the missing real-game comparison.
+- Full build in `build\aa` and `build\main` under `/W4` with no warnings; `moonsr_bench --selftest` and
+  `moonsr_fgbench --selftest` pass. The page was rendered in all four themes through `--test-page aa --test-theme ...`
+  and a window capture: the themed rows, retro bracket toggles and block sliders all draw correctly.
+- Next: the owner's same-scene captures (AA off, game AA/TAA on, MoonSR AA on), then tune the stroke guards and the
+  detector on real content before considering Directional or Temporal tiers.
+
+---
+
+## 2026-11-26 - Full-resolution footprint and reprojection checkpoint
+
+- Codex ran pooled footprint across the full 1080p point and area matrix. All 18 area outputs matched the default. The largest point regression measured 0.0003 dB PSNR loss, and the largest flicker increase measured 0.0079 levels.
+- Added a benchmark variant that skips untrusted history and reads a single texel for zero-motion history. On the aligned Helldivers 2 replay it matched the default and measured 0.5892 ms Render versus 0.5946 ms. It still needs the same full-resolution matrix.
+- Full build and the scaler, frame-generation and theme self-tests passed. In-game parity remains open.
+
+## 2026-11-25 - Point sampling in back-projection
+
+- Codex tested keeping the area history count and applying a phase-aligned point correction within the guarded blend. Both variants still increased 1080p pan flicker.
+- The footprint trial instead predicts the point sample at its source centre and interpolates the residual through the existing update. It improved PSNR, SSIM and flicker on all three measured 1080p panning cases. The Helldivers 2 area replay matched the default exactly.
+- A shared-memory hull cache matched padded area at image edges and on the replay. It showed no verified saving. The point footprint still needs a clean RTX 5060 budget comparison and synchronized in-game upscaler references.
+- Full build and scaler, frame-generation and theme self-tests passed.
+
+## 2026-11-25 - Measured sampling evidence and reduced Spatial seed loads
+
+- Codex exported the edge counts and decisions used by the GPU detector. At 1080p the original detector often saw fewer than 128 edges on point-sampled pans. Both original Helldivers 2 inputs consistently showed softer edge evidence.
+- A pooled detector increased point coverage on those pans and kept area reconstruction on the tested captures. Holding the seed fixed isolated the remaining flicker increase to the pooled point update in the pan comparison.
+- The Spatial seed now loads the reconstruction window directly. The single-frame shader uses 16 texture loads instead of 25, and the paired RTX 5060 replay medians improved by 0.0209–0.0265 ms with bit-identical output.
+- The full build and all three self-tests passed. Default output matched all 36 baseline hashes. The pooled update remains experimental.
+
+## 2026-11-25 - GPU-selected seed and padded adaptive reconstruction
+
+- Codex moved the seed choice to GPU-generated draw arguments shared by history fallback and generated frames. GPU fixtures matched the dedicated Spatial and covariance shaders exactly, including covariance with sharpening.
+- Added a padded compute variant using the same guarded point blend as the separate update pass. It matched padded area output on the Helldivers 2 replay and all 18 reduced synthetic area cases.
+- Full build and scaler, frame-generation and theme self-tests passed. Some synthetic pans still raised flicker, and GPU load made the timing comparisons inconclusive. The variants remain experimental.
+
+## 2026-11-25 - Paired temporal timings and adaptive seeds
+
+- Codex added alternating timing sweeps and a padded compute area path. The padded and tiled paths produced the same Helldivers 2 replay hash. On the RTX 5060, padded area saved 0.0042 ms against the default in the paired replay.
+- Revised the GPU sampling detector and added a benchmark variant that shares the selected seed between history fallback and generated frames. The detector chose point on 182 of 288 synthetic point frames and on zero of 288 area frames.
+- Tightened history-lock protection and replayed the owner’s native recording. Thin-feature flicker fell, with small flicker regressions in other synthetic cases. Timing variance in the repeat leaves the cost of the new variants unresolved.
+- Full build and scaler, frame-generation and theme self-tests passed. The default matched all 36 M0 synthetic output hashes. BENCHMARKS.md records the measurements and the capture limitations.
+
+## 2026-11-25 - Motion-model trials and hardware tier measurements
+
+- Codex benchmarked a 3×3 affine cell fit, a long-term HUD statistic, and bounded per-pixel refinement. The harness now scores the final refined motion separately from the shared estimator. Lower affine EPE did not consistently improve rotation scores.
+- Added and measured the motion-free Lite trial on the RTX 5060, RTX A400 and Radeon iGPU at both target resolutions. The fused Lite path matched the two-pass replay hashes on all three adapters. The prefiltered pan regression keeps the tier opt-in.
+- Added tiled compute area back-projection. It reuses quantized residuals across a work group, writes next history, and resolves it to the destination.
+- Full build and all three self-tests passed under /Z7. BENCHMARKS.md records the commands and measured quality and cost.
+
+## 2026-11-25 - GPU sampling and start/stop trials
+
+- Added point-residual and motion-guarded candidates. Both improved slow pans in the synthetic matrix, but still regressed on particles and the aligned area replay.
+- Added a GPU-resident point/area selector with a three-frame point streak and area fallback. The scoring harness reports model counts. Its conservative point coverage limits automatic use.
+- Added a start/stop rig with analytic flow and a two-stage stationary reconstruction trial. The first and cached stationary options remain experimental because they raised stop flicker and regressed on a number of still cases.
+- Full build and all three release self-tests passed using /Z7. BENCHMARKS.md records the paired runs and thresholds.
+
+## 2026-11-25 - Temporal accumulation and history protection trials
+
+- Codex added fused cubic and gated separate-pass variants. The fused cubic variant stayed close to the area baseline but raised Render cost on the aligned game replay. The gated variant preserved all tested output hashes.
+- Added short-lived thin-feature locks, soft outlier rejection, luma oscillation protection, and a tiled compute registration reference. The compact history trial improved the aligned game replay but raised flicker in some synthetic cases. Both trials remain selectable in the benchmark.
+- Added edge-step evidence to the harness and a point-sampled accumulation trial. Known point and area sets overlap in the measured edge-step distributions.
+- Full build and all three release self-tests passed with the MSVC /Z7 workaround. BENCHMARKS.md records the paired results.
+
+## 2026-11-25 - Helldivers 2 capture baseline and MoonSR M1 trials
+
+- Codex inspected the three owner recordings, matched input and output by real-frame ID, and checked registration across takes. The native take drove a frame-aligned area-downsample replay.
+- Added selectable Lanczos-3, directional and covariance seeds shared by the temporal and generated-frame paths. The covariance seed led on synthetic point-sampled inputs. MoonSR Spatial led on recorded area content and remains the default.
+- Removed the unused output texture and render-target writes. With separate candidate shaders, all eight tested default output hashes matched the prior pipeline in the 720p to 1080p regression check.
+- The fused area trial reduced Render cost in the aligned replay but missed the synthetic quality gate, so it remains opt-in.
+- Generated-frame seeding now writes directly to the destination at sharpness 0. All four tested filters matched their previous output hashes.
+- The full build and the three release self-tests passed with the MSVC /Z7 workaround. See BENCHMARKS.md for the measured settings and capture limitations.
+
+## 2026-11-25 - MoonSR temporal v2 M0 instrumentation
+
+- Codex added shared-estimator flow end-point error, synthetic content classes, per-pass GPU timestamps and an offline PNG sequence scorer for aligned real-game captures. The scaler algorithm and shader code were unchanged.
+- Full build and all three release self-tests passed with the MSVC /Z7 workaround. The capture identity fixture and instrumented RTX 5060 smoke check passed. See BENCHMARKS.md for the measured settings and results.
+- Real-game capture scoring and the baseline budget comparison remain open.
+
 ## 2026-11-25 - Neural rendering About description (1.1.4)
 
 - Codex added a permanent information card directly under About and before the dismissible notices. It describes neural model processing, changes to detail/lighting/material appearance, model-dependent results and user-provided files.

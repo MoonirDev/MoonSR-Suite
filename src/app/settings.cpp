@@ -125,7 +125,8 @@ AppSettings LoadSettings() {
             return g;
         };
         if (ReadInt(path, L"Gpu", L"PerStage", 0) != 0) {
-            static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief"};
+            static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief",
+                                                                  L"AntiAliasing"};
             for (int i = 0; i < StageGpuCount; ++i) s.stageGpu[i] = read(L"Gpu", kPrefix[i]);
         } else {
             // Older file: one processing GPU for everything.
@@ -178,6 +179,16 @@ AppSettings LoadSettings() {
     s.reliefParallaxHundredths = std::clamp(ReadSignedInt(path, L"Relief", L"ParallaxPx100", 200), 0, 300);
     s.reliefDetailHundredths = std::clamp(ReadSignedInt(path, L"Relief", L"DetailPx100", 200), 75, 400);
     s.reliefSplit = ReadSignedInt(path, L"Relief", L"SplitView", 0) != 0;
+    s.aaEnabled = ReadSignedInt(path, L"AntiAliasing", L"Enabled", 0) != 0;
+    s.aaMode = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"Mode", 0), 0, 2);
+    s.aaQuality = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"Quality", 1), 0, 2);
+    s.aaStrengthPercent = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"StrengthPercent", 100), 0, 100);
+    s.aaEdgeThresholdHundredths = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"EdgeThreshold", 10), 2, 50);
+    s.aaEdgeMinHundredths = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"EdgeFloor", 3), 0, 20);
+    s.aaProtectText = ReadSignedInt(path, L"AntiAliasing", L"ProtectText", 1) != 0;
+    s.aaProtectHud = ReadSignedInt(path, L"AntiAliasing", L"ProtectHud", 1) != 0;
+    s.aaAutoReduce = ReadSignedInt(path, L"AntiAliasing", L"AutoReduce", 0) != 0;
+    s.aaDebugView = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"DebugView", 0), 0, 3);
     s.pipelineOrder = ReadString(path, L"Pipeline", L"Order");
     s.hasWindowPos = ReadInt(path, L"Window", L"HasPosition", 0) != 0;
     s.windowX = ReadSignedInt(path, L"Window", L"X", 0);
@@ -207,7 +218,8 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteString(path, L"Output", L"MonitorDevice", s.monitorDevice);
     ok &= WriteInt(path, L"Gpu", L"PerStage", 1);
     {
-        static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief"};
+        static const wchar_t* const kPrefix[StageGpuCount] = {L"Neural", L"FrameGen", L"Upscaling", L"Relief",
+                                                              L"AntiAliasing"};
         for (int i = 0; i < StageGpuCount; ++i) {
             const std::wstring p = kPrefix[i];
             ok &= WriteInt(path, L"Gpu", (p + L"VendorId").c_str(), s.stageGpu[i].vendorId);
@@ -266,6 +278,16 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"Relief", L"ParallaxPx100", s.reliefParallaxHundredths);
     ok &= WriteInt(path, L"Relief", L"DetailPx100", s.reliefDetailHundredths);
     ok &= WriteInt(path, L"Relief", L"SplitView", s.reliefSplit ? 1 : 0);
+    ok &= WriteInt(path, L"AntiAliasing", L"Enabled", s.aaEnabled ? 1 : 0);
+    ok &= WriteInt(path, L"AntiAliasing", L"Mode", s.aaMode);
+    ok &= WriteInt(path, L"AntiAliasing", L"Quality", s.aaQuality);
+    ok &= WriteInt(path, L"AntiAliasing", L"StrengthPercent", s.aaStrengthPercent);
+    ok &= WriteInt(path, L"AntiAliasing", L"EdgeThreshold", s.aaEdgeThresholdHundredths);
+    ok &= WriteInt(path, L"AntiAliasing", L"EdgeFloor", s.aaEdgeMinHundredths);
+    ok &= WriteInt(path, L"AntiAliasing", L"ProtectText", s.aaProtectText ? 1 : 0);
+    ok &= WriteInt(path, L"AntiAliasing", L"ProtectHud", s.aaProtectHud ? 1 : 0);
+    ok &= WriteInt(path, L"AntiAliasing", L"AutoReduce", s.aaAutoReduce ? 1 : 0);
+    ok &= WriteInt(path, L"AntiAliasing", L"DebugView", s.aaDebugView);
     ok &= WriteString(path, L"Pipeline", L"Order", s.pipelineOrder);
     ok &= WriteInt(path, L"Window", L"HasPosition", s.hasWindowPos ? 1 : 0);
     ok &= WriteInt(path, L"Window", L"X", s.windowX);

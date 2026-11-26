@@ -62,6 +62,7 @@ struct Engine::Impl {
     PictureSettings livePicture;    // guarded by mutex
     ReliefSettings liveRelief;      // guarded by mutex
     bool liveSplit = false;         // guarded by mutex
+    AaSettings liveAa;              // guarded by mutex
     // A/B compare (pipeline thread): the raw capture, nearest + integer scaled to the output size, once per real frame.
     bool splitView = false, splitValid = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> splitTex;
@@ -87,6 +88,8 @@ struct Engine::Impl {
     GpuDevice* nrDevice = nullptr;
     GpuDevice* reliefDevice = nullptr; // null when disabled, otherwise owns the relief context
     std::unique_ptr<GpuDevice> ownedReliefDevice;
+    GpuDevice* aaDevice = nullptr;     // null when anti-aliasing is off, otherwise its own context
+    std::unique_ptr<GpuDevice> ownedAaDevice;
     // The adapter driving the output monitor (the "Auto" GPU, also where MoonSR.exe's Direct2D UI device lives).
     // NVIDIA neural rendering anywhere else runs in a helper process (see StartNeural).
     LUID outputMonitorAdapter{};
@@ -317,8 +320,26 @@ struct Engine::Impl {
     ReliefSettings appliedRelief;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sceneSrv;
 
+    // Anti-aliasing. No analysis: the pass reads the image at its stage position and writes a copy. It can run on its
+    // own GPU, in which case the frame is uploaded and downloaded around the pass.
+    std::unique_ptr<AaPass> aa;
+    std::unique_ptr<CrossAdapterLink> aaUpload, aaDownload;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> aaInput, aaOutput;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> aaInputSrv, aaOutputSrv;
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> aaOutputRtv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> aaComposedTex;   // what the next stage reads after an in-scene AA
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> aaComposedSrv;
+    Size aaApplySize;
+    DXGI_FORMAT aaFormat = DXGI_FORMAT_UNKNOWN;
+    bool aaFailed = false, aaCopyFailed = false, aaCopyProblem = false;
+    bool aaBeforeScale = false;      // positioned before upscaling: the filter width follows output pixels
+    bool aaInScene = false;          // positioned after upscaling: runs on the kept scene in ComposeAndPresent
+    bool pendingAaDone = false;
+    AaSettings appliedAa;
+    ScaleSettings aaScaleSettings;
+
     // Scene routing: the software cursor and relief both need the finished image in `scene`.
-    bool WantScene() const { return cursor != nullptr || reliefInScene; }
+    bool WantScene() const { return cursor != nullptr || reliefInScene || aaInScene; }
 
     void ReleaseRelief() {
         if (relief && scale) scale->ResetSourceCache();
@@ -342,7 +363,7 @@ struct Engine::Impl {
         reliefPhase = 1.0f;
         appliedRelief = ReliefSettings{};
         sceneSrv.Reset();
-        if (!cursor) { // the scene texture existed only for relief
+        if (!cursor && !aaInScene) { // the scene texture existed only for relief
             sceneRtv.Reset();
             scene.Reset();
             sceneSize = {};
@@ -414,9 +435,9 @@ struct Engine::Impl {
 
     void ResetReliefHistory() {
         if (relief) relief->Reset();
+        reliefAnalysed = false;
         reliefUsesFrameGenFlow = false;
         reliefFrameSelection.Reset();
-        reliefAnalysed = false;
     }
 
     void LogReliefCopyFailure(const std::wstring& error) {
@@ -427,9 +448,9 @@ struct Engine::Impl {
 
     // Borrow capture-size frame-generation motion on the same device.
     void ReliefAnalyse(const CapturedFrame& frame, const MotionFieldView* motion) {
+        if (!relief) return;
         reliefFrameSelection.Reset();
         reliefUsesFrameGenFlow = false;
-        if (!relief) return;
         ID3D11Texture2D* input = frame.texture;
         RectI rect = frame.contentRect;
         if (reliefCaptureUpload) {
@@ -532,6 +553,210 @@ struct Engine::Impl {
             return false;
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------------------------------------ anti-aliasing
+
+    void ReleaseAa() {
+        if (aa && scale) scale->ResetSourceCache();
+        aa.reset();
+        aaInputSrv.Reset();
+        aaInput.Reset();
+        aaOutputSrv.Reset();
+        aaOutputRtv.Reset();
+        aaOutput.Reset();
+        aaComposedSrv.Reset();
+        aaComposedTex.Reset();
+        aaApplySize = {};
+        aaFormat = DXGI_FORMAT_UNKNOWN;
+        aaUpload.reset();
+        aaDownload.reset();
+        aaDevice = nullptr;
+        ownedAaDevice.reset();
+        aaCopyFailed = aaCopyProblem = false;
+        aaInScene = false;
+        pendingAaDone = false;
+        appliedAa = AaSettings{};
+        if (!cursor && !reliefInScene) {
+            sceneSrv.Reset();
+            sceneRtv.Reset();
+            scene.Reset();
+            sceneSize = {};
+            sceneValid = false;
+        }
+    }
+
+    bool StartAa(std::wstring& error) {
+        const LUID requested = config.stageAdapters.antiAliasing;
+        const LUID luid = LuidIsZero(requested) ? outputMonitorAdapter : requested;
+        aaDevice = device.get();
+        if (!LuidIsZero(luid) && !LuidEqual(luid, device->Info().luid)) {
+            for (const auto& d : extraDevices)
+                if (LuidEqual(luid, d->Info().luid)) aaDevice = d.get();
+            if (aaDevice == device.get()) {
+                ownedAaDevice = GpuDevice::Create(&luid, error);
+                if (!ownedAaDevice && !LuidIsZero(requested)) return false;
+                if (ownedAaDevice) {
+                    aaDevice = ownedAaDevice.get();
+                    wchar_t value[16]{};
+                    const DWORD len = GetEnvironmentVariableW(L"MOONSR_GPU_PRIORITY", value, 16);
+                    if (!len || len >= 16 || _wcsicmp(value, L"normal") != 0) RaiseGpuPriority(aaDevice->Device());
+                }
+            }
+        }
+        if (aaDevice != device.get()) {
+            aaUpload = CrossAdapterLink::Create(*device, *aaDevice, error);
+            if (!aaUpload) return false;
+            aaDownload = CrossAdapterLink::Create(*aaDevice, *device, error);
+            if (!aaDownload) return false;
+        }
+        aa = AaPass::Create(*aaDevice, error);
+        if (!aa) return false;
+        MSR_LOG_INFO(L"Anti-aliasing runs on '{}'{}", aaDevice->Info().name,
+                     aaUpload ? std::format(L" ({})", aaUpload->Method()) : L"");
+        return true;
+    }
+
+    // Creates / releases / configures the pass for this loop iteration (pipeline thread).
+    void UpdateAa(const AaSettings& requested) {
+        const bool want = requested.mode != AaMode::Off;
+        if (!want) {
+            if (aa) {
+                ReleaseAa();
+                MSR_LOG_INFO(L"Anti-aliasing off");
+            }
+            return;
+        }
+        if (!aa && !aaFailed) {
+            std::wstring error;
+            if (!StartAa(error)) {
+                ReleaseAa();
+                aaFailed = true;
+                MSR_LOG_ERROR(L"Anti-aliasing could not start: {}", error);
+                return;
+            }
+            appliedAa = AaSettings{};
+        }
+        if (aa && !(requested == appliedAa)) {
+            aa->SetSettings(requested);
+            appliedAa = requested;
+        }
+    }
+
+    void LogAaCopyFailure(const std::wstring& error) {
+        if (!aaCopyFailed) MSR_LOG_WARN(L"Anti-aliasing frame transfer or target failed: {}", error);
+        aaCopyFailed = true;
+        aaCopyProblem = true;
+    }
+
+    bool EnsureAaTargets(Size size, DXGI_FORMAT format) {
+        if (size == aaApplySize && format == aaFormat && aaOutputRtv) return true;
+        aaApplySize = {};
+        aaInputSrv.Reset();
+        aaInput.Reset();
+        aaOutputSrv.Reset();
+        aaOutputRtv.Reset();
+        aaOutput.Reset();
+        aaComposedSrv.Reset();
+        aaComposedTex.Reset();
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = size.width;
+        td.Height = size.height;
+        td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
+        td.Format = format;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = aaDevice->Device()->CreateTexture2D(&td, nullptr, &aaInput);
+        if (SUCCEEDED(hr)) hr = aaDevice->Device()->CreateShaderResourceView(aaInput.Get(), nullptr, &aaInputSrv);
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (SUCCEEDED(hr)) hr = aaDevice->Device()->CreateTexture2D(&td, nullptr, &aaOutput);
+        if (SUCCEEDED(hr)) hr = aaDevice->Device()->CreateRenderTargetView(aaOutput.Get(), nullptr, &aaOutputRtv);
+        if (SUCCEEDED(hr)) hr = aaDevice->Device()->CreateShaderResourceView(aaOutput.Get(), nullptr, &aaOutputSrv);
+        if (FAILED(hr)) {
+            LogAaCopyFailure(HrToString(hr));
+            return false;
+        }
+        aaApplySize = size;
+        aaFormat = format;
+        return true;
+    }
+
+    // Runs the pass on `input` (a region of it) and returns the filtered texture, or nullptr when it could not run.
+    // `contentInRect` is where the game image lies inside `rect` (letterbox excluded).
+    ID3D11Texture2D* RenderAa(ID3D11Texture2D* input, const RectI& rect, const RectI& contentInRect,
+                              float outputPixelScale = 1.0f) {
+        if (!aa || !input || rect.Empty()) return nullptr;
+        std::wstring error;
+        ID3D11Texture2D* source = input;
+        const Size size{static_cast<uint32_t>(rect.Width()), static_cast<uint32_t>(rect.Height())};
+        const RectI full{0, 0, rect.Width(), rect.Height()};
+        RectI sourceRect = rect;
+        if (aaUpload) {
+            source = aaUpload->Transfer(input, rect, error);
+            if (!source) {
+                LogAaCopyFailure(error);
+                return nullptr;
+            }
+            sourceRect = full;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        source->GetDesc(&desc);
+        if (!EnsureAaTargets(size, desc.Format)) return nullptr;
+        const D3D11_BOX crop{static_cast<UINT>(sourceRect.left), static_cast<UINT>(sourceRect.top), 0,
+                             static_cast<UINT>(sourceRect.right), static_cast<UINT>(sourceRect.bottom), 1};
+        aaDevice->Context()->CopySubresourceRegion(aaInput.Get(), 0, 0, 0, 0, source, 0, &crop);
+        if (!aa->Apply(aaInputSrv.Get(), size, aaOutputRtv.Get(), size, contentInRect, outputPixelScale))
+            return nullptr;
+        aaCopyProblem = false;
+        if (!aaDownload) return aaOutput.Get();
+        ID3D11Texture2D* result = aaDownload->Transfer(aaOutput.Get(), full, error);
+        if (!result) LogAaCopyFailure(error);
+        return result;
+    }
+
+    void ApplyAaBefore(bool precedes, bool& done, ID3D11Texture2D*& texture, RectI& rect) {
+        if (!precedes || done || !aa || !texture || rect.Empty()) return;
+        const RectI full{0, 0, rect.Width(), rect.Height()};
+        float outputPixelScale = 1.0f;
+        if (aaBeforeScale && aaScaleSettings.enabled) {
+            const auto w = static_cast<uint32_t>(rect.Width()), h = static_cast<uint32_t>(rect.Height());
+            const RectI output = ScalePass::ComputeDestRect({w, h}, presenter->BackBufferSize(), aaScaleSettings.fit);
+            outputPixelScale = std::max(static_cast<float>(output.Width()) / static_cast<float>(w),
+                                        static_cast<float>(output.Height()) / static_cast<float>(h));
+        }
+        if (auto* processed = RenderAa(texture, rect, full, outputPixelScale)) {
+            texture = processed;
+            rect = full;
+        }
+        done = true; // a failed pass leaves this frame usable by the next stage
+    }
+
+    // Applies the filters that precede `stage`, in load-order terms: anti-aliasing and Smart parallax run in the order
+    // the user arranged them (anti-aliasing first by default, so relief shading is not filtered).
+    void ApplyFiltersBefore(bool aaPrecedes, bool reliefPrecedes, bool aaFirst, bool& aaDone, bool& reliefDone,
+                            ID3D11Texture2D*& texture, RectI& rect, float phase) {
+        if (aaFirst) {
+            if (aaPrecedes) ApplyAaBefore(true, aaDone, texture, rect);
+            if (reliefPrecedes) ApplyReliefBefore(true, reliefDone, texture, rect, phase);
+        } else {
+            if (reliefPrecedes) ApplyReliefBefore(true, reliefDone, texture, rect, phase);
+            if (aaPrecedes) ApplyAaBefore(true, aaDone, texture, rect);
+        }
+    }
+
+    // The SRV of the image that follows an in-scene AA pass, for relief (or the copy to the back buffer).
+    ID3D11ShaderResourceView* AaComposedSrv(ID3D11Texture2D* composed) {
+        if (!composed) return nullptr;
+        if (composed != aaComposedTex.Get()) {
+            aaComposedSrv.Reset();
+            aaComposedTex = composed;
+            const HRESULT hr = device->Device()->CreateShaderResourceView(composed, nullptr, &aaComposedSrv);
+            if (FAILED(hr)) {
+                MSR_LOG_ERROR(L"Anti-aliasing output view failed: {}", HrToString(hr));
+                aaComposedTex.Reset();
+                return nullptr;
+            }
+        }
+        return aaComposedSrv.Get();
     }
 
     // Frame counter overlay: "game fps / displayed fps", refreshed with the statistics.
@@ -706,6 +931,8 @@ struct Engine::Impl {
         fgCreateFailed = false;
         ReleaseRelief();
         reliefFailed = false;
+        ReleaseAa();
+        aaFailed = false;
         cursor.reset();
         sceneSrv.Reset();
         sceneRtv.Reset();
@@ -1296,20 +1523,26 @@ struct Engine::Impl {
         return true;
     }
 
-    // Brings the kept scene to the back buffer (through Smart parallax when it is on, else a plain copy), draws the
-    // software cursor on top and presents. Relief runs before the cursor and the frame counter (PresentBackBuffer), so
-    // neither overlay is relief-processed, and a cursor-only re-composite re-applies relief to the same frame.
+    // Brings the kept scene to the back buffer (through anti-aliasing and Smart parallax when they are on, else a plain
+    // copy), draws the software cursor on top and presents. Both filters run before the cursor and the frame counter
+    // (PresentBackBuffer), so neither overlay is filtered, and a cursor-only re-composite re-applies them to the same
+    // frame. Anti-aliasing is positioned after upscaling by default, so it runs here on the finished image.
     PresentStatus ComposeAndPresent(const CursorState& state) {
         ID3D11RenderTargetView* bb = presenter->BackBufferRtv();
         bool applied = false;
         ID3D11Texture2D* composed = scene.Get();
+        const RectI full{0, 0, static_cast<int32_t>(sceneSize.width), static_cast<int32_t>(sceneSize.height)};
+        if (aaInScene && aa && !pendingAaDone) {
+            if (auto* processed = RenderAa(scene.Get(), full, sceneDestRect)) composed = processed;
+        }
         if (reliefInScene && relief && reliefAnalysed) {
-            if (!reliefUpload && EnsureSceneSrv()) {
-                applied = relief->Apply(sceneSrv.Get(), sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase,
+            if (!reliefUpload) {
+                ID3D11ShaderResourceView* srv = composed == scene.Get() ? (EnsureSceneSrv() ? sceneSrv.Get() : nullptr)
+                                                                        : AaComposedSrv(composed);
+                if (srv) applied = relief->Apply(srv, sceneSize, bb, presenter->BackBufferSize(), sceneDestRect, reliefPhase,
                                                  1.0f, reliefAfterActiveFrameGen, reliefFrameSelection.Get());
-            } else if (reliefUpload) {
-                const RectI full{0, 0, static_cast<int32_t>(sceneSize.width), static_cast<int32_t>(sceneSize.height)};
-                if (auto* processed = RenderRelief(scene.Get(), full, sceneDestRect, reliefPhase)) composed = processed;
+            } else if (auto* processed = RenderRelief(composed, full, sceneDestRect, reliefPhase)) {
+                composed = processed;
             }
         }
         if (!applied) {
@@ -1366,6 +1599,9 @@ struct Engine::Impl {
             stats.reliefActive = false;
             stats.reliefTier = ReliefTier::Off;
             stats.reliefGpuMs = 0.0;
+            stats.aaActive = false;
+            stats.aaMode = AaMode::Off;
+            stats.aaGpuMs = 0.0;
         }
         if (!exitError.empty()) MSR_LOG_WARN(L"Pipeline stopped: {}", exitError);
         // If we never reported a start result (exception during init), report the failure now.
@@ -1455,6 +1691,7 @@ struct Engine::Impl {
             AlsrSettings alsrSettings;
             PictureSettings pictureSettings;
             ReliefSettings reliefSettings;
+            AaSettings aaSettings;
             std::optional<NeuralChange> neuralChange;
             bool vsync;
             {
@@ -1466,6 +1703,7 @@ struct Engine::Impl {
                 alsrSettings = liveAlsr;
                 pictureSettings = livePicture;
                 reliefSettings = liveRelief;
+                aaSettings = liveAa;
                 splitView = liveSplit;
                 if (pendingIndex >= pendingCount) neuralChange.swap(pendingNeuralChange);
                 overlayEnabled = liveFrameCounter;
@@ -1538,6 +1776,8 @@ struct Engine::Impl {
                     if (alsrMotion) alsrMotion->Reset();
                     ResetReliefHistory();
                     reliefInScene = false;
+                    if (aa) aa->Reset();
+                    aaInScene = false;
                     neuralReset = true;
                 }
                 appliedOrder = order;
@@ -1556,6 +1796,13 @@ struct Engine::Impl {
             const bool reliefBeforeNeural = reliefPosition < posOf(PipelineStage::NeuralRendering);
             reliefBeforeScale = reliefBeforeUp;
             reliefScaleSettings = settings;
+            const auto aaPosition = posOf(PipelineStage::AntiAliasing);
+            const bool aaBeforeFg = aaPosition < posOf(PipelineStage::FrameGeneration);
+            const bool aaBeforeUp = aaPosition < posOf(PipelineStage::Upscaling);
+            const bool aaBeforeNeural = aaPosition < posOf(PipelineStage::NeuralRendering);
+            const bool aaBeforeRelief = aaPosition < reliefPosition;
+            aaBeforeScale = aaBeforeUp;
+            aaScaleSettings = settings;
             if (pendingIndex >= pendingCount) {
                 const bool wasEnabled = relief != nullptr;
                 UpdateRelief(reliefSettings);
@@ -1564,6 +1811,16 @@ struct Engine::Impl {
                     if (reliefBeforeUp && alsr) alsr->Reset();
                     if (reliefBeforeUp && alsrMotion) alsrMotion->Reset();
                     if (reliefBeforeNeural) neuralReset = true;
+                }
+                const bool aaWasEnabled = aa != nullptr;
+                UpdateAa(aaSettings);
+                if (aaWasEnabled != (aa != nullptr)) {
+                    // The image entering later stages changes: discard histories that were built from it.
+                    if (aaBeforeFg && fg) { fg->Reset(); fgHasHistory = false; }
+                    if (aaBeforeUp && alsr) alsr->Reset();
+                    if (aaBeforeUp && alsrMotion) alsrMotion->Reset();
+                    if (aaBeforeNeural) neuralReset = true;
+                    ResetReliefHistory();
                 }
             }
             if (neuralChange && ApplyNeuralChange(*neuralChange)) {
@@ -1636,6 +1893,7 @@ struct Engine::Impl {
                 Size texSize = fs;
                 const float phase = p.real ? 1.0f : p.t;
                 bool reliefDone = pendingReliefDone;
+                bool aaDone = pendingAaDone;
                 bool alreadyUpscaled = pendingPreScaled;
                 reliefFrameSelection.Reset();
                 if (p.real) {
@@ -1654,7 +1912,7 @@ struct Engine::Impl {
                     // Generated frames get ALSR's single-frame reconstruction so they match the real frames' look.
                     if (tex && pendingAlsr && alsr && alsrGen) {
                         RectI rect{0, 0, static_cast<int32_t>(fs.width), static_cast<int32_t>(fs.height)};
-                        ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, rect, phase);
+                        ApplyFiltersBefore(aaBeforeUp, reliefBeforeUp, aaBeforeRelief, aaDone, reliefDone, tex, rect, phase);
                         if (alsr->RenderSingle(tex, alsrGenRtv.Get(), alsrSize, alsrSettings)) {
                             tex = alsrGen.Get();
                             texSize = alsrSize;
@@ -1663,7 +1921,7 @@ struct Engine::Impl {
                     }
                 }
                 auto renderDeferredAlsr = [&](RectI& rect) {
-                    ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, rect, phase);
+                    ApplyFiltersBefore(aaBeforeUp, reliefBeforeUp, aaBeforeRelief, aaDone, reliefDone, tex, rect, phase);
                     if (p.real) {
                         if (!alsrMotion && !alsrMotionFailed) {
                             std::wstring error;
@@ -1695,7 +1953,7 @@ struct Engine::Impl {
                                 break;
                             }
                         } else {
-                            ApplyReliefBefore(reliefBeforeUp, reliefDone, tex, currentRect, phase);
+                            ApplyFiltersBefore(aaBeforeUp, reliefBeforeUp, aaBeforeRelief, aaDone, reliefDone, tex, currentRect, phase);
                             const RectI dr = ScalePass::ComputeDestRect(texSize, presenter->BackBufferSize(), settings.fit);
                             const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
                             ScaleSettings fill = settings; fill.fit = FitMode::Stretch;
@@ -1706,7 +1964,7 @@ struct Engine::Impl {
                             currentRect = {0, 0, static_cast<int32_t>(ds.width), static_cast<int32_t>(ds.height)};
                         }
                     }
-                    ApplyReliefBefore(reliefBeforeNeural, reliefDone, tex, currentRect, phase);
+                    ApplyFiltersBefore(aaBeforeNeural, reliefBeforeNeural, aaBeforeRelief, aaDone, reliefDone, tex, currentRect, phase);
                     const Size neuralInputSize{static_cast<uint32_t>(currentRect.Width()), static_cast<uint32_t>(currentRect.Height())};
                     std::wstring neuralError;
                     if (!NeuralProcess(tex, currentRect, p.dueQpc, pictureSettings, neuralError)) {
@@ -1731,8 +1989,10 @@ struct Engine::Impl {
                 bool rendered = false, toScene = false;
                 if (tex) {
                     RectI rect{0, 0, static_cast<int32_t>(texSize.width), static_cast<int32_t>(texSize.height)};
-                    ApplyReliefBefore(reliefBeforeUp && !alreadyUpscaled, reliefDone, tex, rect, phase);
+                    ApplyFiltersBefore(aaBeforeUp && !alreadyUpscaled, reliefBeforeUp && !alreadyUpscaled, aaBeforeRelief,
+                                       aaDone, reliefDone, tex, rect, phase);
                     reliefInScene = relief && reliefAnalysed && !reliefDone;
+                    aaInScene = aa && !aaBeforeUp && !aaDone;
                     reliefPhase = phase;
                     // Frames of an "upscaling first" schedule are already at output size: copy them 1:1 (the
                     // destination rectangle the fit mode yields for an image of that size is the same rectangle).
@@ -1903,6 +2163,7 @@ struct Engine::Impl {
                 activeMultiplier = effective;
                 const bool willGenerate = fg && effective > 1;
                 bool reliefDone = false;
+                bool aaDone = false;
                 const bool analyseReliefEarly = reliefBeforeFg || !willGenerate;
                 if (analyseReliefEarly) ReliefAnalyse(frame, nullptr);
                 bool capturePreScaled = false;
@@ -1911,7 +2172,7 @@ struct Engine::Impl {
                 // happen on the real capture before it enters the generator.
                 if (neural && (neuralBeforeFg || !willGenerate)) {
                     if (upscaleBeforeNeural && settings.enabled) {
-                        ApplyReliefBefore(reliefBeforeUp, reliefDone, pipelineTexture, pipelineRect, 1.0f);
+                        ApplyFiltersBefore(aaBeforeUp, reliefBeforeUp, aaBeforeRelief, aaDone, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                         const Size content{static_cast<uint32_t>(pipelineRect.Width()), static_cast<uint32_t>(pipelineRect.Height())};
                         const RectI dr = ScalePass::ComputeDestRect(content, presenter->BackBufferSize(), settings.fit);
                         const Size ds{static_cast<uint32_t>(dr.Width()), static_cast<uint32_t>(dr.Height())};
@@ -1936,7 +2197,7 @@ struct Engine::Impl {
                         }
                         pipelineRect = {0, 0, static_cast<int32_t>(ds.width), static_cast<int32_t>(ds.height)};
                     }
-                    ApplyReliefBefore(reliefBeforeNeural, reliefDone, pipelineTexture, pipelineRect, 1.0f);
+                    ApplyFiltersBefore(aaBeforeNeural, reliefBeforeNeural, aaBeforeRelief, aaDone, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                     const Size neuralInputSize{static_cast<uint32_t>(pipelineRect.Width()), static_cast<uint32_t>(pipelineRect.Height())};
                     std::wstring neuralError;
                     if (!NeuralProcess(pipelineTexture, pipelineRect, frame.captureQpc, pictureSettings, neuralError,
@@ -1962,7 +2223,7 @@ struct Engine::Impl {
                     // hand the UPSCALED image to the generator.
                     bool preScaledNow = capturePreScaled;
                     if (upscaleFirst && settings.enabled && !preScaledNow) {
-                        ApplyReliefBefore(reliefBeforeUp, reliefDone, pipelineTexture, pipelineRect, 1.0f);
+                        ApplyFiltersBefore(aaBeforeUp, reliefBeforeUp, aaBeforeRelief, aaDone, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                         const Size content{static_cast<uint32_t>(frame.contentRect.Width()),
                                            static_cast<uint32_t>(frame.contentRect.Height())};
                         const RectI dr = ScalePass::ComputeDestRect(content, presenter->BackBufferSize(), settings.fit);
@@ -1991,7 +2252,8 @@ struct Engine::Impl {
                     RectI fgRect = preScaledNow ? RectI{0, 0, static_cast<int32_t>(fgInputSize.width),
                                                        static_cast<int32_t>(fgInputSize.height)} : pipelineRect;
                     const bool reliefDoneBeforePush = reliefDone;
-                    ApplyReliefBefore(reliefBeforeFg, reliefDone, fgInput, fgRect, 1.0f);
+                    const bool aaDoneBeforePush = aaDone;
+                    ApplyFiltersBefore(aaBeforeFg, reliefBeforeFg, aaBeforeRelief, aaDone, reliefDone, fgInput, fgRect, 1.0f);
                     if (haveFgInputMode && lastFgPreScaled != preScaledNow) {
                         fg->Reset();
                         fgHasHistory = false;
@@ -2003,8 +2265,10 @@ struct Engine::Impl {
                         pendingPreScaled = preScaledNow;
                         pendingNeuralDone = captureNeuralDone;
                         pendingReliefDone = reliefDone;
+                        pendingAaDone = aaDone;
                     } else {
                         reliefDone = reliefDoneBeforePush;
+                        aaDone = aaDoneBeforePush;
                     }
                     // Moon ALSR: reconstruct this real frame now (exactly once per PushFrame).
                     if (pushed) {
@@ -2146,8 +2410,10 @@ struct Engine::Impl {
                 }
 
                 if (!analyseReliefEarly) ReliefAnalyse(frame, nullptr);
-                ApplyReliefBefore(reliefBeforeUp && !capturePreScaled, reliefDone, pipelineTexture, pipelineRect, 1.0f);
+                ApplyFiltersBefore(aaBeforeUp && !capturePreScaled, reliefBeforeUp && !capturePreScaled, aaBeforeRelief,
+                                   aaDone, reliefDone, pipelineTexture, pipelineRect, 1.0f);
                 reliefInScene = relief && reliefAnalysed && !reliefDone;
+                aaInScene = aa && !aaBeforeUp && !aaDone;
                 RectI destRect;
                 bool rendered = false;
                 ScaleSettings directSettings = settings;
@@ -2258,7 +2524,8 @@ struct Engine::Impl {
                     for (PipelineStage st : actual.stages) {
                         const bool active = st == PipelineStage::Upscaling ? settings.enabled
                                           : st == PipelineStage::FrameGeneration ? activeMultiplier > 1
-                                          : st == PipelineStage::Relief ? relief != nullptr : neural != nullptr;
+                                          : st == PipelineStage::Relief ? relief != nullptr
+                                          : st == PipelineStage::AntiAliasing ? aa != nullptr : neural != nullptr;
                         if (!active) continue;
                         if (!text.empty()) text += L" > ";
                         text += Engine::StageName(st);
@@ -2295,6 +2562,27 @@ struct Engine::Impl {
                     stats.reliefGpuMs = 0.0;
                     stats.reliefNote = reliefSettings.tier != ReliefTier::Off && reliefFailed
                         ? L"Smart parallax could not start on this GPU (see the log)." : L"";
+                }
+                if (aa) {
+                    const AaStats as = aa->Stats();
+                    stats.aaActive = as.active;
+                    stats.aaMode = as.modeInEffect;
+                    stats.aaEdgeCoverage = as.edgeCoverage;
+                    stats.aaStrength = as.strengthInEffect;
+                    stats.aaNote = as.reason;
+                    if (aaCopyProblem) {
+                        stats.aaActive = false;
+                        stats.aaNote = L"Anti-aliasing was bypassed because its frame transfer or render target failed.";
+                    }
+                    stats.aaGpuMs = as.gpuMs;
+                } else {
+                    stats.aaActive = false;
+                    stats.aaMode = AaMode::Off;
+                    stats.aaEdgeCoverage = 0.0f;
+                    stats.aaStrength = 0.0f;
+                    stats.aaGpuMs = 0.0;
+                    stats.aaNote = aaSettings.mode != AaMode::Off && aaFailed
+                        ? L"Anti-aliasing could not start on this GPU (see the log)." : L"";
                 }
                 stats.frameGenCoverage = windowReal ? static_cast<double>(windowRealWithGen) / windowReal : 0.0;
                 stats.frameGenNote.clear();
@@ -2446,6 +2734,7 @@ bool Engine::Start(const EngineConfig& config, std::wstring& error) {
         impl_->liveAlsr = config.alsr;
         impl_->livePicture = config.pictureSettings;
         impl_->liveRelief = config.relief;
+        impl_->liveAa = config.aa;
         impl_->liveSplit = config.splitView;
         impl_->pendingNeuralChange.reset();
         // The user-selected model is driven only through the optional, separately built bridge.
@@ -2511,6 +2800,7 @@ const wchar_t* Engine::StageName(PipelineStage stage) {
     case PipelineStage::NeuralRendering: return L"Neural rendering";
     case PipelineStage::FrameGeneration: return L"Frame generation";
     case PipelineStage::Relief: return L"Smart parallax";
+    case PipelineStage::AntiAliasing: return L"Anti-aliasing";
     default: return L"Upscaling";
     }
 }
@@ -2523,6 +2813,8 @@ const wchar_t* Engine::StageDescription(PipelineStage stage) {
         return L"Before upscaling it interpolates at the game's resolution (lighter); after it, at output resolution (heavier).";
     case PipelineStage::Relief:
         return L"Adds shading and surface displacement. Motion depth can estimate motion independently.";
+    case PipelineStage::AntiAliasing:
+        return L"Smooths jagged edges. After upscaling it runs at output resolution; before it, at game resolution (cheaper).";
     default:
         return L"Enlarges the image to the output size.";
     }
@@ -2530,16 +2822,25 @@ const wchar_t* Engine::StageDescription(PipelineStage stage) {
 
 PipelineOrder Engine::NormalizeOrder(const PipelineOrder& order) {
     const PipelineOrder def;
-    if (order.stages.size() + 1 == def.stages.size() &&
-        std::count(order.stages.begin(), order.stages.end(), PipelineStage::Relief) == 0) {
-        PipelineOrder migrated = order;
-        migrated.stages.push_back(PipelineStage::Relief);
-        return NormalizeOrder(migrated);
-    }
-    if (order.stages.size() != def.stages.size()) return def;
-    for (PipelineStage st : def.stages)
+    if (order.stages.empty() || order.stages.size() > def.stages.size()) return def;
+    for (PipelineStage st : order.stages) {
+        if (std::find(def.stages.begin(), def.stages.end(), st) == def.stages.end()) return def;
         if (std::count(order.stages.begin(), order.stages.end(), st) != 1) return def;
-    return order;
+    }
+    // Settings files written before a stage existed keep their order and gain the new stage. Anti-aliasing joins the
+    // order just before Smart parallax (the default relative position), so a migrated 4-stage file keeps relief last;
+    // a 3-stage file gains both.
+    PipelineOrder result = order;
+    if (std::find(result.stages.begin(), result.stages.end(), PipelineStage::AntiAliasing) == result.stages.end()) {
+        const auto relief = std::find(result.stages.begin(), result.stages.end(), PipelineStage::Relief);
+        result.stages.insert(relief, PipelineStage::AntiAliasing);
+    }
+    if (std::find(result.stages.begin(), result.stages.end(), PipelineStage::Relief) == result.stages.end())
+        result.stages.push_back(PipelineStage::Relief);
+    for (PipelineStage st : def.stages)
+        if (std::find(result.stages.begin(), result.stages.end(), st) == result.stages.end())
+            result.stages.push_back(st);
+    return result;
 }
 
 void Engine::SetAlsrSettings(const AlsrSettings& settings) {
@@ -2555,6 +2856,11 @@ void Engine::SetSplitView(bool on) {
 void Engine::SetReliefSettings(const ReliefSettings& settings) {
     std::lock_guard lock(impl_->mutex);
     impl_->liveRelief = settings;
+}
+
+void Engine::SetAaSettings(const AaSettings& settings) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->liveAa = settings;
 }
 
 void Engine::SetPipelineOrder(const PipelineOrder& order) {

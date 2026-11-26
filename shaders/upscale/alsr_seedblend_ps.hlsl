@@ -15,6 +15,26 @@
 #define ALSR_SEED_SRC_REG t3
 #include "upscale/alsr_seed.hlsli"
 
+#ifdef ALSR_STATIC_FOCUS
+Texture2D<float4> gSampling : register(t4);
+
+// At rest, add a bounded inverse-filter correction to the ordinary spatial seed.
+// The correction uses the same current samples every frame and cannot accumulate ringing.
+float3 StaticSeed(float3 seed, float2 pos)
+{
+    const float2 uv = pos * gOut.zw;
+    const float3 c = gSeedTex.SampleLevel(gLinear, uv, 0).rgb;
+    const float3 left = gSeedTex.SampleLevel(gLinear, uv - float2(gIn.z, 0), 0).rgb;
+    const float3 right = gSeedTex.SampleLevel(gLinear, uv + float2(gIn.z, 0), 0).rgb;
+    const float3 up = gSeedTex.SampleLevel(gLinear, uv - float2(0, gIn.w), 0).rgb;
+    const float3 down = gSeedTex.SampleLevel(gLinear, uv + float2(0, gIn.w), 0).rgb;
+    const float3 lo = min(c, min(min(left, right), min(up, down)));
+    const float3 hi = max(c, max(max(left, right), max(up, down)));
+    const float3 correction = 0.12 * (4.0 * c - left - right - up - down);
+    return clamp(seed + correction, min(lo, seed), max(hi, seed));
+}
+#endif
+
 struct VsOut
 {
     float4 pos : SV_Position;
@@ -101,7 +121,12 @@ float4 main(VsOut i) : SV_Target
     const int2 p = int2(i.pos.xy);
     const float trust = gTrust.Load(int3(p, 0));
     if (trust >= 1.0 || (gU1.w & 131072u) != 0) discard;
-    const float3 spatial = ToWork(saturate(AlsrSeed(uint2(p))));
+    float3 seed = saturate(AlsrSeed(uint2(p)));
+#ifdef ALSR_STATIC_FOCUS
+    const float alpha = gSampling.Load(int3(0, 0, 0)).z;
+    [branch] if (alpha > 0.0) seed = lerp(seed, StaticSeed(seed, i.pos.xy), alpha);
+#endif
+    const float3 spatial = ToWork(seed);
     float3 base = spatial;
     if (gU0.x != 0 && (gU1.w & 4096u) == 0) {
         const float2 x = i.pos.xy * gScale.zw;

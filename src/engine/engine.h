@@ -7,6 +7,7 @@
 #pragma once
 
 #include "core/types.h"
+#include "aa/aa_pass.h"
 #include "framegen/frame_generator.h"
 #include "models/model_store.h"
 #include "neural/neural_settings.h"
@@ -52,17 +53,21 @@ enum class PipelineStage : uint32_t {
     FrameGeneration,
     Upscaling,
     Relief,
+    AntiAliasing,        // spatial anti-aliasing (src/aa); after upscaling by default
 };
 
-// Each stage appears once. Old three-stage orders migrate by appending Relief. Invalid orders use the default.
+// Each stage appears once. Old orders migrate by APPENDING the stages they do not have, never by resetting.
 //   Frame generation BEFORE upscaling (default): frames are interpolated at the game's resolution, then every
 //     displayed frame is upscaled. Cheapest.
 //   Upscaling BEFORE frame generation: real frames are upscaled first and interpolation runs on the upscaled
 //     images. Heavier (motion analysis at output resolution); generated frames are built from more detail.
     //   Neural rendering follows the selected position; optical flow uses original captures.
+//   Anti-aliasing runs at output resolution after upscaling (default) or at game resolution before it (cheaper, once
+//     per real frame). Relief runs last by default.
 struct PipelineOrder {
     std::vector<PipelineStage> stages{PipelineStage::NeuralRendering, PipelineStage::FrameGeneration,
-                                      PipelineStage::Upscaling, PipelineStage::Relief};
+                                      PipelineStage::Upscaling, PipelineStage::AntiAliasing,
+                                      PipelineStage::Relief};
     bool operator==(const PipelineOrder&) const = default;
 };
 
@@ -71,14 +76,15 @@ struct PipelineOrder {
 // Wherever two consecutive steps run on different GPUs the engine copies the frame between them (one cross-GPU copy
 // per frame and hop, generated frames included). Applied when scaling starts; not changed live.
 struct StageAdapters {
-    LUID neuralRendering{}, frameGeneration{}, upscaling{}, relief{};
+    LUID neuralRendering{}, frameGeneration{}, upscaling{}, relief{}, antiAliasing{};
     LUID& For(PipelineStage s) {
         return s == PipelineStage::NeuralRendering ? neuralRendering
              : s == PipelineStage::FrameGeneration ? frameGeneration
-             : s == PipelineStage::Relief ? relief : upscaling;
+             : s == PipelineStage::Relief ? relief
+             : s == PipelineStage::AntiAliasing ? antiAliasing : upscaling;
     }
     const LUID& For(PipelineStage s) const { return const_cast<StageAdapters*>(this)->For(s); }
-    void SetAll(const LUID& luid) { neuralRendering = frameGeneration = upscaling = relief = luid; }
+    void SetAll(const LUID& luid) { neuralRendering = frameGeneration = upscaling = relief = antiAliasing = luid; }
 };
 
 struct EngineConfig {
@@ -104,6 +110,9 @@ struct EngineConfig {
     // path is unchanged. Otherwise Analyse runs on the original capture on the selected relief GPU and Apply
     // consumes the image at the position given by the load order, before presentation overlays.
     ReliefSettings relief;
+    // Anti-aliasing (aa/aa_pass.h). With mode Off (the default) nothing is created and the frame path is unchanged.
+    // Otherwise the pass runs at the position given by the load order (after upscaling by default).
+    AaSettings aa;
     // A/B compare: left half of the output shows the raw capture (nearest, integer scaling), right half the final image.
     bool splitView = false;
 };
@@ -165,6 +174,16 @@ struct EngineStats {
     ReliefTier reliefTier = ReliefTier::Off;
     std::wstring reliefNote;
     double reliefGpuMs = 0.0;
+    // Anti-aliasing. aaActive: the filter is changing the image. aaMode: the mode in effect (may be lower than
+    // requested while a tier is not built). aaEdgeCoverage: measured share of aliased-edge samples. aaStrength: the
+    // effective strength after the already-anti-aliased reduction. aaNote: plain-language state. aaGpuMs: measured
+    // GPU time per applied frame (timestamp median, lagged; 0 when off or not measured).
+    bool aaActive = false;
+    AaMode aaMode = AaMode::Off;
+    float aaEdgeCoverage = 0.0f;
+    float aaStrength = 0.0f;
+    std::wstring aaNote;
+    double aaGpuMs = 0.0;
     // Diagnostic recording (see Engine::RecordFrames).
     bool recording = false;            // a recording is in progress
     std::wstring lastRecordingDir;     // folder of the most recently finished recording
@@ -229,6 +248,8 @@ public:
     void SetAlsrSettings(const AlsrSettings& settings);
     // Smart parallax. Turning it on creates the pass on the next frame; turning it off releases it and its resources.
     void SetReliefSettings(const ReliefSettings& settings);
+    // Anti-aliasing. Same lifetime rules: created on the next frame, released when switched off.
+    void SetAaSettings(const AaSettings& settings);
     void SetSplitView(bool on);
 
     // Default order, display names and one-line descriptions for the UI.

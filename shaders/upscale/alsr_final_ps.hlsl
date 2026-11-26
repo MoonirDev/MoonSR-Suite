@@ -1,6 +1,5 @@
 // Moon ALSR pass 6 (output resolution): adaptive sharpening, encoding and debug views. Owner: upscaling-engineer.
-// MRT: SV_Target0 = the caller's destination, SV_Target1 = the upscaler's own BGRA8 copy (LastOutput); RenderSingle
-// binds only target 0.
+// Output: the caller's destination, including for RenderSingle.
 // Input t0: always gamma-encoded: the history's gamma copy (alsr_update MRT1, gU1.z == 0; alpha = count / maxCount) or
 // a single-frame reconstruction (gU1.z == 1).
 //
@@ -20,12 +19,6 @@ struct VsOut
     float2 uv : TEXCOORD0;
 };
 
-struct PsOut
-{
-    float4 dst : SV_Target0;
-    float4 copy : SV_Target1;
-};
-
 Texture2D<float4> gIn0 : register(t0);
 Texture2D<float> gTrust : register(t1);
 Texture2D<float4> gMotion : register(t2);
@@ -35,7 +28,7 @@ float3 Fetch(int2 p)
     return gIn0.Load(int3(clamp(p, int2(0, 0), int2(gOut.xy) - 1), 0)).rgb;
 }
 
-PsOut main(VsOut i)
+float4 main(VsOut i) : SV_Target
 {
     const int2 p = int2(i.pos.xy);
     float3 t[9];
@@ -74,8 +67,5 @@ PsOut main(VsOut i)
             o = Hsv2Rgb(ang, saturate(length(m.xy) / 8.0), 0.2 + 0.8 * saturate(m.z));
         }
     }
-    PsOut r;
-    r.dst = float4(o, 1.0);
-    r.copy = r.dst;
-    return r;
+    return float4(o, 1.0);
 }

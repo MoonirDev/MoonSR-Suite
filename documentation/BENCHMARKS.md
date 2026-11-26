@@ -1633,3 +1633,973 @@ frame-generation agent's runs, same setup per the brief; the command lines for t
 - The GPU-limit controller (skipping above 10% of generated slots in two windows) did not trigger on this machine. Its
   lowering path was exercised only in the fgbench simulation.
 - Limits: one GPU, one display, one test pattern at 60 fps, one 8 s length per row. No real game, no other GPU.
+
+## MoonSR temporal v2 M0 smoke check, 2026-11-25
+
+**Tree and environment.** Base commit `61f5fbec1a3538c8835ed2d295b3f828c7307b4a` with uncommitted
+M0 benchmark instrumentation and the existing AA worktree edits. Runtime rendering-source
+hash `6735ed1cfb3f5b16` (75 files, excludes harness source). Windows 11 build 10.0.26300.9974,
+AMD Ryzen 9 7900X, RTX 5060, UMD 32.0.16.2114. Built RelWithDebInfo using `tools\build.ps1`
+with `/Z7` in place of `/Zi` because MSVC reported C1902 with the default configuration.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,pan_medium,particles --methods alsr --input-modes aliased --scales 1.5 --frames 24 --seq-ss 1 --tag alsr_v2_m0_smoke
+```
+
+720p → 1080p, sharpness 0, default stability 0.85, frames 8–23 scored. Mean backward end-point
+error uses input pixels at valid shared-estimator cell centres. The particles row scores flow on
+the opaque background where there is no particle overlay in either frame. Whole-render and
+per-pass timings are from separate traversals. A longer synthetic benchmark was also running
+on the same system, so these GPU times verify instrument output only. This smoke configuration
+uses a single ground-truth sample and is unsuitable for direct comparison to the historical
+3×3 supersampled baseline or for a performance budget decision.
+
+| Content | Luma PSNR (dB) | SSIM | Flicker | Flow EPE (px) | Render mean (ms) | Shared estimator mean (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Slow pan | 34.8202 | 0.97035 | 2.5491 | 0.2671 | 0.6876 | 0.5422 |
+| Medium pan | 35.3976 | 0.97163 | 2.5731 | 0.1657 | 0.8698 | 0.6294 |
+| Particles/translucency | 34.0848 | 0.93598 | 3.8449 | 0.3245 | 1.0225 | 0.5834 |
+
+Slow-pan mean GPU pass times in ms were prep 0.0471, cell refinement 0.0716, motion 0.0741,
+reproject 0.2116, seed blend 0.0364, residual 0.0422, update 0.1578, reference luma 0.0350,
+and reference blur 0.0268. Sharpening was skipped. Full timings are in
+`benchmarks/output/results/temporal_summary_t_alsr_v2_m0_smoke.csv` and the corresponding frames CSV.
+
+`moonsr_bench --selftest --adapter 5060`, `moonsr_fgbench --selftest` and
+`MoonSR.exe --test-theme-selftest <file>` all passed. The capture scorer also passed an identity
+fixture with two PNGs per variant (128×128 input, 256×256 native and output, PSNR infinite,
+SSIM 1.00000, second-frame flicker 0). This fixture checks format and scoring. Real-game capture
+results are pending.
+
+**Reduced-resolution regression matrix.** Same hardware, driver, flags and base commit as above.
+The before binary was built from a clean archive of that commit. Both runs used 480×270 output,
+24 frames per sequence, 2×2 ground-truth supersampling, eight warm-up frames, both sampling
+modes, both scale ratios and the three default methods.
+
+```powershell
+build\alsr-v2-base\build\compare\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --seqs pan_slow,pan_fast,rot_zoom,hud_pan,scene_cut,thin_pan,still --out-dir benchmarks\output --tag alsr_v2_pristine_matrix
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --tag alsr_v2_m0_matrix
+```
+
+All 84 matched runs had identical ground-truth and output hashes and matching PSNR, SSIM,
+flicker, HUD PSNR and cut-window PSNR. The corresponding luma and HUD scores matched on all
+2,016 frame rows. The instrumented run completed 108 runs across nine content classes, including
+36 MoonSR temporal runs. Those 36 rows had valid flow error and prep timing. Skipped sharpening,
+first-frame flow and scene-cut flow were reported as missing. An isolated repeat at the target
+720p → 1080p configuration is needed for the GPU budget comparison.
+
+## Helldivers 2 capture baseline and M1 seed trials, 2026-11-25
+
+**Recordings.** The owner supplied `HD2_1080p`, `HD2_1080p_Upscaled` and `HD2_720p` from the same
+ship scene. Each had 120 input and 120 output frames indexed by real-frame ID, sharpness 0, and
+frame generation off. The native take recorded 1920×1080 input. Both other takes recorded
+1280×720 input. The saved `HD2_720p` output had the 720p image centered on a 1080p black canvas,
+so its source frames are the useful lower-resolution reference.
+
+**Different-take diagnostic.** On ordinal frames 15, 45, 75 and 105 (zero-based), match the
+720p input and its MoonSR output by real-frame ID. Use the 1080p take's input frames as
+the native reference. Upsample the low-resolution input bilinearly in gamma space, fit each
+region's translation by Pearson luma correlation on its left half, then measure luma PSNR
+on its right half. Search ±48 pixels at two-pixel spacing, then ±2 at quarter-pixel spacing.
+Use 1080p-coordinate regions (x, y, width, height) ceiling (1000, 130, 280, 160), gantry
+(930, 315, 250, 140), and floor (1050, 685, 320, 170). Sample the registered native reference
+bilinearly. The translation differed by region, so a single transform could not align the
+shot. The held-out correlations were 0.914–0.926 for the ceiling, 0.509–0.762 for the gantry,
+and 0.878–0.879 for the floor. The mean MoonSR minus bilinear PSNR differences were −0.39,
+−0.42 and −0.74 dB, respectively. These are approximate static-region diagnostics with
+residual camera and scene differences. The footage provides no synchronized whole-frame
+or temporal quality score, and no in-game vendor-upscaled reference was supplied.
+
+**Aligned real-content replay.** Copy the first 24 `input` PNGs from the native take into
+a folder numbered `0000.png` to `0023.png` in index order. The benchmark downsamples the very
+same frames to 720p using area averaging and compares output against the original 1080p frames.
+The exact alignment allows a repeatable regression check on game content. The degradation
+is an area model of the native capture, so this does not measure the game's actual 720p render.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --save-images --save-frame 15 --tag hd2_aligned_area
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods seed,temporal,alsr --tag hd2_m1_seed
+```
+
+RTX 5060, UMD 32.0.16.2114, Windows 11 10.0.26300.9974, Ryzen 9 7900X. Both runs were
+RelWithDebInfo with the /Z7 workaround. Base commit `61f5fbec1a3538c8835ed2d295b3f828c7307b4a`;
+worktree included AA work. The first build incorporated the removal of the unused temporal
+output copy. The second added selectable M1 seed trials. Both scored frames 8–23 at sharpness
+0 and hashed their native ground truth to `327ce09283456a09`.
+
+| Run and reconstruction | PSNR (dB) | SSIM | Flicker | Render mean (ms) |
+|---|---:|---:|---:|---:|
+| Aligned baseline, Lanczos-3 | 33.7852 | 0.96219 | 0.6964 | 0.1191 |
+| Aligned baseline, MoonSR Spatial | 34.1499 | 0.96432 | 0.6707 | 0.2034 |
+| Aligned baseline, MoonSR temporal | 33.6000 | 0.96129 | 0.7919 | 0.9448 |
+| Seed trial, MoonSR temporal | 33.6000 | 0.96129 | 0.7919 | 0.5975 |
+| Seed trial, Spatial | 34.1503 | 0.96432 | 0.6716 | 0.2832 |
+| Seed trial, Lanczos-3 | 33.7854 | 0.96219 | 0.6964 | 0.1806 |
+| Seed trial, directional | 33.7125 | 0.96402 | 0.7196 | 0.1475 |
+| Seed trial, covariance | 32.5764 | 0.95095 | 0.7107 | 0.2273 |
+| Temporal trial, Lanczos-3 seed | 33.4650 | 0.96039 | 0.7912 | 0.8454 |
+| Temporal trial, directional seed | 33.3844 | 0.96108 | 0.7929 | 0.8464 |
+| Temporal trial, covariance seed | 33.2132 | 0.95878 | 0.7943 | 0.8484 |
+
+The default temporal mean varied substantially between runs. These isolated samples do not
+establish the cost delta of any change. All three replacement seeds reduced temporal PSNR
+on the recorded area input. MoonSR Spatial remains the default while the candidates and
+accumulation changes are tested.
+
+**Seed ranking on synthetic input.** Default output path and all three alternatives were
+benchmarked through `RenderSingle` on the RTX 5060 above, with 480×270 reference, 24 frames,
+eight warm-up frames, 2×2 supersampling and sharpness 0. This is reduced-resolution screening
+of two sampling modes, two scale ratios, and nine content classes (144 runs).
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods seed --tag m1_seed_matrix
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --input-modes aliased --methods alsr,covariance --tag m1_special_covariance
+```
+
+| Input | Scale | Mean luma PSNR across nine classes (dB), Spatial / Lanczos-3 / directional / covariance | Most first places |
+|---|---:|---|---|
+| Point | 1.5× | 28.8033 / 29.0175 / 28.3642 / 29.5322 | Covariance, 9 of 9 |
+| Point | 2× | 26.6656 / 26.7950 / 26.1396 / 27.2453 | Covariance, 9 of 9 |
+| Area | 1.5× | 32.4354 / 32.2421 / 32.3364 / 30.5500 | Spatial, 8 of 9 |
+| Area | 2× | 30.3032 / 30.0819 / 30.2582 / 28.6681 | Spatial, 7 of 9 |
+
+Directional won the other three area cases. On point-sampled input, the covariance seed in
+the full temporal path increased luma PSNR on all 18 combinations by 0.0090–1.3176 dB without
+increasing error flicker on any combination. The 1.5× and 2× thin-feature gains were +0.8782 and
++1.3176 dB. Its area results, including the Helldivers 2 replay, argue against a universal switch.
+
+**Default output check.** The first seed trial used one shader with a uniform seed switch.
+Its default results matched at reported metric precision, but output hashes differed. After
+compiling the trial filters separately, all eight 720p → 1080p default runs matched the M0
+instrumented baseline bit for bit with the unused output copy removed. Paired settings were
+`--temporal --adapter 5060 --seqs pan_slow,still --frames 24 --seq-ss 2 --scales 1.5 --methods alsr --sharpness 0,0.5`,
+both modes, using the M0 binary and then the specialized trial binary. Raw results are tagged
+`m1_before_default`, `m1_special_default` and `m1_current_default`. The final rebuild also matched all eight hashes. Costs varied between repeated submissions and
+the eight comparisons do not establish a stable GPU saving.
+
+**Fused accumulation trial.** This path evaluates the four nearest area-model residuals
+inside the history update and interpolates them bilinearly. The separate path writes a
+source-resolution residual texture and reconstructs it with Catmull-Rom. The trial skips
+residual evaluation on fresh pixels and stationary pixels with zero correction gain.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,fused --tag hd2_m1_fused
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,fused --tag m1_fused_matrix
+```
+
+Same RTX 5060, driver, configuration and base commit as the seed trials. On the aligned
+720p → 1080p Helldivers 2 replay the default measured 33.6000 dB PSNR, 0.96129 SSIM,
+0.7919 flicker, and 0.8483 ms mean Render (0.4293 ms shared estimator). The fused trial measured
+33.5439 dB, 0.95995 SSIM, 0.8042 flicker, and 0.5925 ms mean Render (0.4139 ms shared estimator).
+Across the 36 paired reduced-resolution synthetic cases, the largest gains and losses were
++1.1370 dB on 1.5× point-sampled slow pan and −1.0194 dB on 2× area-sampled particles. Fourteen
+cases lost more than 0.05 dB and 16 increased flicker. The fused trial remains opt-in. The
+existing separate area back-projection remains the quality reference.
+
+**Generated-frame seed path.** At sharpness 0, `RenderSingle` now writes directly to the
+destination. The former temporary RGBA8 target and final pass are only needed when
+sharpening is enabled. The before binary used the same specialized shaders and retained
+the final pass at sharpness 0. Both runs used the same RTX 5060, driver, build settings,
+base commit, and aligned Helldivers 2 replay as the fused trial.
+
+```powershell
+build\alsr-m1-single-before\build\reference\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods seed --tag hd2_seed_final_reference
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods seed --tag hd2_seed_final_direct
+```
+
+All four filters had matching output hashes before and after. Mean RenderSingle times in ms
+were 0.2761 → 0.2281 for Spatial, 0.1693 → 0.1401 for Lanczos-3, 0.2063 → 0.0959 for directional,
+and 0.4742 → 0.3840 for covariance. These are two runs on the same scene and do not establish
+sustained savings across games.
+
+## MoonSR temporal follow-up: cubic fusion, locks, and registration
+
+**Setup.** Base `61f5fbec1a3538c8835ed2d295b3f828c7307b4a`, local ALSR experiments and
+existing AA edits. RTX 5060, UMD 32.0.16.2114, Windows 11 10.0.26300.9974, Ryzen 9 7900X.
+RelWithDebInfo with `/Z7`. All trials on the real-content replay used the same 24 native
+Helldivers 2 frames, 720p area model, sharpness 0, warm-up 8. Synthetic matrices used both
+scales and both modes, 480×270 reference and 2×2 supersampling. Synthetic matrices screen
+quality regressions. Timings vary with GPU clock and workload and the paired runs below do
+not establish a sustained budget.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,fused,gated --tag hd2_m1_cubic
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,fused,gated --tag m1_cubic_matrix
+```
+
+Fused cubic evaluates and FP16-quantizes the four-by-four residual footprint before
+Catmull-Rom reconstruction. It approximates the separate shader's hardware texture
+interpolation with arithmetic in the fused shader. It changed PSNR by −0.0116 to +0.0072 dB
+across 36 synthetic cases and increased flicker in 19 cases. The replay gained 0.0034 dB, but
+mean Render time increased from 0.6059 to 0.9023 ms. Gated cubic retains the separate residual
+texture and skips cubic reconstruction where the gain is zero. It matched all 36 synthetic
+hashes and the replay hash. Its replay cost measured 0.6363 ms in that run, versus 0.6059 ms
+for the default. Neither trial established a replacement that meets both gates.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,robust --tag hd2_m2_robust
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,robust --tag m2_robust_matrix
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,robust,gated --tag hd2_m2_compact
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,robust --tag m2_compact_matrix
+```
+
+The first robust-history trial added reprojected thin-feature locks, range-normalized soft
+outlier rejection, and an oscillation term informed by the last two fine-luma samples.
+The lock design follows the concepts in AMD's [FSR 2 technique
+documentation](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-temporal/).
+The implementation is original. The compact revision stores its state in RGBA8, uses a local
+range proxy for variance, and keeps full trust for small excursions to avoid unnecessary seed
+evaluation. Mean seed-blend time was 0.1343 ms with the first trial and 0.0150 ms with the compact
+revision. Those means are from separate runs. The compact revision reduced replay flicker
+from 0.7919 to 0.7881 and increased PSNR from 33.6000 to 33.7233 dB. Mean Render was 0.6929 ms
+versus 0.6664 ms in that paired run. It had no synthetic PSNR loss beyond 0.05 dB. Nine synthetic
+cases increased flicker, including 2× point-sampled thin pan (+0.2767 levels). This revision
+remains an opt-in trial.
+
+**Sampling evidence.** The compact matrix also reports mean edge-step concentration,
+fraction at or above 0.90, and number of eligible samples. Only monotone 3-tap transitions
+with at least 10% full-range luma span count. The mean ranges overlapped between point
+(0.77640–1.00000) and area (0.71544–0.92220) input. Abrupt-step fractions also overlapped
+(point 0.28492–1.00000, area 0.13198–0.79320). The aligned replay measured 0.74903 mean
+concentration and 0.20450 abrupt fraction over 50,205 samples. These observations rule out
+using either statistic alone to classify all input reliably.
+
+**Tiled registration reference.** A 16×8 compute group samples the new history with a
+two-pixel halo, calculates gamma luma, applies the separable 5×5 binomial in shared memory,
+and writes a half-quantized value to R32F. The tiled path uses one dispatch and drops the
+source-resolution intermediate. It differs slightly from interpolation through the
+fixed-function sampler.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,robust,tiled --tag hd2_m2_tiled
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,robust,tiled --tag m2_tiled_matrix
+```
+
+On the aligned replay, tiled reference generation took 0.0392 ms versus 0.0433 ms for the
+two pixel passes with default history. Total mean Render was 0.5913 ms tiled and 0.6567 ms
+default. PSNR changed by +0.0008 dB. With locks enabled, tiled reference took 0.0426 ms versus
+0.0930 ms in that run, but total mean Render was 1.0495 ms, versus 0.9347 ms with the two
+pixel passes. On the small synthetic matrix, the tiled reference was slower on average, and
+the largest PSNR loss relative to its corresponding two-pass variant was 0.0010 dB with or
+without locks. The tiled reference remains optional. A partial-group self-test checks
+registration quality with 300×169 source pixels.
+
+**Point-sampled evidence accumulation.** The output combines reprojected evidence weight
+(in the history alpha) with the nearest current sample. An edge-oriented kernel weighs
+the current sample by its distance to the output location and by motion confidence.
+The trial skips the residual pass. The covariance version also uses the M1 covariance
+seed in the same path. Both variants are selected explicitly by the harness.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,point --tag hd2_m3_point
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,point --tag m3_point_matrix
+```
+
+The aligned area-sampled replay measured 33.6000 dB PSNR and 0.7919 flicker with default
+back-projection, 32.5177 dB and 0.8387 with point evidence, and 31.9825 dB and 0.8401 with
+point evidence and the covariance seed. Mean Render was 0.6182, 0.8655 and 0.9258 ms in that
+run, respectively.
+
+In the reduced matrix, point evidence with the covariance seed improved point-sampled
+slow pan at 1.5× by 1.7168 dB and thin pan at 1.5× and 2× by 0.9828 and 1.3368 dB.
+The thin-pan flicker fell by 5.1451 and 8.0099 levels. The same combination lost 2.3765 dB
+on point-sampled particles at 1.5× and lost PSNR beyond 0.05 dB in all 18 area cases.
+Back-projection remains the default for area and uncertain input. In the current build,
+all 36 default MoonSR output hashes matched the M0 reduced-resolution matrix.
+
+A target-resolution trial used aliased 720p inputs, 1080p reference, scale 1.5×,
+2×2 ground-truth supersampling, 24 frames, and eight warm-up frames on the same system.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,thin_pan,particles --frames 24 --seq-ss 2 --scales 1.5 --input-modes aliased --methods alsr,point --tag m3_point_1080
+```
+
+| Class | Default → point covariance PSNR (dB) | Default → point covariance flicker | Default → point covariance mean Render (ms) |
+|---|---:|---:|---:|
+| Slow pan | 36.5465 → 38.0618 | 2.3056 → 2.3337 | 0.9572 → 0.5166 |
+| Thin pan | 14.1387 → 15.2711 | 38.4243 → 33.6578 | 0.8888 → 0.6426 |
+| Particles/translucency | 35.6558 → 34.3409 | 3.4571 → 4.6658 | 1.2450 → 1.0618 |
+
+The thin-feature case gained on both quality metrics. Slow-pan flicker and particle
+quality still missed the regression gate, and these timings do not validate a universal
+cost reduction. The default remains unchanged. The full build, scaler benchmark self-test,
+frame-generation benchmark self-test and theme self-test passed. The scaler self-test
+also covered the tiled reference on partial groups and known one- and two-step edges.
+
+### Sampling detector and guarded evidence trials
+
+**Setup.** RTX 5060, UMD 32.0.16.2114, Windows 11 10.0.26300.9974, Ryzen 9 7900X,
+RelWithDebInfo `/Z7`, base `61f5fbec1a3538c8835ed2d295b3f828c7307b4a` with local
+temporal and AA edits. Same 24-frame Helldivers 2 replay and 480×270 synthetic matrix as above.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,residual,guarded --tag hd2_m3_guard
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,residual,guarded --tag m3_guard_matrix
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,auto --tag hd2_m3_auto
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,auto --tag m3_auto_matrix
+```
+
+Point residual applies the error at the source sample phase to the history color at the
+desired output position. Guarded point retains the area residual pass and mixes in
+point evidence when nearby vectors agree, motion confidence is high, and the brightness
+match is close. On point-sampled slow pan at 1.5× the gains were +1.9920 dB and +2.1263 dB.
+At 1.5× on point-sampled particles the losses were −2.3604 dB and −1.5160 dB, respectively.
+On the aligned area replay the variants lost 0.4221 dB and 0.3433 dB, respectively.
+Guarded point does not meet the quality gate with arbitrary input.
+
+The GPU selector samples monotone RGB-luma transitions on a 64×36 grid and keeps a
+one-texel history entirely on the GPU. It requires at least 128 eligible steps, mean
+concentration ≥0.95 and at least 85% of steps above 0.90 concentration for three consecutive
+frames before selecting guarded point. Losing the evidence immediately restores area
+back-projection. The harness reads the one-texel state only in scoring runs. The frame
+path and timing runs use the classification without CPU readback.
+
+| Input | Scored frames | Unknown | Area | Point | Matching default output hashes |
+|---|---:|---:|---:|---:|---:|
+| Synthetic point | 288 | 287 | 0 | 1 | 17/18 sequences and scales |
+| Synthetic area | 288 | 192 | 96 | 0 | 18/18 sequences and scales |
+| Aligned Helldivers 2 area replay | 16 | 6 | 10 | 0 | 1/1 |
+
+The synthetic point label occurred on one frame of 2× thin-pan input. Mean detector pass
+time was 0.0086 ms for synthetic point, 0.0083 ms for synthetic area, and 0.0096 ms on
+the aligned replay. The detector demonstrated fallback behavior and avoids a false point
+decision in this matrix. Its point coverage is too low to use as the default selector.
+
+### Static reconstruction and start/stop test
+
+The opt-in `start_stop` sequence pans for one quarter of the clip, holds the same camera
+position for half the clip, and resumes the pan for the remaining quarter. The renderer
+and ground-truth flow share the same trajectory. The per-frame CSV labels the phase,
+and the summary reports mean and peak luma-error flicker over the four frames after each
+transition. The stop and resume occur at frames 8 and 24 in a 32-frame run.
+
+Static focus requires four consecutive frames with very few RGB changes on a 64×36
+grid. It ramps in over four frames and withdraws on resumed motion or a cut. The seed
+trial adds a bounded high-frequency correction to the Spatial reconstruction. The
+second revision also checks the actual source sample for local changes and reuses
+steady static history after the ramp.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs start_stop,still --seq-size 960x540 --frames 32 --seq-ss 2 --methods alsr,focus --tag m4_static
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,focus --tag hd2_m4_static
+```
+
+Same hardware, build settings and base commit as the sampling detector trial. On the
+first 1.5× point-sampled start/stop run, overall PSNR rose from 34.2676 to 34.4741 dB but
+peak stop flicker rose from 0.0521 to 0.5899. The filter lost PSNR on three of four fully
+static cases, with the largest loss 0.3701 dB at 2× on point-sampled input. Static focus
+did not activate on the aligned Helldivers 2 replay, which retained its default output hash.
+
+The area-gated revision uses an eight-frame fade and activates only when the sampling
+detector recognizes prefiltered input. Significant movement disables the filter
+immediately. The harness also reports peak flicker across the entire static hold,
+including the full fade.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs start_stop,still --seq-size 960x540 --frames 32 --seq-ss 2 --methods alsr,focus --tag m4_area_guard
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,focus --tag hd2_m4_area_guard
+```
+
+The area-gated filter preserved all four point-sampled hashes and the aligned game replay
+hash. At 1.5× on still area input it improved PSNR from 37.4897 to 38.0439 dB. At 1.5× on
+area start/stop input it improved PSNR from 37.7700 to 38.0181 dB, but peak error flicker
+across the hold rose from 0.0236 to 0.3666. At 2× on area start/stop input PSNR rose from
+35.1540 to 35.3170 dB, with hold peak flicker rising from 0.0212 to 0.4236. The static
+focus path remains opt-in while its transition behavior is unresolved. The 36 default
+MoonSR runs in the 480×270 matrix still matched the M0 hashes. The full build and the
+scaler, frame-generation and theme self-tests passed.
+
+## Affine motion, HUD persistence, and pixel refinement trials
+
+**Setup.** Base `61f5fbec1a3538c8835ed2d295b3f828c7307b4a` with local ALSR and AA work.
+RTX 5060, UMD 32.0.16.2114, Ryzen 9 7900X, Windows 11 10.0.26300.9974,
+RelWithDebInfo with `/Z7`. Synthetic tests use 960×540 output and 2×2 supersampling.
+The real-content check uses the same 24-frame, area-downsampled Helldivers 2 replay.
+Sharpness 0 and eight warm-up frames throughout. `--refined-flow` measures the actual
+source-resolution motion shader output. It samples every fourth texel per axis,
+rotates offsets between frames, and reports a separate EPE on correspondences with
+ground-truth motion above 0.1 input pixel. The original EPE column measures the shared
+estimator before the upscaler refines its vectors.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,affine,hud --tag hd2_m5_affine_hud
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs rot_zoom,hud_pan --seq-size 960x540 --frames 40 --seq-ss 2 --refined-flow --methods alsr,affine,hud --tag m5_affine_hud
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,pixel --tag hd2_m6_pixel
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,rot_zoom,thin_pan,particles --seq-size 960x540 --frames 24 --seq-ss 2 --scales 1.5 --refined-flow --methods alsr,pixel --tag m6_pixel
+```
+
+The affine fit uses a symmetric 3×3 cell neighborhood. It only replaces the normal
+prediction if cell confidence is adequate and the fitted residual is small. It reduced
+moving-region EPE in all four rotation cases. At 2× area, EPE improved from 0.3149 to
+0.3097 input pixels, while luma PSNR fell from 32.0271 to 32.0028 dB. The 1.5× area
+rotation case lost 0.0330 dB. This small vector-error improvement did not consistently
+improve the reconstructed image.
+
+The first persistent HUD version reduced HUD-region flicker in all four cases. It
+increased HUD-region PSNR by 0.1935 dB on 1.5× point input, and decreased it by 0.0426,
+0.1354 and 0.3321 dB on 1.5× area, 2× point and 2× area. On the aligned replay luma
+PSNR increased from 33.6000 to 33.6084 dB. The trial is still opt-in.
+
+Per-pixel refinement uses a single bounded, brightness-centered solve on the current
+and predicted luma cross where the cell match is uncertain. It accepts a correction only
+if a new photometric evaluation improves. On 1.5× area rotation, it gained 0.0872 dB
+and reduced flicker from 1.1174 to 1.1071, although moving EPE was 0.3507 px versus
+0.3503 px for the baseline. Particle flicker increased in both sampling modes. Mean
+motion pass time increased by 0.0015 ms for area rotation and 0.0061 ms for area
+particles at this reduced size. The aligned replay gained 0.0059 dB and Render took
+0.6413 ms versus 0.6236 ms in the paired run. The results do not justify the default cost.
+
+The conservative HUD revision restores the original threshold for immediate color
+changes and extends persistence only after repeated stable observations. In the
+`m5_hud_conservative` run (same synthetic command and settings as `m5_affine_hud`,
+with only `--seqs hud_pan --methods alsr,hud`), it matched the default HUD-region
+PSNR and flicker in all four cases. That eliminated the first trial's quality
+regressions but also its flicker gains.
+
+### Motion-free tier and hardware comparison
+
+MoonSR Lite reconstructs a spatial seed for each real frame and blends with the
+previous unfiltered seed only for changes below five 8-bit levels. Larger changes
+immediately take the new sample. It does no motion estimation and has independent
+history. The generated-frame seed path does not advance that history.
+
+RTX 5060 and RTX A400, UMD 32.0.16.2114, and Radeon integrated graphics, UMD
+31.0.24002.92. Same CPU, OS, base commit and build settings as above. Timings are
+GPU Render and, for full temporal MoonSR, separate shared motion-estimator means.
+Synthetic slow pan used 24 frames, eight warm-up frames, 2×2 supersampling, and both
+input models. Sharpness was zero. The real replay was the same area-downsampled
+Helldivers 2 clip as above.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --adapter A400 --adapter Radeon --scales 1.5 --frames 24 --methods alsr,seed,lite --tag hd2_m7_tiers
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --adapter A400 --adapter Radeon --seqs pan_slow --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods alsr,lite --tag m7_tiers_1080
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --adapter A400 --adapter Radeon --seqs pan_slow --seq-size 2560x1440 --frames 24 --seq-ss 2 --scales 1.3333333333 --methods alsr,lite --tag m7_tiers_1440
+```
+
+| Workload | Adapter | Full Render + motion (ms) | Lite Render (ms) | Lite minus Full PSNR (dB) |
+|---|---|---:|---:|---:|
+| Helldivers 2 area replay, 720p → 1080p | RTX 5060 | 0.9393 + 0.4551 | 0.2507 | +0.5477 |
+| | RTX A400 | 4.4381 + 2.5600 | 1.7866 | +0.5477 |
+| | Radeon iGPU | 15.5416 + 10.9708 | 7.5498 | +0.5382 |
+| Synthetic area pan, 720p → 1080p | RTX 5060 | 0.9504 + 0.4669 | 0.3049 | −0.7518 |
+| | RTX A400 | 4.1608 + 2.5008 | 2.0248 | −0.7518 |
+| | Radeon iGPU | 14.7190 + 11.0720 | 8.8505 | −0.7584 |
+| Synthetic area pan, 1080p → 1440p | RTX 5060 | 2.1434 + 0.8943 | 0.5807 | −0.2301 |
+| | RTX A400 | 8.4130 + 5.4223 | 3.7272 | −0.2301 |
+| | Radeon iGPU | 29.4815 + 24.3439 | 15.7639 | −0.2385 |
+
+In the Radeon point-sampled pan, Lite increased luma PSNR by 0.7684 dB at 1080p and
+0.7255 dB at 1440p. The area-pan quality regression precludes selecting this trial
+as the integrated-GPU default under the current quality gate.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --adapter A400 --adapter Radeon --scales 1.5 --frames 24 --methods alsr,lite --tag hd2_m7_fused
+```
+
+At zero sharpness with the Spatial seed, the fused Lite revision writes the display
+and next seed in one draw. It was bit-identical to the two-pass Lite path on all three
+adapters in the aligned replay. Mean Lite Render changed from 0.2507 to 0.2594 ms on
+RTX 5060, 1.7866 to 1.7233 ms on RTX A400, and 7.5498 to 7.2753 ms on Radeon. These
+individual runs do not establish sustained timing savings.
+
+### Tiled compute area back-projection
+
+The compute tile evaluates each source residual once per group, quantizes it to half
+precision in shared memory, and reconstructs the clamped cubic residual at each
+output pixel. The compute pass writes next history and a short draw resolves it to
+the destination. The trial uses the separate-pass path for sharpening, debug output
+or downscaling. It removes the standalone source residual texture in compute mode.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,tiled area' --tag hd2_m1_area_tile
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,rot_zoom,hud_pan --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,tiled area' --tag m1_area_tile_fhd
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --adapter Radeon --scales 1.5 --frames 24 --methods 'alsr,tiled area' --tag hd2_m1_area_wide
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,rot_zoom,hud_pan --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,tiled area' --tag m1_area_wide_fhd
+```
+
+Same hardware and build settings as the adjacent tier tests. The first two runs
+used 8×8 groups. The wide revision uses 16×8 groups to reduce halo work per output
+pixel. Both produced the same reported metrics across the six RTX 5060 synthetic
+cases. PSNR changed by −0.0118 to +0.0006 dB and flicker changed by −0.0015 to +0.0008
+levels. Average mean GPU time across these cases:
+
+| Trial | Default Render (ms) | Tiled Render (ms) | Default residual + update (ms) | Tiled update + resolve (ms) |
+|---|---:|---:|---:|---:|
+| 8×8 | 0.8632 | 0.7461 | 0.2831 | 0.2276 |
+| 16×8 | 0.8649 | 0.6872 | 0.2857 | 0.2039 |
+
+In the aligned replay, the wide version gained 0.0030 dB on RTX 5060, with mean
+Render 0.6875 ms versus 0.6803 ms. The Radeon replay gained 0.0045 dB, with mean
+Render 16.5335 ms versus 15.0497 ms. The synthetic saving did not carry across
+the replay workloads. The tiled path remains a benchmark option. Full build
+and scaler, frame-generation and theme self-tests passed.
+
+A target-resolution pixel refinement repeat used the same RTX 5060 and 24-frame
+settings as the tiled test. The comparison separated the pixel pass from the shared
+estimator.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs rot_zoom,particles --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --refined-flow --methods alsr,pixel --tag m6_pixel_fhd
+```
+
+Pixel refinement alone gained 0.0154 dB on point-sampled rotation and lost 0.0090 dB
+on area rotation. Moving-region EPE rose from 0.3796 to 0.3826 px and from 0.3412 to
+0.3422 px, respectively. In point-sampled particles PSNR lost 0.0122 dB and mean
+motion-pass time grew from 0.2001 to 0.2566 ms. The full-resolution tests support
+keeping the pixel refinement off by default. The current baseline safety repeat,
+`--temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr
+--tag m7_current_default`, matched all 36 M0 output hashes.
+
+## Paired RTX 5060 timing and adaptive reconstruction, 2026-11-25
+
+RTX 5060 UMD 32.0.16.2114, Ryzen 9 7900X, Windows 11 10.0.26300.9974.
+RelWithDebInfo with `/Z7`, base commit `61f5fbec1a3538c8835ed2d295b3f828c7307b4a`
+and uncommitted temporal and AA work. The replay uses the first 24 native Helldivers 2 frames
+at 720p → 1080p, sharpness 0, with frames 8–23 scored. The native capture timestamps span
+438.1 ms for this segment. The full take has 84 of 119 input-frame intervals above 50 ms.
+The replay preserves frame order and uses one step per saved frame. Its flicker metric is
+per frame. In-game comparison still needs matched native, low-resolution and vendor-upscaled takes.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,tiled area,padded area' --timing-sweeps 4 --tag hd2_m1_paired_area
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,robust history,robust padded' --timing-sweeps 4 --tag hd2_m2_paired_robust
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods alsr,adaptive --timing-sweeps 4 --tag hd2_m3_adaptive
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,adaptive,robust padded' --timing-sweeps 4 --tag hd2_adaptive_seed_robust
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,auto,adaptive --tag m3_adaptive_matrix
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr,adaptive --tag m3_adaptive_seed
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,thin_pan,particles,hud_pan,rot_zoom --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,robust history,robust padded' --timing-sweeps 4 --tag m2_paired_robust_fhd
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,thin_pan,particles,hud_pan,rot_zoom --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,robust padded' --timing-sweeps 4 --tag m2_robust_locks_fhd
+```
+
+The harness alternates forward and reverse method order by sweep. It records each sweep
+and summarizes the median of each frame across sweeps. Reported Render time excludes the
+shared motion estimator. The first area run also logged a Radeon adapter. The comparisons
+below use the RTX 5060 rows.
+
+| Replay run and method | PSNR (dB) | SSIM | Flicker | Render mean (ms) | Render median (ms) |
+|---|---:|---:|---:|---:|---:|
+| M1 MoonSR | 33.6000 | 0.96129 | 0.7919 | 0.5970 | 0.5972 |
+| M1 Tiled area | 33.6030 | 0.96131 | 0.7913 | 0.5965 | 0.5966 |
+| M1 Padded area | 33.6030 | 0.96131 | 0.7913 | 0.5928 | 0.5934 |
+| M2 MoonSR | 33.6000 | 0.96129 | 0.7919 | 0.6080 | 0.5989 |
+| M2 Robust history | 33.7233 | 0.96156 | 0.7881 | 0.6607 | 0.6373 |
+| M2 Robust padded | 33.7259 | 0.96157 | 0.7874 | 0.6545 | 0.6264 |
+| M3 MoonSR | 33.6000 | 0.96129 | 0.7919 | 0.5972 | 0.5969 |
+| M3 Adaptive sampling | 33.6000 | 0.96129 | 0.7919 | 0.6086 | 0.6074 |
+| Lock and seed repeat, MoonSR | 33.6000 | 0.96129 | 0.7919 | 0.6921 | 0.6191 |
+| Lock and seed repeat, Robust padded | 33.6960 | 0.96146 | 0.7890 | 0.6919 | 0.6449 |
+| Lock and seed repeat, Adaptive sampling | 33.6000 | 0.96129 | 0.7919 | 0.7814 | 0.6199 |
+| Lock and seed repeat, Adaptive seed | 33.6000 | 0.96129 | 0.7919 | 0.7789 | 0.6238 |
+
+The two area compute paths produced the same replay output hash. Padded-area sweep means
+were 0.5914–0.5958 ms against 0.5955–0.5994 ms for MoonSR. In the lock and seed repeat,
+MoonSR sweep means ranged from 0.6205 to 2.8186 ms. Those timing samples cannot establish
+budget neutrality for either trial. The classifier pass alone averaged 0.0089 ms in the
+earlier M3 replay and 0.0087 ms in the later repeat.
+
+The revised detector chose point on 182 of 288 synthetic point frames, compared with 1 of
+288 for the old detector. It chose point on zero of 288 synthetic area frames and zero
+of 16 scored replay frames. Both adaptive variants improved 1.5× point slow pan by 2.13 dB.
+The adaptive seed raised 1.5× point medium-pan PSNR by 1.0586 dB and increased flicker by
+0.1066 levels. All 36 default hashes matched M0. The generated-frame self-test selected
+point after three band-fixture frames and matched the dedicated covariance seed within one
+8-bit component level. The 24-frame replay image export also wrote the generated-frame seed.
+
+Reducing unclipping on weak locks improved the full-resolution point slow-pan delta from
+−0.0514 to −0.0238 dB and reduced its flicker increase from 0.0100 to 0.0015 levels. Area
+thin features retained a 0.0855 dB gain and 0.5202-level flicker reduction. Point HUD and
+area rotation still had flicker increases of 0.0002 and 0.0008 levels. These measured
+regressions keep the lock and adaptive-seed variants experimental. Full build and scaler,
+frame-generation and theme self-tests passed.
+
+## GPU-selected seed and adaptive padded back-projection, 2026-11-25
+
+Same RTX 5060, driver, Windows build, CPU, base commit and build configuration as above.
+The indirect-seed build reported source fingerprint `adbef3898ed82c87` in its benchmark
+headers. The adaptive padded build reported `1ae4ed22a459b27b`. The first trial generates
+the seed draw arguments in the sampling shader and runs the selected existing filter. The
+second also folds area back-projection and the guarded point blend into a padded compute tile.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,adaptive seed,adaptive sampling,padded area' --timing-sweeps 6 --tag hd2_indirect_seed
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods 'alsr,adaptive seed,adaptive sampling' --tag m3_indirect_seed
+build\alsr-m0-verify\bin\moonsr_bench.exe --native-frames benchmarks\output\hd2_analysis\native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,adaptive seed,adaptive padded,padded area' --timing-sweeps 6 --save-images --save-frame 15 --tag hd2_adaptive_padded
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods 'alsr,adaptive seed,adaptive padded,padded area' --tag m3_adaptive_padded
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow,pan_medium,thin_pan --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,adaptive seed,adaptive padded' --timing-sweeps 4 --tag m3_adaptive_padded_fhd
+build\alsr-m0-verify\bin\moonsr_bench.exe --temporal --adapter 5060 --seqs pan_slow --seq-size 480x270 --frames 24 --seq-ss 2 --scales 1.5 --sharpness 0.5 --methods 'adaptive seed,adaptive padded' --tag m3_adaptive_padded_sharp
+```
+
+The indirect-seed replay matched the default output hash (`23b16f90374f3284`). Against
+the previous adaptive seed, 25 of 36 synthetic cases matched bit for bit. The largest
+absolute changes were 0.0027 dB PSNR and 0.0013 flicker levels. All 36 default hashes
+matched M0. Generated-frame fixtures matched the dedicated filters exactly before and
+after point confirmation, and with sharpening enabled for the covariance case.
+
+| Adaptive padded build, replay method | Luma PSNR (dB) | Flicker | Render mean (ms) | Render median (ms) |
+|---|---:|---:|---:|---:|
+| MoonSR | 33.6000 | 0.7919 | 1.0230 | 0.6449 |
+| Adaptive seed | 33.6000 | 0.7919 | 1.1721 | 1.2513 |
+| Padded area | 33.6030 | 0.7913 | 1.2305 | 0.8633 |
+| Adaptive padded | 33.6030 | 0.7913 | 0.9544 | 0.8760 |
+
+Adaptive padded matched the padded area hash (`5f4b29d0138d7915`). The RTX 5060
+showed 62% utilization between runs. On the indirect-seed build, adaptive seed and baseline
+replay Render medians were 0.6331 and 0.6236 ms. On the adaptive padded build, the mean
+and median ranked the methods differently. These timing runs do not establish budget
+neutrality. Padding removed the 0.0380 ms separate residual pass. Its adaptive update
+and resolve totaled 0.2026 ms in the per-pass traversal, compared with 0.1789 ms for the
+baseline residual and update. The adaptive sampling pass averaged another 0.0089 ms.
+
+Adaptive padded matched the padded-area hashes on all 18 small synthetic area cases.
+Across the 36 small cases, PSNR differed from adaptive seed by −0.0052 to +0.0067 dB and
+flicker differed by −0.0046 to +0.0029 levels. Against MoonSR, it gained 0.8382 dB on
+1.5× point fast pan and increased flicker by 0.1656 levels. The default matched all 36 M0
+hashes again. At sharpness 0.5 the padded method's fallback matched adaptive seed on both
+inputs.
+
+At 1080p and 1.5×, the adaptive detector chose point on zero of 16 scored point frames
+in each of slow pan and medium pan, compared with 16 of 16 at 480×270. It picked two of
+16 thin-feature point frames and zero of 48 area frames. Adaptive padded gained 0.0344 dB
+and reduced flicker by 0.0543 levels on the point thin features. It lost 0.0118 dB on the
+point slow pan and 0.0103 dB on the point medium pan. The resolution sensitivity and
+remaining flicker regressions keep the trials in the benchmark. Full build, scaler,
+frame-generation and theme self-tests passed.
+
+## Sampling evidence at 1080p and the pooled detector, 2026-11-25
+
+Same RTX 5060, UMD 32.0.16.2114, Ryzen 9 7900X, Windows 11 10.0.26300.9974 and
+RelWithDebInfo `/Z7` build. Base commit `61f5fbec1a3538c8835ed2d295b3f828c7307b4a`
+with uncommitted temporal and AA work. The evidence-only build reported source fingerprint
+`6faf40f15bb3b2a8`. All clips used 24 frames at sharpness 0, with frames 8–23 scored.
+The benchmark reads the detector's actual sample count, mean edge concentration, abrupt-edge
+fraction, raw point candidacy and reset flag. The original stride-five CPU statistic is
+still reported separately.
+
+| Workload | Input | Edges sampled per frame | Mean concentration range | Abrupt fraction range |
+|---|---|---:|---:|---:|
+| 1080p slow pan at 1.5× | point | 96–141 | 0.783–0.875 | 0.309–0.588 |
+| 1080p slow pan at 1.5× | area | 114–146 | 0.710–0.760 | 0.117–0.228 |
+| 1080p medium pan at 1.5× | point | 86–148 | 0.799–0.875 | 0.330–0.587 |
+| 1080p medium pan at 1.5× | area | 111–149 | 0.724–0.772 | 0.129–0.267 |
+| Helldivers 2 720p → 1080p replay | area downsample | 216–245 | 0.737–0.756 | 0.167–0.202 |
+| Helldivers 2 upscaled take | original 720p input | 178–199 | 0.719–0.742 | 0.133–0.185 |
+| Helldivers 2 720p take | original 720p input | 180–201 | 0.721–0.738 | 0.137–0.194 |
+
+On each point slow and medium pan, 19 of 24 frames fell below the original 128-edge
+minimum. Across the 16 scored point slow-pan frames there were zero raw point candidates.
+Medium pan had one and needed three in a row. There were no history resets in either of
+those scored intervals. On the point thin-feature case every scored frame was a candidate,
+but eight of 16 frames restarted the estimator and only two reached point confirmation.
+
+For the original 720p input checks, take the first 24 `kind=input` rows in frame recording
+order from each capture CSV and copy the named PNGs to the respective input folder as
+`0000.png` through `0023.png`. The following replay at 1× reads the recorded pixels for
+classification. It does not estimate upscaling quality across takes.
+
+```powershell
+$bench = 'build\alsr-m0-verify\bin\moonsr_bench.exe'
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'adaptive seed' --tag hd2_sampling_evidence
+& $bench --temporal --adapter 5060 --seqs pan_slow,pan_medium,pan_fast,thin_pan,rot_zoom,particles --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'adaptive seed' --tag fhd_sampling_evidence
+& $bench --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods 'adaptive seed' --tag small_sampling_evidence
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,adaptive seed,adaptive pooled' --timing-sweeps 4 --tag hd2_sampling_pool
+foreach ($take in 'hd2_1080p_upscaled','hd2_720p') {
+    $inputDir = "benchmarks/output/hd2_analysis/${take}_captured_input"
+    & $bench --native-frames $inputDir --adapter 5060 --scales 1 --frames 24 --methods 'adaptive seed,adaptive pooled' --tag "${take}_capture_pool"
+}
+& $bench --temporal --adapter 5060 --seqs pan_slow,pan_medium,pan_fast,thin_pan,rot_zoom,particles --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --methods 'alsr,adaptive seed,adaptive pooled' --tag fhd_sampling_pool
+& $bench --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods 'alsr,adaptive seed,adaptive pooled' --tag small_sampling_pool
+```
+
+The pooled trial blends each frame's count and edge sums into the previous estimates at
+20% current weight. Entry retains the three-candidate confirmation rule. A confirmed point
+label can survive moderately weaker pooled evidence, but scene cuts clear the estimate
+and flat or low-concentration input withdraws the label immediately.
+
+The pooled-detector build reported fingerprint `61e6a1a0440fc48e`. The aligned replay
+matched the default hash `23b16f90374f3284`. Both detectors selected area on all 16 scored
+frames of each original 720p take. Each original take's two variants matched bit for bit.
+Sampling-pass time on the aligned replay averaged 0.0091 ms for the original adaptive seed
+and 0.0092 ms for pooled evidence. The paired replay reported 0.6463 ms baseline and
+0.7215 ms pooled Render medians. Baseline sweep means ranged from 1.7947 to 2.9743 ms,
+so the paired samples do not establish budget neutrality.
+
+| 1080p point input at 1.5× | Original point frames | Pooled point frames | Pooled PSNR delta vs default (dB) | SSIM delta | Flicker delta |
+|---|---:|---:|---:|---:|---:|
+| Slow pan | 0/16 | 16/16 | +1.2465 | −0.00945 | +0.1112 |
+| Medium pan | 0/16 | 14/16 | +0.2549 | −0.01400 | +0.4611 |
+| Fast pan | 0/16 | 10/16 | +0.1098 | −0.00916 | +0.3292 |
+| Thin features | 2/16 | 2/16 | +0.0345 | +0.00051 | −0.0548 |
+| Rotation/zoom | 0/16 | 0/16 | 0.0000 | 0.00000 | 0.0000 |
+| Particles/translucency | 0/16 | 0/16 | 0.0000 | 0.00000 | 0.0000 |
+
+The pooled variant chose point on zero of 96 scored 1080p area frames. Every full-size
+area output hash matched the default. At 480×270 it chose point on 218 of 288 point
+frames, up from 182. It chose point on zero of 288 area frames, with all 18 area outputs
+matching the default. The full build and the scaler, frame-generation and theme
+self-tests passed.
+
+### Direct 4×4 Spatial seed loads
+
+The Spatial seed now addresses the same 16 source texels directly. The compiled
+single-frame shader has 16 texture loads instead of 25. The history-fallback shader
+also removes nine loads from its compiled code while keeping the overlay-layer filter.
+The comparison used the same RTX 5060 setup, base commit and 24-frame Helldivers 2
+replay as above. The copied pre-change benchmark executable has SHA-256
+`B457F8B8227D4C05ACF0970849595E723390F2F27BE7F817005E6D8EFF54A4FB`.
+The updated executable has SHA-256
+`D26CB50DB95C216328AAA0E06407C19B95732C325BEEE1562D4B61327E1542EF`.
+
+```powershell
+& $exe --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,seed spatial' --timing-sweeps 4 --tag $tag --out-dir benchmarks/output
+```
+
+Run order was old (`seed_window_before_a`), updated (`seed_window_after_a`), updated
+(`seed_window_after_b`), old (`seed_window_before_b`). Each run kept four alternating
+sweeps per method.
+
+| Run | Single-frame seed mean (ms) | Single-frame seed median (ms) |
+|---|---:|---:|
+| Before A | 0.2999 | 0.2404 |
+| After A | 0.2146 | 0.2139 |
+| After B | 0.3085 | 0.2217 |
+| Before B | 0.2489 | 0.2426 |
+
+All four replay runs had the same single-frame seed hash (`093bcdab0e69b094`) and
+temporal output hash (`23b16f90374f3284`). The seed medians improved by 0.0209–0.0265 ms
+in the two adjacent pairs. The means still varied with GPU load. The updated temporal
+default matched all 36 M0 hashes in the 480×270 matrix.
+
+```powershell
+& $bench --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods alsr --tag compact_seed_matrix
+& $bench --temporal --adapter 5060 --seqs pan_slow,pan_medium,pan_fast --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --input-modes aliased --methods 'alsr,pooled spatial,adaptive pooled,temporal covariance' --tag fhd_pool_seed_ablation
+```
+
+Using Spatial throughout with the same pooled detector kept the flicker deltas versus
+default at +0.1116, +0.4610 and +0.3295 levels on the slow, medium and fast pans.
+Using covariance with ordinary area back-projection instead gave −0.0333, −0.0085 and
+−0.0095 levels. The pooled point update introduced the measured flicker in this comparison.
+The classifier and pooled update remain benchmark trials. Full build and scaler,
+frame-generation and theme self-tests passed after the direct-load change.
+
+## Point update stability and shared hull loads, 2026-11-25
+
+Same RTX 5060, driver, Windows build, CPU and `/Z7` configuration as above. Base commit
+`61f5fbec1a3538c8835ed2d295b3f828c7307b4a`, with uncommitted temporal and AA work.
+The first build reported fingerprint `e211d5fa04f855f8`. All runs used 24 frames at
+sharpness 0 and scored frames 8–23. Synthetic ground truth used 2×2 supersampling.
+
+The fixed-count trial kept the area history count while retaining the existing guarded
+point colour blend. The phase trial also measured the point residual where it was observed,
+at the source sample centre. Both used the pooled detector and selected the same point
+frames as the original adaptive pooled update. Both matched the default on the Helldivers 2
+720p → 1080p area replay. The 1080p point results below are deltas versus MoonSR.
+
+| 1080p point input at 1.5× | Adaptive pooled PSNR / flicker | Fixed count PSNR / flicker | Phase PSNR / flicker |
+|---|---:|---:|---:|
+| Slow pan | +1.2465 dB / +0.1112 | +1.1060 dB / +0.1559 | +0.9838 dB / +0.2112 |
+| Medium pan | +0.2549 dB / +0.4611 | +0.1753 dB / +0.4923 | +0.2341 dB / +0.4659 |
+| Fast pan | +0.1098 dB / +0.3292 | +0.0687 dB / +0.3475 | +0.1405 dB / +0.3112 |
+| Thin features | +0.0345 dB / −0.0548 | +0.0345 dB / −0.0548 | +0.0345 dB / −0.0548 |
+
+Keeping the area count did not resolve the pan flicker. Measuring the residual at the
+correct phase within that blend also failed to meet the flicker gate.
+
+```powershell
+$bench = 'build\alsr-m0-verify\bin\moonsr_bench.exe'
+$pointMethods = 'alsr,adaptive pooled,pooled fixed count,pooled phase'
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods $pointMethods --timing-sweeps 4 --tag hd2_point_phase
+& $bench --temporal --adapter 5060 --seqs pan_slow,pan_medium,pan_fast,thin_pan --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --input-modes aliased --methods $pointMethods --tag fhd_point_phase
+& $bench --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods $pointMethods --tag small_point_phase
+```
+
+The second build reported fingerprint `4ea67352fde6b086`. The footprint trial changes
+the source-sample predictor to a bilinear history lookup at the source centre when the
+pooled detector confirms point sampling. It interpolates the resulting residual through
+the ordinary update pass and retains the area footprint on uncertain or prefiltered input.
+
+| 1080p point input at 1.5× | Footprint PSNR delta vs default | SSIM delta | Flicker delta |
+|---|---:|---:|---:|
+| Slow pan | +0.8472 dB | +0.00527 | −0.2789 |
+| Medium pan | +0.3389 dB | +0.00193 | −0.1446 |
+| Fast pan | +0.2238 dB | +0.00123 | −0.0953 |
+| Thin features | +0.0369 dB | +0.00052 | −0.0762 |
+
+The footprint replay matched the default output hash `23b16f90374f3284`. The hull
+cache reuses the current colours in the residual tile halo and matched padded area
+on the replay (`5f4b29d0138d7915`). The partial-group fixture also matched padded area
+bit for bit. The paired replay timing was as follows.
+
+| Method | Render mean (ms) | Render median (ms) | Residual (ms) | Update (ms) | Resolve (ms) |
+|---|---:|---:|---:|---:|---:|
+| MoonSR | 1.2324 | 0.8584 | 0.0378 | 0.1433 | — |
+| Padded area | 0.8384 | 0.6362 | — | 0.1621 | 0.0275 |
+| Cached hull | 0.8123 | 0.6507 | — | 0.2490 | 0.0274 |
+| Pooled footprint | 0.9756 | 0.6513 | 0.0431 | 0.1414 | — |
+
+The hull cache did not establish a saving. MoonSR's sweep means varied from 1.5756 to
+3.0230 ms during this run. The footprint variant's lower whole-render median in this
+sample is insufficient to verify the RTX 5060 budget.
+
+```powershell
+$areaMethods = 'alsr,padded area,cached hull,pooled footprint'
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods $areaMethods --timing-sweeps 6 --tag hd2_point_footprint_hull
+& $bench --temporal --adapter 5060 --seqs pan_slow,pan_medium,pan_fast,thin_pan --seq-size 1920x1080 --frames 24 --seq-ss 2 --scales 1.5 --input-modes aliased --methods 'alsr,adaptive pooled,pooled footprint' --tag fhd_point_footprint
+& $bench --temporal --adapter 5060 --seq-size 480x270 --frames 24 --seq-ss 2 --methods $areaMethods --tag small_point_footprint_hull
+```
+
+In the 480×270 matrix, all 36 default hashes matched M0. All 18 footprint area cases
+matched MoonSR and all 36 cached hull cases matched padded area. The largest footprint
+PSNR and flicker regressions were −0.0008 dB and +0.0002 levels, both on the 2× point
+slow pan. The full build and scaler, frame-generation and theme self-tests passed.
+
+Both original 720p capture-input checks at 1× and the aligned replay with sharpening at
+0.5 also matched MoonSR bit for bit. The footprint detector selected zero point frames
+in each of those three runs.
+
+```powershell
+foreach ($take in 'hd2_1080p_upscaled','hd2_720p') {
+    & $bench --native-frames "benchmarks/output/hd2_analysis/${take}_captured_input" --adapter 5060 --scales 1 --frames 24 --methods 'alsr,pooled footprint' --tag "${take}_footprint"
+}
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --sharpness 0.5 --methods 'alsr,pooled footprint' --tag hd2_footprint_sharp
+```
+
+### Full-resolution footprint regression checkpoint, 2026-11-26
+
+The RTX 5060 build with source fingerprint `4ea67352fde6b086` completed the full
+1920×1080 synthetic matrix at 1.5× and 2×, with point and area inputs for all nine
+sequences. The driver, Windows version, CPU, base commit and 24-frame settings match
+the preceding tests.
+
+```powershell
+& $bench --temporal --adapter 5060 --seq-size 1920x1080 --frames 24 --seq-ss 2 --methods 'alsr,pooled footprint' --tag fhd_footprint_full
+```
+
+Pooled footprint matched the default on all 18 area outputs and five of 18 point outputs.
+The largest point PSNR loss was 0.0003 dB on the 2× slow pan. The largest flicker increase
+was 0.0079 levels on 2× rotation/zoom, where PSNR gained 0.0211 dB. At 1.5×, the point HUD
+pan gained 0.229 dB to the displayed precision, and luma flicker fell from 2.313 to 2.168.
+The synthetic quality matrix does not establish performance under a representative load
+or quality relative to a synchronized in-game vendor-upscaled capture.
+
+### Faster footprint history reprojection, 2026-11-26
+
+The `166735d5cd2f1308` build adds `Fast footprint`. It skips history work when
+trust is zero, loads history at the exact texel when the selected motion is zero,
+and computes the largest of the four motion disagreements before taking its square
+root. The existing hull and nonzero-motion cubic filter are still used.
+
+```powershell
+& $bench --native-frames benchmarks/output/hd2_analysis/native_frames --adapter 5060 --scales 1.5 --frames 24 --methods 'alsr,pooled footprint,fast footprint' --timing-sweeps 4 --tag hd2_fast_footprint
+```
+
+| Replay method | Render mean (ms) | Render median (ms) | Reproject mean (ms) | Shared motion mean (ms) |
+|---|---:|---:|---:|---:|
+| MoonSR | 0.5946 | 0.5946 | 0.1637 | 0.4130 |
+| Pooled footprint | 0.6071 | 0.6070 | 0.1638 | 0.4140 |
+| Fast footprint | 0.5892 | 0.5900 | 0.1434 | 0.4133 |
+
+All three output hashes were `23b16f90374f3284`. The four fast-footprint sweep
+means ranged from 0.5890 to 0.5904 ms. Baseline sweep means ranged from 0.5930 to
+0.6197 ms. This paired replay paid for the sampling pass and footprint change.
+The fast variant still needs the full-resolution point and area comparison to
+verify that the saving and quality carry over to other content. The full build
+and scaler, frame-generation and theme self-tests passed.
+
+## Anti-aliasing, spatial tier T1 (2026-11-25)
+
+Experimental. Measures this filter only; no in-game anti-aliasing (FXAA, SMAA, TAA, DLAA) was compared, because no
+game captures with a known AA state were available. Method and decisions: `documentation/research/anti_aliasing.md`.
+
+Hardware: RTX 5060, Windows 11 26300.9974, driver as in "Test machine". Command:
+
+```powershell
+build\main\bin\moonsr_bench.exe --aa
+```
+
+The bench builds synthetic 1280x720 pictures on the CPU as hard (aliased) 8-bit images, runs the real `AaPass` on the
+GPU with the default settings (spatial, Balanced, strength 1.0, edge threshold 0.10, floor 0.03, text protection on),
+and measures the read-back output:
+
+- **edge step**: mean over scanlines of the largest luma step in that scanline, averaged with the same measure over
+  columns (`0.5 * (mean_rows max|dx| + mean_cols max|dy|)`). An aliased edge puts the whole transition into one pixel
+  pair; a filter that spreads it over two pairs lowers the largest step. The measure is not diluted by flat areas.
+- **texture energy**: RMS of the 4-neighbour Laplacian on luma, after / before, on a 2 px checker with noise.
+- **thin lines**: mean luma of one-pixel lines, after / before.
+- **HUD protection**: share of changed pixels and maximum change inside a mask of one-pixel text strokes over a busy
+  checker background.
+- **gradient**: maximum change on a smooth gradient.
+
+| Scene | Before | After | Ratio | Max change | Check |
+|---|---:|---:|---:|---:|---|
+| edge 20 deg | 110.717 | 77.794 | 0.703 | 36 | pass |
+| edge 30 deg | 121.803 | 75.165 | 0.617 | 36 | pass |
+| edge 45 deg | 143.615 | 89.786 | 0.625 | 36 | pass |
+| edge 60 deg | 181.408 | 111.720 | 0.616 | 36 | pass |
+| edge 70 deg | 151.454 | 102.588 | 0.677 | 36 | pass |
+| exact 0 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
+| exact 90 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
+| thin lines | 225.000 | 224.915 | 1.000 | 37 (off-line pixels) | pass |
+| text / HUD | - | - | - | 0 inside the stroke mask | pass |
+| 2 px texture | 287.410 | 256.095 | 0.891 | 41 | pass |
+| gradient | - | - | - | 0 | pass |
+
+Interpretation:
+
+- Slanted edges lose 30-38 % of their strongest step. That is a real reduction of the staircase, not a shift of the
+  edge: the maximum change of 36/255 on a 218-to-34 step equals half the step, i.e. the average of the two sides.
+- Exactly vertical and horizontal edges are bit-identical (max change 0). The filter deliberately refuses edges that
+  the pixel grid already resolves; this is the difference between anti-aliasing and blur.
+- One-pixel lines keep 100 % of their mean luma and text strokes are bit-identical inside the mask, so the stroke
+  guards work on this fixture.
+- The 2 px checker keeps 89 % of its high-pass energy. That is inside the +-15 % limit but it is the weakest result:
+  some of the densest texture detail is still softened.
+- The gradient is unchanged, so there is no low-frequency ripple.
+
+GPU time (isolated pass + statistics dispatch, median of eight timestamp pairs on an otherwise idle GPU):
+
+| Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
+|---|---:|---:|---:|---:|
+| 1920x1080 | 0.072 ms | 0.536 ms | 2.131 ms | 0.3 ms |
+| 2560x1440 | 0.119 ms | 0.816 ms | 3.235 ms | 0.6 ms |
+
+This is the isolated pass. It excludes capture, present, the rest of the pipeline and contention with the game. The
+RTX 5060 meets the budget with a wide margin; the iGPU does not, so the stage should stay off or at the Performance
+preset there (not measured).
+
+All quality checks produce the same output on the three adapters. The RTX 5060 and RTX A400 agree bit for bit; the
+Radeon differs in the 2 px texture energy by 0.05 (256.044 vs 256.095, rounding in the bilinear path). No vendor-specific
+code path is used.
+
+```powershell
+build\main\bin\moonsr_bench.exe --aa --adapter A400
+build\main\bin\moonsr_bench.exe --aa --adapter Radeon
+```
+
+Real screenshot through the same pass (`--aa-image`, a 1368x800 captured UI screenshot with text and edges):
+
+```
+banishers.png: 1368x800, aliased-edge coverage 1.0 %, high-pass energy 40.06 -> 36.92 (0.922),
+max change 72, GPU 0.033 ms
+```
+
+That image contains genuine anti-aliased text and gradients, so the energy drop and the maximum change are not
+directly comparable with the synthetic rows. It shows that the pass runs on arbitrary capture sizes, and its 1.0 %
+coverage is the number discussed under "already-anti-aliased detection" below.
+
+Already-anti-aliased detection: the statistics pass counts pixels that pass the same gates on a 128x128 sample grid.
+Synthetic results: 0.0-0.1 % on the slanted-edge scenes, 0.0 % on the gradient, 0.0 % on the one-pixel text and 2 px
+checker scenes, and 1.0 % on the real screenshot. The long-edge coherence test (the same side must continue two and
+four texels along the edge) is what removes the text and checker false positives that an earlier 64x64 version had
+(57-65 %). The remaining signal is hard-edge *density*, not "how well the edges are already resolved": a frame with one
+aliased silhouette reads 0.1 %, a text-heavy but already anti-aliased screenshot reads 1.0 %. Auto-reduce is therefore
+**off by default**; when it is enabled it maps coverage below 0.02 % to quarter strength and above 0.1 % to full
+strength, which lowers the strength on smooth content (a smooth gradient, a flat scene) and not on content with hard
+edges. It is a heuristic, not a quality measure.
+
+Integration check: `moonsr_cli --window "MoonSR AA Test" --aa spatial` against a locally drawn 1280x720 window with a
+hard 45 degree edge, one-pixel grid lines and text, captured and upscaled to 1920x1080. 455 frames, 0 recoveries,
+0 dropped in the last run, anti-aliasing reported `spatial, active, strength 1.00, GPU 0.035 ms`, clean stop to Idle.
+With auto-reduce enabled on the same window the reported strength fell to 0.25-0.30, i.e. the detector path runs.
+
+Self-tests after the change: `moonsr_bench --selftest` and `moonsr_fgbench --selftest` both pass (0 failures). Full
+build in `build\aa` with `/W4`, no warnings from the AA code.

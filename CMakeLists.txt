@@ -40,6 +40,7 @@ add_subdirectory(src/overlay)
 add_subdirectory(src/models)
 add_subdirectory(src/neural)
 add_subdirectory(src/relief)
+add_subdirectory(src/aa)
 add_subdirectory(src/engine)
 
 # Neural rendering bridge (GPL-3.0-only, see THIRD_PARTY_NOTICES.md): built as the separate MoonSR_NrBridge.dll that

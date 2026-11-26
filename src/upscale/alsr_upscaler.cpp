@@ -15,18 +15,18 @@
 //                                  pixels (restart = single-frame reconstruction) and on zero-motion pixels unless the
 //                                  input changed in place (no new sample phase = no new information); also writes an
 //                                  RGBA8 gamma copy of the history (hardware sRGB encode)
-//   6. alsr_final      (output res)  adaptive sharpening of the gamma copy, debug views -> destination + LastOutput copy
+//   6. alsr_final      (output res)  adaptive sharpening of the gamma copy, debug views -> destination
 //   7. alsr_refy + alsr_refluma (source res)  registration reference (blurred history luma) for the next frame
 // Passes 1-2 are skipped / trivial when there is no valid history. The shader headers document each pass exactly.
-// RenderSingle: alsr_seed (seed of every pixel) + alsr_final.
+// RenderSingle: alsr_seed (seed of every pixel), plus alsr_final when sharpening is enabled.
 // There is no CPU readback and no state on disk. There is no time-based fallback of any kind: the work per frame
 // never depends on how long earlier frames took.
 //
 // Memory (output W x H, source w x h): history RGBA16F + prediction RGBA16F (16 B/px), history gamma copy RGBA8, seed
-// mask D16, trust R8, seed RGBA8 (RenderSingle / debug), LastOutput BGRA8 = 31 B per output pixel; per-pixel motion
+// mask D16, trust R8, seed RGBA8 (RenderSingle / debug) = 27 B per output pixel; per-pixel motion
 // RGBA16F (8), two working copies RGBA16F (16), residual RGBA16F (8), reference R16F + R32F (6), overlay evidence 2 x R8,
 // layer RG8 (4) = 42 B per source pixel; two refined cell fields RGBA32F (negligible).
-// 1280x720 -> 1920x1080: 98 MiB; 1920x1080 -> 2560x1440: 192 MiB; 1920x1080 -> 3840x2160: 328 MiB.
+// 1280x720 -> 1920x1080: about 90 MiB; 1920x1080 -> 2560x1440: about 178 MiB; 1920x1080 -> 3840x2160: about 297 MiB.
 //
 // Development tuning (never needed in normal use): environment variable MOONSR_ALSR_TUNE, a comma-separated list
 // of name=value pairs read once in Create (names: see Tune below). Logged when present.
@@ -43,17 +43,61 @@
 
 #include "g_vs_fullscreen.h"
 #include "g_ps_alsr_prep.h"
+#include "g_ps_alsr_prep_hud.h"
+#include "g_ps_alsr_motion_affine.h"
+#include "g_ps_alsr_motion_pixel.h"
+#include "g_ps_alsr_motion_affine_pixel.h"
 #include "g_cs_alsr_cellrefine.h"
 #include "g_ps_alsr_motion.h"
 #include "g_ps_alsr_reproject.h"
+#include "g_ps_alsr_reproject_fast.h"
+#include "g_ps_alsr_reproject_robust.h"
+#include "g_ps_alsr_update_robust.h"
+#include "g_ps_alsr_update_robust_direct.h"
 #include "g_ps_alsr_residual.h"
+#include "g_ps_alsr_residual_adaptive.h"
 #include "g_ps_alsr_update.h"
 #include "g_ps_alsr_update_direct.h"
+#include "g_ps_alsr_accumulate.h"
+#include "g_ps_alsr_accumulate_direct.h"
+#include "g_ps_alsr_accumulate_point.h"
+#include "g_ps_alsr_accumulate_point_direct.h"
+#include "g_ps_alsr_point_residual.h"
+#include "g_ps_alsr_point_residual_direct.h"
+#include "g_ps_alsr_guarded_point.h"
+#include "g_ps_alsr_guarded_point_direct.h"
+#include "g_ps_alsr_point_fixed_count.h"
+#include "g_ps_alsr_point_fixed_count_direct.h"
+#include "g_ps_alsr_point_phase.h"
+#include "g_ps_alsr_point_phase_direct.h"
+#include "g_ps_alsr_accumulate_cubic.h"
+#include "g_ps_alsr_accumulate_cubic_direct.h"
+#include "g_ps_alsr_update_gated.h"
+#include "g_ps_alsr_update_gated_direct.h"
 #include "g_ps_alsr_final.h"
+#include "g_ps_alsr_lite.h"
+#include "g_ps_alsr_lite_seed.h"
+#include "g_cs_alsr_area_tile.h"
+#include "g_cs_alsr_area_padded.h"
+#include "g_cs_alsr_area_cached_hull.h"
+#include "g_cs_alsr_area_adaptive.h"
+#include "g_cs_alsr_area_robust.h"
+#include "g_ps_alsr_area_resolve.h"
 #include "g_ps_alsr_refluma.h"
+#include "g_cs_alsr_reference.h"
+#include "g_cs_alsr_sampling.h"
+#include "g_cs_alsr_sampling_seed.h"
 #include "g_ps_alsr_refy.h"
 #include "g_ps_alsr_seed.h"
 #include "g_ps_alsr_seedblend.h"
+#include "g_ps_alsr_seedblend_static.h"
+#include "g_ps_alsr_reproject_static.h"
+#include "g_ps_alsr_seed_lanczos.h"
+#include "g_ps_alsr_seedblend_lanczos.h"
+#include "g_ps_alsr_seed_directional.h"
+#include "g_ps_alsr_seedblend_directional.h"
+#include "g_ps_alsr_seed_covariance.h"
+#include "g_ps_alsr_seedblend_covariance.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -180,16 +224,46 @@ public:
             const wchar_t* name;
         };
         const PsDesc ps[] = {
+            {g_ps_alsr_prep_hud, sizeof(g_ps_alsr_prep_hud), &psPrepHud_, L"persistent HUD"},
+            {g_ps_alsr_motion_pixel, sizeof(g_ps_alsr_motion_pixel), &psMotionPixel_, L"pixel refinement"},
+            {g_ps_alsr_motion_affine_pixel, sizeof(g_ps_alsr_motion_affine_pixel), &psMotionAffinePixel_, L"affine and pixel refinement"},
+            {g_ps_alsr_motion_affine, sizeof(g_ps_alsr_motion_affine), &psMotionAffine_, L"affine motion"},
             {g_ps_alsr_prep, sizeof(g_ps_alsr_prep), &psPrep_, L"prep"},
             {g_ps_alsr_motion, sizeof(g_ps_alsr_motion), &psMotion_, L"motion"},
             {g_ps_alsr_reproject, sizeof(g_ps_alsr_reproject), &psReproject_, L"reproject"},
+            {g_ps_alsr_reproject_fast, sizeof(g_ps_alsr_reproject_fast), &psReprojectFast_, L"fast reproject"},
+            {g_ps_alsr_reproject_robust, sizeof(g_ps_alsr_reproject_robust), &psReprojectRobust_, L"robust reproject"},
+            {g_ps_alsr_update_robust, sizeof(g_ps_alsr_update_robust), &psUpdateRobust_, L"robust update"},
+            {g_ps_alsr_update_robust_direct, sizeof(g_ps_alsr_update_robust_direct), &psUpdateRobustDirect_, L"robust update (direct)"},
             {g_ps_alsr_residual, sizeof(g_ps_alsr_residual), &psResidual_, L"residual"},
+            {g_ps_alsr_residual_adaptive, sizeof(g_ps_alsr_residual_adaptive), &psResidualAdaptive_, L"adaptive measurement residual"},
             {g_ps_alsr_update, sizeof(g_ps_alsr_update), &psUpdate_, L"update"},
             {g_ps_alsr_update_direct, sizeof(g_ps_alsr_update_direct), &psUpdateDirect_, L"update (direct)"},
+            {g_ps_alsr_accumulate, sizeof(g_ps_alsr_accumulate), &psAccumulate_, L"fused accumulation"},
+            {g_ps_alsr_accumulate_direct, sizeof(g_ps_alsr_accumulate_direct), &psAccumulateDirect_, L"fused accumulation (direct)"},
+            {g_ps_alsr_accumulate_cubic, sizeof(g_ps_alsr_accumulate_cubic), &psCubic_, L"accumulate_cubic"},
+            {g_ps_alsr_accumulate_cubic_direct, sizeof(g_ps_alsr_accumulate_cubic_direct), &psCubicDirect_, L"accumulate_cubic (direct)"},
+            {g_ps_alsr_update_gated, sizeof(g_ps_alsr_update_gated), &psGated_, L"update_gated"},
+            {g_ps_alsr_update_gated_direct, sizeof(g_ps_alsr_update_gated_direct), &psGatedDirect_, L"update_gated (direct)"},
+            {g_ps_alsr_accumulate_point, sizeof(g_ps_alsr_accumulate_point), &psPoint_, L"point accumulation"},
+            {g_ps_alsr_accumulate_point_direct, sizeof(g_ps_alsr_accumulate_point_direct), &psPointDirect_, L"point accumulation (direct)"},
+            {g_ps_alsr_point_residual, sizeof(g_ps_alsr_point_residual), &psPointResidual_, L"point_residual"},
+            {g_ps_alsr_point_residual_direct, sizeof(g_ps_alsr_point_residual_direct), &psPointResidualDirect_, L"point_residual_direct"},
+            {g_ps_alsr_guarded_point, sizeof(g_ps_alsr_guarded_point), &psGuardedPoint_, L"guarded_point"},
+            {g_ps_alsr_guarded_point_direct, sizeof(g_ps_alsr_guarded_point_direct), &psGuardedPointDirect_, L"guarded_point_direct"},
+            {g_ps_alsr_point_fixed_count, sizeof(g_ps_alsr_point_fixed_count), &psPointFixedCount_, L"point fixed count"},
+            {g_ps_alsr_point_fixed_count_direct, sizeof(g_ps_alsr_point_fixed_count_direct), &psPointFixedCountDirect_, L"point fixed count (direct)"},
+            {g_ps_alsr_point_phase, sizeof(g_ps_alsr_point_phase), &psPointPhase_, L"point phase"},
+            {g_ps_alsr_point_phase_direct, sizeof(g_ps_alsr_point_phase_direct), &psPointPhaseDirect_, L"point phase (direct)"},
+            {g_ps_alsr_area_resolve, sizeof(g_ps_alsr_area_resolve), &psAreaResolve_, L"tiled area resolve"},
+            {g_ps_alsr_lite_seed, sizeof(g_ps_alsr_lite_seed), &psLiteSeed_, L"Lite seed and stabilizer"},
+            {g_ps_alsr_lite, sizeof(g_ps_alsr_lite), &psLite_, L"Lite stabilizer"},
             {g_ps_alsr_final, sizeof(g_ps_alsr_final), &psFinal_, L"final"},
             {g_ps_alsr_refluma, sizeof(g_ps_alsr_refluma), &psRef_, L"reference luma"},
             {g_ps_alsr_refy, sizeof(g_ps_alsr_refy), &psRefY_, L"reference luma (Y)"},
             {g_ps_alsr_seed, sizeof(g_ps_alsr_seed), &psSeed_, L"seed"},
+            {g_ps_alsr_seedblend_static, sizeof(g_ps_alsr_seedblend_static), &psSeedStatic_, L"static seed blend"},
+            {g_ps_alsr_reproject_static, sizeof(g_ps_alsr_reproject_static), &psReprojectStatic_, L"static reproject"},
             {g_ps_alsr_seedblend, sizeof(g_ps_alsr_seedblend), &psSeedBlend_, L"seed blend"},
         };
         for (const auto& p : ps) {
@@ -198,6 +272,22 @@ public:
         }
         hr = dev_->CreateComputeShader(g_cs_alsr_cellrefine, sizeof(g_cs_alsr_cellrefine), nullptr, &csCellRefine_);
         if (FAILED(hr)) return Fail(error, L"CreateComputeShader cell refine", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_reference, sizeof(g_cs_alsr_reference), nullptr, &csReference_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader registration reference", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_sampling, sizeof(g_cs_alsr_sampling), nullptr, &csSampling_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader sampling detector", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_sampling_seed, sizeof(g_cs_alsr_sampling_seed), nullptr, &csSamplingSeed_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader sampling detector with seed arguments", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_area_tile, sizeof(g_cs_alsr_area_tile), nullptr, &csAreaTile_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader tiled area accumulation", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_area_padded, sizeof(g_cs_alsr_area_padded), nullptr, &csAreaPadded_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader padded area accumulation", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_area_cached_hull, sizeof(g_cs_alsr_area_cached_hull), nullptr, &csCachedHull_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader cached hull accumulation", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_area_adaptive, sizeof(g_cs_alsr_area_adaptive), nullptr, &csAreaAdaptive_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader adaptive padded accumulation", hr);
+        hr = dev_->CreateComputeShader(g_cs_alsr_area_robust, sizeof(g_cs_alsr_area_robust), nullptr, &csAreaRobust_);
+        if (FAILED(hr)) return Fail(error, L"CreateComputeShader tiled robust area accumulation", hr);
         D3D11_BUFFER_DESC bd{};
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -255,7 +345,8 @@ public:
     }
 
     bool Render(const FrameGenerator& motion, ID3D11RenderTargetView* dst, Size outputSize,
-                const AlsrSettings& settings) override {
+                const AlsrSettings& settings, AlsrPassObserver observer, void* user) override {
+        seedArgsValid_ = false;
         if (!dst || outputSize.Empty()) return false;
         ID3D11Texture2D* curr = motion.RealFrame(0);
         const Size frame = motion.FrameSize();
@@ -264,7 +355,15 @@ public:
             warnedNoFrame_ = true;
             return false;
         }
-        if (!EnsureResources(frame, outputSize)) return false;
+        const bool direct = !(settings.sharpness > 0.0f) && debugView_ == AlsrDebugView::None;
+        const bool adaptivePadded = settings.accumulation == AlsrAccumulation::AdaptivePadded && !settings.robustHistory;
+        const bool cachedHull = settings.accumulation == AlsrAccumulation::CachedHull && !settings.robustHistory;
+        const bool paddedArea = settings.accumulation == AlsrAccumulation::PaddedArea || adaptivePadded || cachedHull;
+        const bool tiledArea = (paddedArea || settings.accumulation == AlsrAccumulation::TiledArea) && direct &&
+                               (!settings.robustHistory || paddedArea) &&
+                               frame.width <= outputSize.width && frame.height <= outputSize.height;
+        if (!EnsureResources(frame, outputSize, settings.tiledReference, settings.persistentHud, tiledArea)) return false;
+        if (settings.robustHistory && !EnsureHistoryState(outputSize)) return false;
         ID3D11ShaderResourceView* currSrv = SourceView(curr);
         if (!currSrv) return false;
 
@@ -279,22 +378,54 @@ public:
         if (historyValid) cellCur_ = cc;
 
         if (!WriteConstants(settings, &mv, historyValid, false, frame, outputSize)) return false;
-        if (!WriteSeedConstants(frame, outputSize)) return false;
+        const bool staticFocus = settings.accumulation == AlsrAccumulation::StaticFocus && !settings.robustHistory;
+        const bool autoSampling = (UsesSamplingModel(settings.accumulation) && !settings.robustHistory) ||
+                                  staticFocus;
+
+        const bool adaptiveSeed = UsesAdaptiveSeed(settings.accumulation) && autoSampling;
+        const bool adaptiveFootprint = UsesAdaptiveFootprint(settings.accumulation) && autoSampling;
+        auto* seedBlend = SeedShader(adaptiveSeed ? AlsrSeed::Spatial : settings.seed, true);
+        if (!seedBlend || !WriteSeedConstants(frame, outputSize)) return false;
+        auto* pointSeed = adaptiveSeed ? SeedShader(AlsrSeed::Covariance, true) : nullptr;
+        if (adaptiveSeed && (!pointSeed || !EnsureSeedArgs())) return false;
+        if (autoSampling && !EnsureSamplingState()) return false;
+        ComPtr<ID3D11ShaderResourceView> keepCurrent;
+        ID3D11ShaderResourceView* previous = nullptr;
+        if (staticFocus && historyValid) {
+            keepCurrent = currSrv;
+            previous = SourceView(motion.RealFrame(1));
+            if (!previous) return false;
+        }
         BeginPasses();
 
+        if (autoSampling) {
+            ID3D11ShaderResourceView* s[4] = {
+                currSrv, samplingValid_ ? sampling_[pw].srv.Get() : nullptr,
+                historyValid ? mv.stats : nullptr, previous
+            };
+            if (observer) observer(user, AlsrPass::Sampling, true);
+            auto* shader = adaptiveSeed ? csSamplingSeed_.Get() : csSampling_.Get();
+            Dispatch(shader, s, 4, sampling_[cw].uav.Get(), 1, 1, adaptiveSeed ? seedArgsUav_.Get() : nullptr);
+            if (observer) observer(user, AlsrPass::Sampling, false);
+        }
         // 0. working copy + blurred luma (source res)
         {
             ID3D11RenderTargetView* rt[2] = {work_[cw].rtv.Get(), ovl_[cw].rtv.Get()};
-            ID3D11ShaderResourceView* s[4] = {currSrv, prevWorkValid_ ? work_[pw].srv.Get() : nullptr,
-                                              mv.valid ? mv.staticMask : nullptr, prevWorkValid_ ? ovl_[pw].srv.Get() : nullptr};
-            Draw(psPrep_.Get(), cb_.Get(), rt, 2, s, 4, frame);
+            ID3D11ShaderResourceView* s[5] = {currSrv, prevWorkValid_ ? work_[pw].srv.Get() : nullptr,
+                                              mv.valid ? mv.staticMask : nullptr, prevWorkValid_ ? ovl_[pw].srv.Get() : nullptr,
+                                              settings.persistentHud && mv.valid ? mv.stats : nullptr};
+            if (observer) observer(user, AlsrPass::Prep, true);
+            Draw(settings.persistentHud ? psPrepHud_.Get() : psPrep_.Get(), cb_.Get(), rt, 2, s, settings.persistentHud ? 5 : 4, frame);
+            if (observer) observer(user, AlsrPass::Prep, false);
         }
         if (historyValid) {
             // 1. cell refinement (cell res)
             {
                 ID3D11ShaderResourceView* s[6] = {work_[cw].srv.Get(), work_[pw].srv.Get(), mv.flow, ref_.srv.Get(),
                                                   prevCellsValid_ ? cells_[pc].srv.Get() : nullptr, mv.stats};
+                if (observer) observer(user, AlsrPass::CellRefine, true);
                 Dispatch(csCellRefine_.Get(), s, 6, cells_[cc].uav.Get(), (mv.cells.width + 1) / 2, (mv.cells.height + 1) / 2);
+                if (observer) observer(user, AlsrPass::CellRefine, false);
             }
         }
         // 2. per-pixel motion (source res)
@@ -304,68 +435,172 @@ public:
                                               historyValid ? mv.flow : nullptr, historyValid ? ovl_[cw].srv.Get() : nullptr,
                                               historyValid ? mv.stats : nullptr, historyValid ? cells_[cc].srv.Get() : nullptr,
                                               historyValid ? ref_.srv.Get() : nullptr};
-            Draw(psMotion_.Get(), cb_.Get(), rt, 2, s, 7, frame);
+            if (observer) observer(user, AlsrPass::Motion, true);
+            ID3D11PixelShader* motionShader = settings.affineMotion
+                ? (settings.pixelRefine ? psMotionAffinePixel_.Get() : psMotionAffine_.Get())
+                : (settings.pixelRefine ? psMotionPixel_.Get() : psMotion_.Get());
+            Draw(motionShader, cb_.Get(), rt, 2, s, 7, frame);
+            if (observer) observer(user, AlsrPass::Motion, false);
         }
         // 3. reprojection + single-frame reconstruction where needed (output res)
         {
-            ID3D11RenderTargetView* rt[2] = {hw_.rtv.Get(), trust_.rtv.Get()};
-            ID3D11ShaderResourceView* s[7] = {hist_.srv.Get(), motion_.srv.Get(), work_[cw].srv.Get(), nullptr,
+            ID3D11RenderTargetView* rt[3] = {hw_.rtv.Get(), trust_.rtv.Get(),
+                                            settings.robustHistory ? historyState_[cw].rtv.Get() : nullptr};
+            ID3D11ShaderResourceView* s[8] = {hist_.srv.Get(), motion_.srv.Get(), work_[cw].srv.Get(),
+                                              settings.robustHistory && historyStateValid_ ? historyState_[pw].srv.Get() :
+                                                  (staticFocus && historyValid ? work_[pw].srv.Get() : nullptr),
                                               historyValid ? mv.stats : nullptr, historyValid ? ovl_[cw].srv.Get() : nullptr,
-                                              layer_.srv.Get()};
+                                              layer_.srv.Get(), staticFocus ? sampling_[cw].srv.Get() : nullptr};
             ctx_->OMSetDepthStencilState(dsWrite_.Get(), 0);
             dsv_ = seedMaskDsv_.Get();
-            Draw(psReproject_.Get(), cb_.Get(), rt, 2, s, 7, outputSize);
+            if (observer) observer(user, AlsrPass::Reproject, true);
+            ID3D11PixelShader* reproject = psReproject_.Get();
+            if (settings.robustHistory) reproject = psReprojectRobust_.Get();
+            else if (staticFocus) reproject = psReprojectStatic_.Get();
+            else if (settings.accumulation == AlsrAccumulation::PooledFootprintFast) reproject = psReprojectFast_.Get();
+            Draw(reproject, cb_.Get(), rt, settings.robustHistory ? 3 : 2, s, staticFocus ? 8 : 7, outputSize);
+            if (observer) observer(user, AlsrPass::Reproject, false);
         }
         // 3b. single-frame reconstruction where trust < 1, added into Hw (output res)
         {
             ID3D11RenderTargetView* rt[1] = {hw_.rtv.Get()};
-            ID3D11ShaderResourceView* s[4] = {trust_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get(), currSrv};
+            ID3D11ShaderResourceView* s[5] = {trust_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get(), currSrv,
+                                              staticFocus ? sampling_[cw].srv.Get() : nullptr};
             ctx_->OMSetBlendState(blendAdd_.Get(), nullptr, 0xFFFFFFFF);
             ctx_->OMSetDepthStencilState(dsTest_.Get(), 0);
             dsv_ = seedMaskDsv_.Get();
-            Draw(psSeedBlend_.Get(), cb_.Get(), rt, 1, s, 4, outputSize);
+            if (observer) observer(user, AlsrPass::SeedBlend, true);
+            auto* shader = staticFocus ? psSeedStatic_.Get() : seedBlend;
+            Draw(shader, cb_.Get(), rt, 1, s, staticFocus ? 5 : 4, outputSize, pointSeed);
+            if (observer) observer(user, AlsrPass::SeedBlend, false);
             ctx_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx_->OMSetDepthStencilState(nullptr, 0);
         }
-        // 4. residual (source res)
-        {
+        // 4. residual (source res) when using the separate back-projection pass.
+        const bool fused = !settings.robustHistory && (settings.accumulation == AlsrAccumulation::FusedBilinear ||
+                                                       settings.accumulation == AlsrAccumulation::FusedCubic ||
+                                                       settings.accumulation == AlsrAccumulation::PointEvidence ||
+                                                       settings.accumulation == AlsrAccumulation::PointResidual);
+        if (!fused && !tiledArea) {
             ID3D11RenderTargetView* rt[1] = {residual_.rtv.Get()};
-            ID3D11ShaderResourceView* s[3] = {hw_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get()};
-            Draw(psResidual_.Get(), cb_.Get(), rt, 1, s, 3, frame);
+            ID3D11ShaderResourceView* s[4] = {hw_.srv.Get(), work_[cw].srv.Get(), layer_.srv.Get(),
+                                              adaptiveFootprint ? sampling_[cw].srv.Get() : nullptr};
+            if (observer) observer(user, AlsrPass::Residual, true);
+            Draw(adaptiveFootprint ? psResidualAdaptive_.Get() : psResidual_.Get(), cb_.Get(), rt, 1, s,
+                 adaptiveFootprint ? 4 : 3, frame);
+            if (observer) observer(user, AlsrPass::Residual, false);
         }
         // 5. update (output res) -> history + its gamma copy; with sharpness 0 and no debug view the final pass would be
-        //    an exact copy, so the update writes the destination and LastOutput itself and the final pass is skipped.
-        const bool direct = !(settings.sharpness > 0.0f) && debugView_ == AlsrDebugView::None;
-        {
-            ID3D11RenderTargetView* rt[3] = {hist_.rtv.Get(), direct ? dst : histGamma_.rtv.Get(), last_.rtv.Get()};
-            ID3D11ShaderResourceView* s[5] = {hw_.srv.Get(), residual_.srv.Get(), work_[cw].srv.Get(), motion_.srv.Get(),
-                                              historyValid ? work_[pw].srv.Get() : nullptr};
-            Draw(direct ? psUpdateDirect_.Get() : psUpdate_.Get(), cb_.Get(), rt, direct ? 3 : 2, s, 5, outputSize);
+        //    an exact copy, so the update writes the destination itself and the final pass is skipped.
+        if (tiledArea) {
+            auto* state = settings.robustHistory ? historyState_[cw].srv.Get() :
+                          (adaptivePadded ? sampling_[cw].srv.Get() : nullptr);
+            ID3D11ShaderResourceView* s[] = {hw_.srv.Get(), work_[cw].srv.Get(),
+                                            historyValid ? work_[pw].srv.Get() : nullptr,
+                                            motion_.srv.Get(), layer_.srv.Get(), state};
+            auto* accumulate = paddedArea ? csAreaPadded_.Get() : csAreaTile_.Get();
+            if (settings.robustHistory) accumulate = csAreaRobust_.Get();
+            else if (adaptivePadded) accumulate = csAreaAdaptive_.Get();
+            else if (cachedHull) accumulate = csCachedHull_.Get();
+            if (observer) observer(user, AlsrPass::Update, true);
+            Dispatch(accumulate, s, state ? 6 : 5, hist_.uav.Get(),
+                     (outputSize.width + 15) / 16, (outputSize.height + 7) / 8);
+            if (observer) observer(user, AlsrPass::Update, false);
+            ID3D11RenderTargetView* rt[] = {dst};
+            ID3D11ShaderResourceView* history[] = {hist_.srv.Get()};
+            if (observer) observer(user, AlsrPass::Final, true);
+            Draw(psAreaResolve_.Get(), cb_.Get(), rt, 1, history, 1, outputSize);
+            if (observer) observer(user, AlsrPass::Final, false);
+        } else {
+            ID3D11RenderTargetView* rt[2] = {hist_.rtv.Get(), direct ? dst : histGamma_.rtv.Get()};
+            ID3D11ShaderResourceView* s[7] = {hw_.srv.Get(), fused ? layer_.srv.Get() : residual_.srv.Get(),
+                                              work_[cw].srv.Get(), motion_.srv.Get(),
+                                              historyValid ? work_[pw].srv.Get() : nullptr,
+                                              settings.robustHistory ? historyState_[cw].srv.Get() : nullptr,
+                                              autoSampling ? sampling_[cw].srv.Get() : nullptr};
+            if (observer) observer(user, AlsrPass::Update, true);
+            ID3D11PixelShader* accumulate = direct ? psUpdateDirect_.Get() : psUpdate_.Get();
+            switch (settings.accumulation) {
+            case AlsrAccumulation::Separate:
+            case AlsrAccumulation::StaticFocus:
+            case AlsrAccumulation::PooledFootprint:
+            case AlsrAccumulation::PooledFootprintFast:
+            case AlsrAccumulation::TiledArea:
+            case AlsrAccumulation::CachedHull:
+            case AlsrAccumulation::PaddedArea: break;
+            case AlsrAccumulation::FusedBilinear:
+                accumulate = direct ? psAccumulateDirect_.Get() : psAccumulate_.Get();
+                break;
+            case AlsrAccumulation::FusedCubic:
+                accumulate = direct ? psCubicDirect_.Get() : psCubic_.Get();
+                break;
+            case AlsrAccumulation::GatedSeparate:
+                accumulate = direct ? psGatedDirect_.Get() : psGated_.Get();
+                break;
+            case AlsrAccumulation::PointResidual:
+                accumulate = direct ? psPointResidualDirect_.Get() : psPointResidual_.Get();
+                break;
+            case AlsrAccumulation::PooledSpatial:
+            case AlsrAccumulation::AdaptivePooled:
+            case AlsrAccumulation::AdaptivePadded:
+            case AlsrAccumulation::AdaptiveSeed:
+            case AlsrAccumulation::AdaptiveGuarded:
+            case AlsrAccumulation::AutoGuarded:
+            case AlsrAccumulation::GuardedPoint:
+                accumulate = direct ? psGuardedPointDirect_.Get() : psGuardedPoint_.Get();
+                break;
+            case AlsrAccumulation::PooledFixedCount:
+                accumulate = direct ? psPointFixedCountDirect_.Get() : psPointFixedCount_.Get();
+                break;
+            case AlsrAccumulation::PooledPhase:
+                accumulate = direct ? psPointPhaseDirect_.Get() : psPointPhase_.Get();
+                break;
+            case AlsrAccumulation::PointEvidence:
+                accumulate = direct ? psPointDirect_.Get() : psPoint_.Get();
+                break;
+            }
+            const bool pointUpdate = autoSampling && !staticFocus && !adaptiveFootprint;
+            if (!settings.robustHistory && (settings.accumulation == AlsrAccumulation::GuardedPoint || pointUpdate))
+                s[5] = layer_.srv.Get();
+            if (settings.robustHistory) accumulate = direct ? psUpdateRobustDirect_.Get() : psUpdateRobust_.Get();
+            Draw(accumulate, cb_.Get(), rt, 2, s, pointUpdate ? 7 : (s[5] ? 6 : 5), outputSize);
+            if (observer) observer(user, AlsrPass::Update, false);
         }
-        // 6. final (output res) -> destination + LastOutput
+        // 6. final (output res) -> destination
         if (!direct) {
-            ID3D11RenderTargetView* rt[2] = {dst, last_.rtv.Get()};
+            ID3D11RenderTargetView* rt[1] = {dst};
             ID3D11ShaderResourceView* s[3] = {histGamma_.srv.Get(), trust_.srv.Get(), motion_.srv.Get()};
-            Draw(psFinal_.Get(), cb_.Get(), rt, 2, s, 3, outputSize);
+            if (observer) observer(user, AlsrPass::Final, true);
+            Draw(psFinal_.Get(), cb_.Get(), rt, 1, s, 3, outputSize);
+            if (observer) observer(user, AlsrPass::Final, false);
         }
-        // 8. registration reference for the next frame (source res)
-        {
+        // Registration reference for the next frame (source res).
+        if (settings.tiledReference) {
+            ID3D11ShaderResourceView* s[1] = {hist_.srv.Get()};
+            if (observer) observer(user, AlsrPass::ReferenceBlur, true);
+            Dispatch(csReference_.Get(), s, 1, ref_.uav.Get(), (frame.width + 15) / 16, (frame.height + 7) / 8);
+            if (observer) observer(user, AlsrPass::ReferenceBlur, false);
+        } else {
             ID3D11RenderTargetView* rt[1] = {refY_.rtv.Get()};
             ID3D11ShaderResourceView* s[1] = {hist_.srv.Get()};
+            if (observer) observer(user, AlsrPass::ReferenceLuma, true);
             Draw(psRefY_.Get(), cb_.Get(), rt, 1, s, 1, frame);
+            if (observer) observer(user, AlsrPass::ReferenceLuma, false);
             rt[0] = ref_.rtv.Get();
             s[0] = refY_.srv.Get();
+            if (observer) observer(user, AlsrPass::ReferenceBlur, true);
             Draw(psRef_.Get(), cb_.Get(), rt, 1, s, 1, frame);
+            if (observer) observer(user, AlsrPass::ReferenceBlur, false);
         }
         EndPasses();
         prevWorkValid_ = true;
         prevCellsValid_ = historyValid;
         histValid_ = true;
-        lastValid_ = true;
+        historyStateValid_ = settings.robustHistory;
+        samplingValid_ = autoSampling;
+        seedArgsValid_ = adaptiveSeed;
         return true;
     }
-
-    ID3D11Texture2D* LastOutput() const override { return lastValid_ ? last_.tex.Get() : nullptr; }
 
     bool RenderSingle(ID3D11Texture2D* frame, ID3D11RenderTargetView* dst, Size outputSize,
                       const AlsrSettings& settings) override {
@@ -374,8 +609,23 @@ public:
         frame->GetDesc(&fd);
         const Size fs{fd.Width, fd.Height};
         if (fs.Empty()) return false;
-        // Uses the Render seed target when the output size matches (it holds no state between calls), otherwise its
-        // own target. Never touches the history, LastOutput or the history validity.
+        ID3D11ShaderResourceView* srv = SourceView(frame);
+        if (!srv) return false;
+        const bool adaptive = UsesAdaptiveSeed(settings.accumulation) &&
+                              !settings.robustHistory && seedArgsValid_ && fs == inSize_;
+        auto* seed = SeedShader(adaptive ? AlsrSeed::Spatial : settings.seed, false);
+        auto* pointSeed = adaptive ? SeedShader(AlsrSeed::Covariance, false) : nullptr;
+        if (!seed || (adaptive && !pointSeed) || !WriteSeedConstants(fs, outputSize)) return false;
+        if (!(settings.sharpness > 0.0f)) {
+            // The seed is already quantized to eight bits. With zero sharpening an intermediate
+            // render target and the final pass would just copy those values to the destination.
+            BeginPasses();
+            SeedPass(seed, srv, dst, outputSize, pointSeed);
+            EndPasses();
+            return true;
+        }
+
+        // The temporary seed target never carries history state.
         RtTex* target = &seed_;
         if (!(outputSize == outSize_) || !seed_.tex) {
             if (!(singleSize_ == outputSize) || !single_.tex) {
@@ -384,12 +634,9 @@ public:
             }
             target = &single_;
         }
-        ID3D11ShaderResourceView* srv = SourceView(frame);
-        if (!srv) return false;
         if (!WriteConstants(settings, nullptr, false, true, fs, outputSize)) return false;
-        if (!WriteSeedConstants(fs, outputSize)) return false;
         BeginPasses();
-        SeedPass(srv, target->rtv.Get(), outputSize);
+        SeedPass(seed, srv, target->rtv.Get(), outputSize, pointSeed);
         {
             ID3D11RenderTargetView* rt[1] = {dst};
             ID3D11ShaderResourceView* s[1] = {target->srv.Get()};
@@ -399,14 +646,96 @@ public:
         return true;
     }
 
+    bool RenderLite(ID3D11Texture2D* frame, ID3D11RenderTargetView* dst, Size outputSize,
+                    const AlsrSettings& settings) override {
+        if (!frame || !dst || outputSize.Empty()) return false;
+        D3D11_TEXTURE2D_DESC desc{};
+        frame->GetDesc(&desc);
+        const Size input{desc.Width, desc.Height};
+        if (!(liteInputSize_ == input) || liteSeed_ != settings.seed || liteSharpness_ != settings.sharpness)
+            liteValid_ = false;
+        if (!(liteOutputSize_ == outputSize) || !lite_[0].tex || !lite_[1].tex) {
+            liteOutputSize_ = {};
+            liteValid_ = false;
+            if (!CreateRt(lite_[0], outputSize, DXGI_FORMAT_R8G8B8A8_UNORM, L"Lite seed") ||
+                !CreateRt(lite_[1], outputSize, DXGI_FORMAT_R8G8B8A8_UNORM, L"Lite seed"))
+                return false;
+            liteOutputSize_ = outputSize;
+        }
+        const uint32_t next = liteCur_ ^ 1u;
+        auto* previous = liteValid_ ? lite_[liteCur_].srv.Get() : nullptr;
+        const bool direct = !(settings.sharpness > 0.0f) && settings.seed == AlsrSeed::Spatial;
+        if (direct) {
+            auto* current = SourceView(frame);
+            if (!current || !WriteSeedConstants(input, outputSize)) return false;
+            ID3D11RenderTargetView* targets[] = {dst, lite_[next].rtv.Get()};
+            ID3D11ShaderResourceView* sources[] = {current, previous};
+            BeginPasses();
+            Draw(psLiteSeed_.Get(), cb_.Get(), targets, 2, sources, 2, outputSize);
+        } else {
+            if (!RenderSingle(frame, lite_[next].rtv.Get(), outputSize, settings)) return false;
+            ID3D11RenderTargetView* targets[] = {dst};
+            ID3D11ShaderResourceView* sources[] = {lite_[next].srv.Get(), previous};
+            BeginPasses();
+            Draw(psLite_.Get(), cb_.Get(), targets, 1, sources, 2, outputSize);
+        }
+        EndPasses();
+        liteCur_ = next;
+        liteInputSize_ = input;
+        liteSeed_ = settings.seed;
+        liteSharpness_ = settings.sharpness;
+        liteValid_ = true;
+        return true;
+    }
+
+    ID3D11Texture2D* SamplingState() const override {
+        return samplingValid_ ? sampling_[workCur_].tex.Get() : nullptr;
+    }
+
+    ID3D11Texture2D* RefinedMotion() const override { return histValid_ ? motion_.tex.Get() : nullptr; }
+
     void Reset() override {
+        liteValid_ = false;
+        samplingValid_ = false;
+        seedArgsValid_ = false;
         histValid_ = false;
+        historyStateValid_ = false;
         prevWorkValid_ = false;
     }
 
     void SetDebugView(AlsrDebugView view) override { debugView_ = view; }
 
 private:
+    ID3D11PixelShader* SeedShader(AlsrSeed seed, bool blend) {
+        if (seed == AlsrSeed::Spatial) return blend ? psSeedBlend_.Get() : psSeed_.Get();
+
+        struct Bytecode { const BYTE* data; size_t size; };
+        static constexpr Bytecode variants[][2] = {
+            {{g_ps_alsr_seed_lanczos, sizeof(g_ps_alsr_seed_lanczos)},
+             {g_ps_alsr_seedblend_lanczos, sizeof(g_ps_alsr_seedblend_lanczos)}},
+            {{g_ps_alsr_seed_directional, sizeof(g_ps_alsr_seed_directional)},
+             {g_ps_alsr_seedblend_directional, sizeof(g_ps_alsr_seedblend_directional)}},
+            {{g_ps_alsr_seed_covariance, sizeof(g_ps_alsr_seed_covariance)},
+             {g_ps_alsr_seedblend_covariance, sizeof(g_ps_alsr_seedblend_covariance)}}
+        };
+        const size_t index = static_cast<size_t>(seed) - 1;
+        if (index >= std::size(variants)) {
+            MSR_LOG_ERROR(L"AlsrUpscaler: invalid seed filter {}", static_cast<uint32_t>(seed));
+            return nullptr;
+        }
+        const size_t path = blend ? 1 : 0;
+        auto& shader = psSeedVariants_[index][path];
+        if (!shader) {
+            const auto& code = variants[index][path];
+            const HRESULT hr = dev_->CreatePixelShader(code.data, code.size, nullptr, shader.GetAddressOf());
+            if (FAILED(hr)) {
+                MSR_LOG_ERROR(L"AlsrUpscaler: CreatePixelShader(seed variant) failed: {}", HrToString(hr));
+                return nullptr;
+            }
+        }
+        return shader.Get();
+    }
+
     // Seed constants (b1, alsr_seed.hlsli): source / destination size.
     bool WriteSeedConstants(Size in, Size outSize) {
         D3D11_MAPPED_SUBRESOURCE map;
@@ -430,10 +759,11 @@ private:
     }
 
     // Single-frame reconstruction of every pixel (alsr_seed_ps) into `out` (gamma RGBA8). Constants: WriteSeedConstants.
-    void SeedPass(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* out, Size outSize) {
+    void SeedPass(ID3D11PixelShader* shader, ID3D11ShaderResourceView* src, ID3D11RenderTargetView* out, Size outSize,
+                  ID3D11PixelShader* pointSeed) {
         ID3D11RenderTargetView* rt[1] = {out};
         ID3D11ShaderResourceView* s[1] = {src};
-        Draw(psSeed_.Get(), cb_.Get(), rt, 1, s, 1, outSize);
+        Draw(shader, cb_.Get(), rt, 1, s, 1, outSize, pointSeed);
     }
 
     static bool Fail(std::wstring& error, const std::wstring& what, HRESULT hr) {
@@ -474,31 +804,34 @@ private:
         return true;
     }
 
-    bool EnsureResources(Size frame, Size out) {
-        if (frame == inSize_ && out == outSize_ && hist_.tex) return true;
+    bool EnsureResources(Size frame, Size out, bool tiledReference, bool persistentHud, bool tiledArea) {
+        if (frame == inSize_ && out == outSize_ && hist_.tex && tiledReference_ == tiledReference &&
+            persistentHud_ == persistentHud && tiledArea_ == tiledArea) return true;
         histValid_ = false;
-        lastValid_ = false;
         prevWorkValid_ = false;
         inSize_ = {};
         outSize_ = {};
         srcCache_ = {};
         cellSize_ = {};
+        if (tiledReference) refY_.Reset();
+        if (tiledArea) residual_.Reset();
+        const DXGI_FORMAT overlayFormat = persistentHud ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8_UNORM;
         const bool ok = CreateRt(motion_, frame, DXGI_FORMAT_R16G16B16A16_FLOAT, L"motion") &&
                         CreateRt(work_[0], frame, DXGI_FORMAT_R16G16B16A16_FLOAT, L"working copy") &&
                         CreateRt(work_[1], frame, DXGI_FORMAT_R16G16B16A16_FLOAT, L"working copy") &&
-                        CreateRt(ovl_[0], frame, DXGI_FORMAT_R8_UNORM, L"overlay mask") &&
-                        CreateRt(ovl_[1], frame, DXGI_FORMAT_R8_UNORM, L"overlay mask") &&
-                        CreateRt(residual_, frame, DXGI_FORMAT_R16G16B16A16_FLOAT, L"residual") &&
-                        CreateRt(ref_, frame, DXGI_FORMAT_R16_FLOAT, L"registration reference") &&
-                        CreateRt(refY_, frame, DXGI_FORMAT_R32_FLOAT, L"registration reference (unblurred)") &&
+                        CreateRt(ovl_[0], frame, overlayFormat, L"overlay mask") &&
+                        CreateRt(ovl_[1], frame, overlayFormat, L"overlay mask") &&
+                        (tiledArea || CreateRt(residual_, frame, DXGI_FORMAT_R16G16B16A16_FLOAT, L"residual")) &&
+                        CreateRt(ref_, frame, tiledReference ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R16_FLOAT,
+                                 L"registration reference", tiledReference) &&
+                        (tiledReference || CreateRt(refY_, frame, DXGI_FORMAT_R32_FLOAT, L"registration reference (unblurred)")) &&
                         CreateRt(layer_, frame, DXGI_FORMAT_R8G8_UNORM, L"overlay layer") &&
-                        CreateRt(hist_, out, DXGI_FORMAT_R16G16B16A16_FLOAT, L"history") &&
+                        CreateRt(hist_, out, DXGI_FORMAT_R16G16B16A16_FLOAT, L"history", tiledArea) &&
                         CreateRt(histGamma_, out, DXGI_FORMAT_R8G8B8A8_TYPELESS, L"history gamma copy", false, DXGI_FORMAT_R8G8B8A8_UNORM,
                                  tune_.linear ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM) &&
                         CreateRt(hw_, out, DXGI_FORMAT_R16G16B16A16_FLOAT, L"prediction") &&
                         CreateRt(trust_, out, DXGI_FORMAT_R8_UNORM, L"trust") &&
-                        CreateRt(seed_, out, DXGI_FORMAT_R8G8B8A8_UNORM, L"seed") &&
-                        CreateRt(last_, out, DXGI_FORMAT_B8G8R8A8_UNORM, L"output copy");
+                        CreateRt(seed_, out, DXGI_FORMAT_R8G8B8A8_UNORM, L"seed");
         if (!ok) return false;
         {
             seedMaskDsv_.Reset();
@@ -523,7 +856,56 @@ private:
         }
         inSize_ = frame;
         outSize_ = out;
+        tiledReference_ = tiledReference;
+        persistentHud_ = persistentHud;
+        tiledArea_ = tiledArea;
         MSR_LOG_INFO(L"AlsrUpscaler: {}x{} -> {}x{}", frame.width, frame.height, out.width, out.height);
+        return true;
+    }
+
+    bool EnsureSamplingState() {
+        if (sampling_[0].tex && sampling_[1].tex) return true;
+        samplingValid_ = false;
+        const Size stateSize{kAlsrSamplingStateWidth, 1};
+        return CreateRt(sampling_[0], stateSize, DXGI_FORMAT_R32G32B32A32_FLOAT, L"sampling state", true) &&
+               CreateRt(sampling_[1], stateSize, DXGI_FORMAT_R32G32B32A32_FLOAT, L"sampling state", true);
+    }
+
+    bool EnsureSeedArgs() {
+        if (seedArgs_) return true;
+        D3D11_BUFFER_DESC buffer{};
+        buffer.ByteWidth = 2 * sizeof(D3D11_DRAW_INSTANCED_INDIRECT_ARGS);
+        buffer.Usage = D3D11_USAGE_DEFAULT;
+        buffer.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        buffer.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        ComPtr<ID3D11Buffer> args;
+        HRESULT hr = dev_->CreateBuffer(&buffer, nullptr, &args);
+        if (FAILED(hr)) {
+            MSR_LOG_ERROR(L"AlsrUpscaler: CreateBuffer(seed arguments) failed: {}", HrToString(hr));
+            return false;
+        }
+        D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        view.Buffer.NumElements = buffer.ByteWidth / sizeof(uint32_t);
+        view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        hr = dev_->CreateUnorderedAccessView(args.Get(), &view, &seedArgsUav_);
+        if (FAILED(hr)) {
+            MSR_LOG_ERROR(L"AlsrUpscaler: CreateUnorderedAccessView(seed arguments) failed: {}", HrToString(hr));
+            return false;
+        }
+        seedArgs_ = std::move(args);
+        return true;
+    }
+
+    bool EnsureHistoryState(Size out) {
+        if (historyStateSize_ == out && historyState_[0].tex && historyState_[1].tex) return true;
+        historyStateSize_ = {};
+        historyStateValid_ = false;
+        if (!CreateRt(historyState_[0], out, DXGI_FORMAT_R8G8B8A8_UNORM, L"history protection") ||
+            !CreateRt(historyState_[1], out, DXGI_FORMAT_R8G8B8A8_UNORM, L"history protection"))
+            return false;
+        historyStateSize_ = out;
         return true;
     }
 
@@ -617,6 +999,11 @@ private:
         c.u1[1] = (historyValid && mv && mv->stats) ? 1u : 0u;
         c.u1[2] = inputGamma ? 1u : 0u;
         c.u1[3] = tune_.variant;
+        if (UsesSamplingModel(s.accumulation) && !s.robustHistory) c.u1[3] |= (1u << 18);
+        if (!s.robustHistory && (s.accumulation == AlsrAccumulation::AdaptiveGuarded ||
+                                 UsesAdaptiveSeed(s.accumulation))) c.u1[3] |= (1u << 20);
+        if (!s.robustHistory && UsesPooledSampling(s.accumulation)) c.u1[3] |= (1u << 21);
+        if (s.accumulation == AlsrAccumulation::StaticFocus && !s.robustHistory) c.u1[3] |= (1u << 19);
         c.p4[0] = tune_.velMin;
         c.p4[1] = tune_.velLo;
         c.p4[2] = tune_.velHi;
@@ -644,7 +1031,7 @@ private:
     }
 
     void Draw(ID3D11PixelShader* ps, ID3D11Buffer* cb, ID3D11RenderTargetView* const* rtv, UINT nrt,
-              ID3D11ShaderResourceView* const* srv, UINT nsrv, Size viewport) {
+              ID3D11ShaderResourceView* const* srv, UINT nsrv, Size viewport, ID3D11PixelShader* pointSeed = nullptr) {
         D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(viewport.width), static_cast<float>(viewport.height), 0.0f, 1.0f};
         ctx_->RSSetViewports(1, &vp);
         ctx_->OMSetRenderTargets(nrt, rtv, dsv_);
@@ -652,7 +1039,14 @@ private:
         ctx_->PSSetShader(ps, nullptr, 0);
         ctx_->PSSetConstantBuffers(0, 1, &cb);
         ctx_->PSSetShaderResources(0, nsrv, srv);
-        ctx_->Draw(3, 0);
+        if (pointSeed) {
+            // The detector writes a zero instance count for the inactive filter.
+            ctx_->DrawInstancedIndirect(seedArgs_.Get(), 0);
+            ctx_->PSSetShader(pointSeed, nullptr, 0);
+            ctx_->DrawInstancedIndirect(seedArgs_.Get(), sizeof(D3D11_DRAW_INSTANCED_INDIRECT_ARGS));
+        } else {
+            ctx_->Draw(3, 0);
+        }
         // Unbind before the next pass writes any of these as a render target.
         ID3D11ShaderResourceView* nullSrv[16] = {};
         ctx_->PSSetShaderResources(0, nsrv, nullSrv);
@@ -660,21 +1054,23 @@ private:
         ctx_->OMSetRenderTargets(3, nullRtv, nullptr);
     }
 
-    // Compute pass: SRVs t0.., one UAV u0, constants b0 = cb_, samplers s0 linear / s1 point. Unbinds afterwards.
+    // Compute pass: SRVs t0.., UAVs u0 and optional u1, constants b0, samplers s0 linear / s1 point.
     void Dispatch(ID3D11ComputeShader* cs, ID3D11ShaderResourceView* const* srv, UINT nsrv, ID3D11UnorderedAccessView* uav,
-                  UINT gx, UINT gy) {
+                  UINT gx, UINT gy, ID3D11UnorderedAccessView* uav1 = nullptr) {
         ID3D11Buffer* cb = cb_.Get();
         ID3D11SamplerState* samplers[2] = {linear_.Get(), point_.Get()};
+        ID3D11UnorderedAccessView* outputs[2] = {uav, uav1};
+        const UINT numOutputs = uav1 ? 2 : 1;
         ctx_->CSSetShader(cs, nullptr, 0);
         ctx_->CSSetConstantBuffers(0, 1, &cb);
         ctx_->CSSetSamplers(0, 2, samplers);
         ctx_->CSSetShaderResources(0, nsrv, srv);
-        ctx_->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx_->CSSetUnorderedAccessViews(0, numOutputs, outputs, nullptr);
         ctx_->Dispatch(gx, gy, 1);
         ID3D11ShaderResourceView* nullSrv[8] = {};
-        ID3D11UnorderedAccessView* nullUav = nullptr;
+        ID3D11UnorderedAccessView* nullUav[2] = {};
         ctx_->CSSetShaderResources(0, nsrv, nullSrv);
-        ctx_->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        ctx_->CSSetUnorderedAccessViews(0, numOutputs, nullUav, nullptr);
         ctx_->CSSetShader(nullptr, nullptr, 0);
     }
 
@@ -694,6 +1090,25 @@ private:
     ID3D11DeviceContext1* ctx_ = nullptr;
     ComPtr<ID3D11VertexShader> vs_;
     ComPtr<ID3D11ComputeShader> csCellRefine_;
+    RtTex historyState_[2];
+    Size historyStateSize_{};
+    bool historyStateValid_ = false;
+    ComPtr<ID3D11PixelShader> psSeedStatic_, psReprojectStatic_;
+    ComPtr<ID3D11PixelShader> psReprojectFast_;
+    ComPtr<ID3D11PixelShader> psReprojectRobust_, psUpdateRobust_, psUpdateRobustDirect_;
+    ComPtr<ID3D11PixelShader> psPointResidual_, psPointResidualDirect_, psGuardedPoint_, psGuardedPointDirect_;
+    ComPtr<ID3D11PixelShader> psPointFixedCount_, psPointFixedCountDirect_, psPointPhase_, psPointPhaseDirect_;
+    ComPtr<ID3D11PixelShader> psResidualAdaptive_;
+    ComPtr<ID3D11PixelShader> psAccumulate_, psAccumulateDirect_, psPoint_, psPointDirect_;
+    ComPtr<ID3D11PixelShader> psCubic_, psCubicDirect_, psGated_, psGatedDirect_;
+    ComPtr<ID3D11PixelShader> psLite_, psLiteSeed_, psAreaResolve_;
+    RtTex lite_[2];
+    Size liteInputSize_{}, liteOutputSize_{};
+    uint32_t liteCur_ = 0;
+    AlsrSeed liteSeed_ = AlsrSeed::Spatial;
+    float liteSharpness_ = 0.0f;
+    bool liteValid_ = false;
+    ComPtr<ID3D11PixelShader> psPrepHud_, psMotionAffine_, psMotionPixel_, psMotionAffinePixel_;
     ComPtr<ID3D11PixelShader> psPrep_, psMotion_, psReproject_, psResidual_, psUpdate_, psUpdateDirect_, psFinal_, psRef_, psRefY_;
     ComPtr<ID3D11Buffer> cb_;
     ComPtr<ID3D11SamplerState> linear_, point_;
@@ -708,7 +1123,7 @@ private:
     bool prevCellsValid_ = false;
     Size cellSize_{};
     uint32_t workCur_ = 0;
-    RtTex hist_, histGamma_, hw_, trust_, seed_, last_; // output resolution (seed_: RenderSingle only)
+    RtTex hist_, histGamma_, hw_, trust_, seed_; // output resolution (seed_: RenderSingle only)
     RtTex single_;                                // RenderSingle target when its output size differs
     Size inSize_{}, outSize_{}, singleSize_{};
     std::array<SrcEntry, 6> srcCache_{};
@@ -716,6 +1131,7 @@ private:
 
     // single-frame reconstruction (seed) and the depth-masked seed blend
     ComPtr<ID3D11PixelShader> psSeed_, psSeedBlend_;
+    ComPtr<ID3D11PixelShader> psSeedVariants_[3][2];
     ComPtr<ID3D11BlendState> blendAdd_;
     ComPtr<ID3D11DepthStencilState> dsWrite_, dsTest_;
     ComPtr<ID3D11Texture2D> seedMask_;              // D16 output res: 1 = trust < 1 (alsr_seedblend runs), 0 = not
@@ -725,7 +1141,16 @@ private:
     Tune tune_{};
     AlsrDebugView debugView_ = AlsrDebugView::None;
     bool histValid_ = false;
-    bool lastValid_ = false;
+    bool tiledReference_ = false;
+    bool persistentHud_ = false;
+    bool tiledArea_ = false;
+    ComPtr<ID3D11ComputeShader> csReference_, csSampling_, csSamplingSeed_, csAreaTile_, csAreaPadded_, csAreaRobust_;
+    ComPtr<ID3D11ComputeShader> csAreaAdaptive_, csCachedHull_;
+    RtTex sampling_[2];
+    bool samplingValid_ = false;
+    ComPtr<ID3D11Buffer> seedArgs_;
+    ComPtr<ID3D11UnorderedAccessView> seedArgsUav_;
+    bool seedArgsValid_ = false;
     bool warnedNoFrame_ = false;
 };
 

@@ -5,6 +5,15 @@ Updated: 2026-11-25
 The missing notice and warning close buttons in 1.1.0 were restored in 1.1.1.
 Version 1.1.3 remembers closed messages across restarts; 1.1.4 provides a Restore notices button. The Neural rendering About description remains visible when notices are dismissed. Restore them with Settings > Application > Restore dismissed notices. Changed message text appears again.
 
+## MoonSR temporal upscaling (experimental)
+
+- The capture path receives composited frames without engine depth, motion vectors or camera jitter.
+  Still scenes supply no new subpixel samples. Rotation, zoom, thin geometry and HUD elements remain
+  weak points in the synthetic baseline.
+- Real-game quality comparisons against in-game DLSS, FSR and XeSS are pending synchronized captures.
+  The Helldivers 2 replay uses aligned area downsampling of the native recording for repeatable
+  regression checks. Differences in the original camera paths limit comparisons across takes.
+
 ## Smart parallax (experimental)
 
 - The effect estimates surface detail from SDR colour and can read differently by game or material. Static shots
@@ -228,3 +237,34 @@ Still open:
 - On fine-grained surfaces (synthetic bricks) the effect partly roughens surface grain rather than bevelling borders.
 - The flat-paint protection removes relief from smooth textures (wood coverage about 0.55); HUD protection also
   removes relief from about 4-5 game pixels of surface around static overlays.
+
+## Anti-aliasing, spatial tier T1 (unreleased, 2026-11-25)
+
+- Experimental. Only the spatial tier is built: choosing Directional or Temporal runs the spatial filter and the status
+  reason says so. There is no temporal history, no motion input, no depth and no MSAA sample reconstruction.
+- No real-game comparison exists yet. The measurements in BENCHMARKS.md are synthetic scenes plus one captured UI
+  screenshot. The owner's A/B (game AA off, game AA/TAA on, MoonSR AA on in the same scene) is still needed before any
+  quality claim.
+- No comparison with FXAA, SMAA, CMAA2, TAA or DLAA has been made.
+- Text/HUD protection is a geometric stroke guard (two-sidedness plus along-edge agreement), not a HUD mask. Thin
+  coloured text on a background of similar luma, glyph stems two or more pixels wide, and UI elements at 45 degrees can
+  still be softened. Turning the protection off removes the stroke guards but keeps the two-sidedness test.
+- Dense high-frequency textures lose about 11 % of their high-pass energy (2 px checker). That is inside the bench
+  limit but it is visible softening of the finest detail.
+- The "already anti-aliased" detector counts hard steps on a 128x128 sample grid with a long-edge coherence test. It
+  reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the one-pixel text and 2 px checker scenes, and 1.0 % on a real
+  already-anti-aliased screenshot. That is a hard-edge *density*, not a measure of how well the edges are resolved, so
+  a frame with a single aliased silhouette reads lower than a text-heavy frame with smooth text. Auto-reduce is
+  therefore off by default; when enabled, the 0.02 % / 0.1 % thresholds are synthetic-only constants and it can lower
+  the strength on content that still needs it.
+- Everything runs on gamma-encoded SDR, like the rest of the pipeline. Dark scenes rely on the absolute edge floor
+  (0.03). No HDR or linear-light path.
+- Load order: when Anti-aliasing and Smart parallax both run, the engine always applies anti-aliasing first so relief
+  shading is not blurred. A custom order with Relief before Anti-aliasing is not honoured.
+- GPU per stage is supported for the AA stage. Only the RTX 5060, RTX A400 and the Radeon 610M iGPU were measured; the
+  iGPU is far over budget (1.67 ms at 1080p, 2.87 ms at 1440p).
+- The debug views (edge mask, blend weight, split) exist for development and are not documented in the UI beyond their
+  names.
+- The AA page and its glyph were rendered and checked in all four themes (Windows 11 Light, Windows 11 Dark, Retro,
+  Retro Amber) through the `--test-page` / `--test-theme` harness and a window capture. The controls were not clicked
+  through live, and the diagnostics views were not looked at in a running pipeline.

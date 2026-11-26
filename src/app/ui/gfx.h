@@ -30,6 +30,7 @@ enum class HAlign { Left, Center, Right };
 // they never collide with a font glyph).
 constexpr wchar_t kGlyphNeuralNet = 0x0001;  // small neural network: 2-3-2 nodes joined by thin lines
 constexpr wchar_t kGlyphReliefLayers = 0x0002;  // Smart parallax: three flat layers stacked with a sideways offset
+constexpr wchar_t kGlyphAntiAlias = 0x0003;  // Anti-aliasing: a stepped edge beside a smooth diagonal
 
 class Gfx {
 public:
@@ -150,6 +151,7 @@ public:
     float SpacedText(const std::wstring& s, float x, float y, float size, DWRITE_FONT_WEIGHT weight, const D2D1_COLOR_F& c, float spacing);
     void NeuralNetGlyph(const Rect& r, float emSize, const D2D1_COLOR_F& c);
     void ReliefLayersGlyph(const Rect& r, float emSize, const D2D1_COLOR_F& c);
+    void AntiAliasGlyph(const Rect& r, float emSize, const D2D1_COLOR_F& c);
     void PushClip(const Rect& r);
     void PopClip();
     void SetOffset(float dx, float dy);

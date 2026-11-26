@@ -59,6 +59,16 @@ float3 YCoCgToRgb(float3 c)
     return float3(t + c.y, c.x + c.z, t - c.y);
 }
 
+void CubicWeights(float2 f, float a, out float2 w0, out float2 w1, out float2 w2, out float2 w3)
+{
+    // Keys kernel: |x| <= 1: (a+2)|x|^3 - (a+3)|x|^2 + 1;  1 < |x| < 2: a|x|^3 - 5a|x|^2 + 8a|x| - 4a.
+    const float2 g = 1.0 - f;
+    w0 = a * (1.0 + f) * (1.0 + f) * (1.0 + f) - 5.0 * a * (1.0 + f) * (1.0 + f) + 8.0 * a * (1.0 + f) - 4.0 * a;
+    w1 = (a + 2.0) * f * f * f - (a + 3.0) * f * f + 1.0;
+    w2 = (a + 2.0) * g * g * g - (a + 3.0) * g * g + 1.0;
+    w3 = a * (2.0 - f) * (2.0 - f) * (2.0 - f) - 5.0 * a * (2.0 - f) * (2.0 - f) + 8.0 * a * (2.0 - f) - 4.0 * a;
+}
+
 // Cubic convolution (Keys; a = -0.5 is Catmull-Rom, a = -0.75 is sharper) at position pos (texels of `tex`, centres at
 // +0.5), 9 bilinear taps:
 // per axis the weights w0..w3 are applied as w0 at texel -1, (w1 + w2) at a fractional position between texels 0 and 1
@@ -69,12 +79,8 @@ float4 SampleCubicA(Texture2D<float4> tex, float2 pos, float2 invSize, bool deri
 {
     const float2 p1 = floor(pos - 0.5) + 0.5;
     const float2 f = pos - p1;
-    // Keys kernel: |x| <= 1: (a+2)|x|^3 - (a+3)|x|^2 + 1;  1 < |x| < 2: a|x|^3 - 5a|x|^2 + 8a|x| - 4a.
-    const float2 g = 1.0 - f;
-    const float2 w0 = a * (1.0 + f) * (1.0 + f) * (1.0 + f) - 5.0 * a * (1.0 + f) * (1.0 + f) + 8.0 * a * (1.0 + f) - 4.0 * a;
-    const float2 w1 = (a + 2.0) * f * f * f - (a + 3.0) * f * f + 1.0;
-    const float2 w2 = (a + 2.0) * g * g * g - (a + 3.0) * g * g + 1.0;
-    const float2 w3 = a * (2.0 - f) * (2.0 - f) * (2.0 - f) - 5.0 * a * (2.0 - f) * (2.0 - f) + 8.0 * a * (2.0 - f) - 4.0 * a;
+    float2 w0, w1, w2, w3;
+    CubicWeights(f, a, w0, w1, w2, w3);
     const float2 w12 = w1 + w2;
     const float2 q0 = (p1 - 1.0) * invSize;
     const float2 q12 = (p1 + w2 / w12) * invSize;

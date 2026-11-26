@@ -9,10 +9,12 @@
 //              [--fg-diag] (prints presentation timing diagnostics every second)
 //              [--vsync-switch-at <second>] (toggles V-Sync live at that second of the run)
 //              [--neural <installed model id>] (neural rendering, one pass, full working resolution)
-//              [--order <nr,fg,up,relief in any order>] (load order; overrides --upscale-first)
-//              [--gpu-nr|--gpu-fg|--gpu-up|--gpu-relief <adapter name substring>] (--adapter sets all stages)
+//              [--order <nr,fg,up,aa,relief in any order>] (load order; overrides --upscale-first)
+//              [--gpu-nr|--gpu-fg|--gpu-up|--gpu-aa|--gpu-relief <adapter name substring>] (--adapter sets all stages)
 //              [--relief off|shading|parallax|motion] [--relief-strength 0..1] (Smart parallax, experimental)
 //              [--relief-parallax-px 0..3] [--relief-view none|split|height|normals|protection|offset|depth]
+//              [--aa off|spatial|directional|temporal] [--aa-strength 0..1] [--aa-quality performance|balanced|quality]
+//              [--aa-view none|edges|weights|split] (Anti-aliasing, experimental)
 //   moonsr_cli --relief-selftest [--adapter <name substring>]
 //              (Smart parallax identity check: Analyse + Apply at strength 0 on a 1920x1080 noise image into a BGRA8 and
 //               an RGBA8 destination, read back and compared byte for byte (zero change must leave every pixel exact);
@@ -96,6 +98,15 @@ const wchar_t* ReliefTierName(ReliefTier t) {
     case ReliefTier::Shading: return L"shading";
     case ReliefTier::Parallax: return L"parallax";
     case ReliefTier::MotionDepth: return L"motion";
+    default: return L"off";
+    }
+}
+
+const wchar_t* AaModeName(AaMode m) {
+    switch (m) {
+    case AaMode::Spatial: return L"spatial";
+    case AaMode::Directional: return L"directional";
+    case AaMode::Temporal: return L"temporal";
     default: return L"off";
     }
 }
@@ -209,13 +220,15 @@ int wmain(int argc, wchar_t** argv) {
     float flowScale = 0.5f;
     std::wstring fgQuality = L"performance";
     int recordFrames = 0;
-    std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp, gpuRelief, orderText;
+    std::wstring recordDir, neuralModel, gpuNr, gpuFg, gpuUp, gpuAa, gpuRelief, orderText;
     std::wstring reliefMode = L"off";
     float reliefStrength = -1.0f; // < 0: the ReliefSettings default
     float reliefParallaxPx = -1.0f;
     bool compare = false;
     std::wstring reliefView = L"none";
     bool reliefSelfTest = false;
+    std::wstring aaMode = L"off", aaQuality = L"balanced", aaView = L"none";
+    float aaStrength = -1.0f; // < 0: the AaSettings default
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
@@ -241,6 +254,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--gpu-fg") gpuFg = next();
         else if (a == L"--gpu-up") gpuUp = next();
         else if (a == L"--gpu-relief") gpuRelief = next();
+        else if (a == L"--gpu-aa") gpuAa = next();
         else if (a == L"--cursor") cursorMode = Lower(next());
         else if (a == L"--fg") fgMultiplier = _wtoi(next().c_str());
         else if (a == L"--fg-auto") fgAutoFps = _wtoi(next().c_str());
@@ -256,6 +270,10 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--relief-parallax-px") reliefParallaxPx = static_cast<float>(_wtof(next().c_str()));
         else if (a == L"--relief-selftest") reliefSelfTest = true;
         else if (a == L"--relief-view") reliefView = Lower(next());
+        else if (a == L"--aa") aaMode = Lower(next());
+        else if (a == L"--aa-strength") aaStrength = static_cast<float>(_wtof(next().c_str()));
+        else if (a == L"--aa-quality") aaQuality = Lower(next());
+        else if (a == L"--aa-view") aaView = Lower(next());
         else if (a == L"--compare") compare = true;
         else {
             fwprintf(stderr, L"Unknown argument: %s\n", a.c_str());
@@ -273,6 +291,15 @@ int wmain(int argc, wchar_t** argv) {
     else if (reliefMode == L"motion" || reliefMode == L"motiondepth") reliefTier = ReliefTier::MotionDepth;
     else if (reliefMode != L"off") {
         fwprintf(stderr, L"--relief takes off, shading, parallax or motion (got '%s')\n", reliefMode.c_str());
+        return 2;
+    }
+
+    AaMode aaRequested = AaMode::Off;
+    if (aaMode == L"spatial") aaRequested = AaMode::Spatial;
+    else if (aaMode == L"directional") aaRequested = AaMode::Directional;
+    else if (aaMode == L"temporal") aaRequested = AaMode::Temporal;
+    else if (aaMode != L"off") {
+        fwprintf(stderr, L"--aa takes off, spatial, directional or temporal (got '%s')\n", aaMode.c_str());
         return 2;
     }
 
@@ -324,8 +351,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (tok == L"fg") stages.push_back(PipelineStage::FrameGeneration);
             else if (tok == L"up") stages.push_back(PipelineStage::Upscaling);
             else if (tok == L"relief") stages.push_back(PipelineStage::Relief);
+            else if (tok == L"aa") stages.push_back(PipelineStage::AntiAliasing);
             else {
-                fwprintf(stderr, L"--order takes nr, fg, up and relief separated by commas (got '%s')\n", tok.c_str());
+                fwprintf(stderr, L"--order takes nr, fg, up, aa and relief separated by commas (got '%s')\n", tok.c_str());
                 return 2;
             }
             if (comma == std::wstring::npos) break;
@@ -368,6 +396,22 @@ int wmain(int argc, wchar_t** argv) {
         fwprintf(stderr, L"--relief-view takes none, split, height, normals, protection, offset or depth (got '%s')\n", reliefView.c_str());
         return 2;
     }
+    cfg.aa.mode = aaRequested;
+    if (aaStrength >= 0.0f) cfg.aa.strength = std::clamp(aaStrength, 0.0f, 1.0f);
+    cfg.aa.quality = aaQuality == L"performance" ? AaQuality::Performance
+                   : aaQuality == L"quality"     ? AaQuality::Quality
+                                                 : AaQuality::Balanced;
+    if (aaQuality != L"performance" && aaQuality != L"balanced" && aaQuality != L"quality") {
+        fwprintf(stderr, L"--aa-quality takes performance, balanced or quality (got '%s')\n", aaQuality.c_str());
+        return 2;
+    }
+    if (aaView == L"edges") cfg.aa.debugView = AaDebugView::EdgeMask;
+    else if (aaView == L"weights") cfg.aa.debugView = AaDebugView::BlendWeight;
+    else if (aaView == L"split") cfg.aa.debugView = AaDebugView::Split;
+    else if (aaView != L"none") {
+        fwprintf(stderr, L"--aa-view takes none, edges, weights or split (got '%s')\n", aaView.c_str());
+        return 2;
+    }
 
     if (monitorIndex >= 0) {
         const auto monitors = Engine::ListMonitors();
@@ -391,6 +435,7 @@ int wmain(int argc, wchar_t** argv) {
     pickGpu(gpuNr, cfg.stageAdapters.neuralRendering);
     pickGpu(gpuFg, cfg.stageAdapters.frameGeneration);
     pickGpu(gpuUp, cfg.stageAdapters.upscaling);
+    pickGpu(gpuAa, cfg.stageAdapters.antiAliasing);
     pickGpu(gpuRelief, cfg.stageAdapters.relief);
 
     Engine engine;
@@ -447,6 +492,10 @@ int wmain(int argc, wchar_t** argv) {
             wprintf(L"     smart parallax: requested %s, in effect %s, %s, GPU %.4f ms%s%s\n", ReliefTierName(reliefTier),
                     ReliefTierName(s.reliefTier), s.reliefActive ? L"active" : L"not active", s.reliefGpuMs,
                     s.reliefNote.empty() ? L"" : L" | ", s.reliefNote.c_str());
+        if (aaRequested != AaMode::Off)
+            wprintf(L"     anti-aliasing: requested %s, in effect %s, %s, edges %.1f %%, strength %.2f, GPU %.4f ms%s%s\n",
+                    AaModeName(aaRequested), AaModeName(s.aaMode), s.aaActive ? L"active" : L"not active",
+                    s.aaEdgeCoverage * 100.0f, s.aaStrength, s.aaGpuMs, s.aaNote.empty() ? L"" : L" | ", s.aaNote.c_str());
         if (upscaleFirst || orderSwitchAt) wprintf(L"     order: %s%s%s\n", s.pipelineOrderText.c_str(), s.pipelineOrderNote.empty() ? L"" : L" | ", s.pipelineOrderNote.c_str());
         if (tick == orderSwitchAt) {
             cfg.order.stages = upscaleFirst ? Engine::DefaultOrder().stages :

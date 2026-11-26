@@ -16,7 +16,8 @@ struct GpuPref {
 };
 
 // Indexes of AppSettings::stageGpu; the values match moonsr::PipelineStage.
-enum StageGpuIndex { StageGpuNeural = 0, StageGpuFrameGen = 1, StageGpuUpscaling = 2, StageGpuRelief = 3, StageGpuCount = 4 };
+enum StageGpuIndex { StageGpuNeural = 0, StageGpuFrameGen = 1, StageGpuUpscaling = 2, StageGpuRelief = 3,
+                     StageGpuAntiAliasing = 4, StageGpuCount = 5 };
 
 struct AppSettings {
     // Source
@@ -60,7 +61,18 @@ struct AppSettings {
     int reliefParallaxHundredths = 200; // output pixels x 100, 0..300 (Parallax and Motion depth)
     int reliefDetailHundredths = 200;  // game pixels x 100, 75..400
     bool reliefSplit = false;          // A/B split view (left half off, right half on)
-    // Processing order, e.g. "neural,framegen,upscaling,relief"; empty / invalid = default
+    // Anti-aliasing ([AntiAliasing], experimental). Files without the section load these defaults (off).
+    bool aaEnabled = false;
+    int aaMode = 0;                   // 0 = Spatial, 1 = Directional, 2 = Temporal (moonsr::AaMode - 1)
+    int aaQuality = 1;                // 0 = Performance, 1 = Balanced, 2 = Quality
+    int aaStrengthPercent = 100;      // 0..100
+    int aaEdgeThresholdHundredths = 10;   // relative luma contrast x100, 2..50
+    int aaEdgeMinHundredths = 3;          // absolute luma floor x100, 0..20
+    bool aaProtectText = true;
+    bool aaProtectHud = true;
+    bool aaAutoReduce = false;        // opt-in: lower the strength when the picture already looks resolved
+    int aaDebugView = 0;              // 0 = None, 1 = Edge mask, 2 = Blend weight, 3 = Split
+    // Processing order, e.g. "neural,framegen,upscaling,aa,relief"; empty / invalid = default
     std::wstring pipelineOrder;
     // Window position (top-left, virtual-desktop pixels)
     bool hasWindowPos = false;

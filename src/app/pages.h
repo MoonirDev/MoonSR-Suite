@@ -10,7 +10,7 @@
 
 namespace moonsr::app {
 
-enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageRelief, PageLoadOrder, PageSettings };
+enum PageIndex { PageHome = 0, PageUpscaling, PageFrameGen, PageNeural, PageAa, PageRelief, PageLoadOrder, PageSettings };
 
 struct AppUi {
     // Home
@@ -86,6 +86,11 @@ struct AppUi {
     SetupSlot nrSlot[kSetupSlots];
     // Settings: Updates
     ui::LinkButton* openReleases = nullptr;
+    // Anti-aliasing (experimental)
+    ui::InfoBar *aaDev = nullptr, *aaNote = nullptr, *aaModeNote = nullptr;
+    ui::ToggleSwitch *aa = nullptr, *aaProtectText = nullptr, *aaProtectHud = nullptr, *aaAutoReduce = nullptr;
+    ui::ComboBox *aaMode = nullptr, *aaQuality = nullptr, *aaDebug = nullptr;
+    ui::Slider *aaStrength = nullptr, *aaEdgeThreshold = nullptr, *aaEdgeFloor = nullptr;
     // Smart parallax (experimental)
     ui::InfoBar *reliefDev = nullptr, *reliefNote = nullptr, *reliefModeNote = nullptr;
     ui::ToggleSwitch *relief = nullptr, *reliefSplit = nullptr;
@@ -95,7 +100,7 @@ struct AppUi {
     // Load order
     ui::InfoBar *orderInfo = nullptr, *orderNow = nullptr, *orderNote = nullptr;
     ui::OrderList* orderList = nullptr;
-    ui::ComboBox* stageGpu[4] = {};  // GPU choice per stage, indexed by PipelineStage; drawn and moved by orderList
+    ui::ComboBox* stageGpu[5] = {};  // GPU choice per stage, indexed by PipelineStage; drawn and moved by orderList
     ui::InfoBar *gpuHelp = nullptr, *gpuNote = nullptr;  // "GPU choices apply when scaling starts" while running
     ui::Button* orderReset = nullptr;
     ui::TextBlock *orderExplain = nullptr, *addonsEmpty = nullptr;
@@ -110,7 +115,7 @@ struct AppUi {
 };
 
 // Detail rows on the Home page, in display order.
-enum DetailRow { DetGpu, DetStageGpus, DetCapture, DetScaler, DetOrder, DetRelief, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
+enum DetailRow { DetGpu, DetStageGpus, DetCapture, DetScaler, DetOrder, DetAa, DetRelief, DetCpu, DetDropped, DetSkipped, DetState, DetCount };
 
 void BuildPages(ui::View& view, AppUi& ui);
 

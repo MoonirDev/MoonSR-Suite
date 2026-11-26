@@ -42,6 +42,10 @@ float LPrev(float2 pos)
     return (gU1.w & 8u) != 0 ? gWorkPrev.SampleLevel(gLinear, pos * gIn.zw, 0).a : gRef.SampleLevel(gLinear, pos * gIn.zw, 0);
 }
 
+#ifdef ALSR_PIXEL_REFINE
+#include "upscale/alsr_pixel_refine.hlsli"
+#endif
+
 int2 CellClamp(int2 c) { return clamp(c, int2(0, 0), int2(gCell.xy) - 1); }
 
 struct PsOut
@@ -108,19 +112,55 @@ PsOut main(VsOut i)
     const float4 f01 = gCells.Load(int3(CellClamp(c0 + int2(0, 1)), 0)), f11 = gCells.Load(int3(CellClamp(c0 + int2(1, 1)), 0));
     const float4 fBil = lerp(lerp(f00, f10, cf.x), lerp(f01, f11, cf.x), cf.y);
 
-    const int2 base = int2(round(cellF)) - 1;
+    const int2 center = int2(round(cellF));
+    const int2 base = center - 1;
     float spread = 0;
-    [unroll] for (int s = 0; s < 9; ++s)
-        spread = max(spread, length(gCells.Load(int3(CellClamp(base + int2(s % 3, s / 3)), 0)).xy - fBil.xy));
+#ifdef ALSR_AFFINE_MOTION
+    float2 sum = 0, sumX = 0, sumY = 0;
+    float sumSquares = 0;
+    float minConfidence = 1.0;
+#endif
+    [unroll] for (int s = 0; s < 9; ++s) {
+        const int2 coord = int2(s % 3, s / 3);
+        const float4 sampleValue = gCells.Load(int3(CellClamp(base + coord), 0));
+        const float2 delta = sampleValue.xy - fBil.xy;
+        spread = max(spread, length(delta));
+#ifdef ALSR_AFFINE_MOTION
+        const float2 offset = float2(coord - 1);
+        sum += delta;
+        sumX += delta * offset.x;
+        sumY += delta * offset.y;
+        sumSquares += dot(delta, delta);
+        minConfidence = min(minConfidence, sampleValue.z);
+#endif
+    }
 
-    const bool select = spread >= gP3.z || (gU1.w & 4u) != 0; // development flag 4: always select
-    float4 best = fBil;
+    float4 predicted = fBil;
+    bool affine = false;
+#ifdef ALSR_AFFINE_MOTION
+    // On the symmetric 3x3 grid, the constant, x and y columns are orthogonal.
+    // Fit displacements relative to the bilinear prediction to keep the error calculation
+    // stable at large translations. The remaining variance estimates model mismatch.
+    const float2 average = sum / 9.0;
+    const float2 gradX = sumX / 6.0, gradY = sumY / 6.0;
+    const float gradients = dot(gradX, gradX) + dot(gradY, gradY);
+    const float variance = max(0.0, sumSquares - 9.0 * dot(average, average) - 6.0 * gradients) / 9.0;
+    const bool interior = all(base >= 0) && all(center + 1 < int2(gCell.xy));
+    affine = interior && minConfidence > 0.35 && gradients >= 0.01 && gradients < 6.25 &&
+             variance < min(0.075, 0.045 * gradients);
+    if (affine) {
+        const float2 d = cellF - float2(center);
+        predicted.xy = fBil.xy + average + gradX * d.x + gradY * d.y;
+    }
+#endif
+    const bool select = (!affine && spread >= gP3.z) || (gU1.w & 4u) != 0; // flag 4: always select
+    float4 best = predicted;
     float bestErr = 0, bestScore = 1e9;
     [loop] for (int n = 0; n < (select ? 11 : 1); ++n) {
         float4 f;
         float dist = 0.0;
         if (n == 0) {
-            f = fBil;
+            f = predicted;
         } else if (n < 10) {
             const int2 c = CellClamp(base + int2(uint(n - 1) % 3u, uint(n - 1) / 3u));
             f = gCells.Load(int3(c, 0));
@@ -147,6 +187,12 @@ PsOut main(VsOut i)
         }
     }
 
+#ifdef ALSR_PIXEL_REFINE
+    [branch] if ((select || affine) && best.z > 0.45 && bestErr > 0.008 && bestErr < 0.12 &&
+                 dot(best.xy, best.xy) > 0.0225) {
+        RefinePixel(x, yc, mc, best, bestErr);
+    }
+#endif
     const float2 v = best.xy;
     const float2 land = x + v;
     float vis = 0.0;

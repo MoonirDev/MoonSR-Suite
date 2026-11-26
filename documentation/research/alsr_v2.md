@@ -653,3 +653,25 @@ This is clearly labelled as **not** part of the milestone list above. It is not 
 - Whether every FSR 3.1 file in FidelityFX SDK v1.1.x is under the MIT-style licence file [U].
 - FLIP and LPIPS licences [M].
 - The size of the static-scene gap to XeSS: not estimated, to be measured in M0.
+
+### M0 implementation notes (2026-11-25)
+
+Real-game comparisons use the owner's synchronized captures. For each scene and camera path, put
+lossless, zero-padded PNG frames with identical filenames in `input/`, `native/`, `moonsr/`, and
+`dlss/`, `fsr/` or `xess/` when the game provides these modes. Use the same displayed framing,
+output resolution, frame rate and in-game settings for each take, apart from the resolution and
+upscaler under test. Record the game, scene, settings, GPU, driver and build in `settings.txt`.
+Use native-resolution frames as ground truth and inspect alignment before treating metric
+differences as quality differences.
+
+```powershell
+build\alsr-m0-verify\bin\moonsr_bench.exe --capture-set benchmarks\output\captures\scene --tag scene
+```
+
+The capture scorer writes per-frame luma PSNR, SSIM and error flicker for each output variant.
+It validates matching filenames and dimensions. The low-resolution input is retained for
+provenance and repeat runs. The synthetic harness reports content classes and analytic backward
+flow error in source pixels. Its readback is confined to the benchmark scoring traversal.
+Whole-render and shared-estimator GPU times are sampled without pass markers, with a separate
+traversal for per-pass times. The synthetic metrics are regression checks. Real-game measurements
+are required for the vendor quality comparison.

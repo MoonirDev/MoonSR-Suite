@@ -55,6 +55,7 @@ constexpr wchar_t kIconReset = 0xE7A7; // Undo
 constexpr wchar_t kIconDetail = 0xE8A3; // ZoomIn
 constexpr wchar_t kIconSharpening = 0xE8FE; // Scan
 constexpr wchar_t kIconReliefNav = ui::kGlyphReliefLayers;  // vector stacked-layers glyph (Canvas::ReliefLayersGlyph)
+constexpr wchar_t kIconAaNav = ui::kGlyphAntiAlias;          // vector stepped/smooth edge glyph (Canvas::AntiAliasGlyph)
 constexpr wchar_t kIconCompare = 0xE8A9;    // ViewAll (A/B split view)
 
 using ui::ComboBox;
@@ -125,8 +126,8 @@ void BuildPages(ui::View& view, AppUi& u) {
         p->AddTiles({u.tGame, u.tDisplayed, u.tGenerated, u.tFrameGen, u.tFgDelay, u.tLatency, u.tInput, u.tOutput});
 
         p->AddSection(L"Details");
-        u.details = p->AddDetails({L"GPU", L"GPU per stage", L"Capture method", L"Scaler", L"Processing order", L"Smart parallax",
-                                   L"CPU per frame", L"Frames dropped",
+        u.details = p->AddDetails({L"GPU", L"GPU per stage", L"Capture method", L"Scaler", L"Processing order",
+                                   L"Anti-aliasing", L"Smart parallax", L"CPU per frame", L"Frames dropped",
                                    L"Generated frames: scheduler late / skipped", L"State"});
         p->AddFree(u.diagnosticsLink, 0.0f, 24.0f);
     }
@@ -397,6 +398,83 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.modelEmptyRow = &empty;
         ui::Card& folder = p->AddCard();
         p->AddRow(folder, kIconFolder, L"Models folder", L"Where the copies you added are stored", {{u.openModels, 0.0f}});
+    }
+
+    // ---------------------------------------------------------------- Anti-aliasing (experimental)
+    {
+        ui::Page* p = view.AddPage(L"Anti-aliasing (experimental)", kIconAaNav, L"Anti-aliasing");
+        u.aaDev = p->Make<ui::InfoBar>();
+        u.aaDev->Set(ui::InfoBar::Severity::Info,
+                     L"Smooths jagged edges in the captured picture. It is a spatial filter: MoonSR receives a finished "
+                     L"image without depth, motion vectors or MSAA samples.");
+        ui::InfoBar* about = p->Make<ui::InfoBar>();
+        about->Set(ui::InfoBar::Severity::Info,
+                   L"Experimental. Anti-aliasing estimates edge coverage from the picture and blends across edges. It "
+                   L"cannot recover detail the game never rendered, and it softens content the game already "
+                   L"anti-aliased. It is not a replacement for the game's own anti-aliasing.");
+        u.aaNote = p->Make<ui::InfoBar>();
+        u.aaNote->visible = false;
+        u.aa = p->Make<ToggleSwitch>();
+        u.aaMode = p->Make<ComboBox>();
+        u.aaMode->AddItem(L"Spatial", 0);
+        u.aaMode->AddItem(L"Directional (not built yet)", 1);
+        u.aaMode->AddItem(L"Temporal (not built yet)", 2);
+        u.aaMode->SetSelected(0);
+        u.aaModeNote = p->Make<ui::InfoBar>();
+        u.aaModeNote->Set(ui::InfoBar::Severity::Info,
+                          L"Directional and Temporal are not built yet. Selecting them uses the spatial filter and says "
+                          L"so on the Home page.");
+        u.aaModeNote->visible = false;
+        u.aaQuality = p->Make<ComboBox>();
+        u.aaQuality->AddItem(L"Performance", 0);
+        u.aaQuality->AddItem(L"Balanced", 1);
+        u.aaQuality->AddItem(L"Quality", 2);
+        u.aaQuality->SetSelected(1);
+        u.aaStrength = p->Make<Slider>();
+        u.aaStrength->Setup(0, 100, 5, L"%");
+        u.aaStrength->SetValue(100);
+        u.aaEdgeThreshold = p->Make<Slider>();
+        u.aaEdgeThreshold->Setup(2, 50, 1, L"%");
+        u.aaEdgeThreshold->SetValue(10);
+        u.aaEdgeFloor = p->Make<Slider>();
+        u.aaEdgeFloor->Setup(0, 20, 1, L"%");
+        u.aaEdgeFloor->SetValue(3);
+        u.aaProtectText = p->Make<ToggleSwitch>();
+        u.aaProtectHud = p->Make<ToggleSwitch>();
+        u.aaAutoReduce = p->Make<ToggleSwitch>();
+        u.aaDebug = p->Make<ComboBox>();
+        u.aaDebug->AddItem(L"Off", 0);
+        u.aaDebug->AddItem(L"Edge mask", 1);
+        u.aaDebug->AddItem(L"Blend weight", 2);
+        u.aaDebug->AddItem(L"Split (left half off)", 3);
+        u.aaDebug->SetSelected(0);
+
+        p->AddInfo(u.aaDev);
+        p->AddInfo(about);
+        p->AddInfo(u.aaNote);
+        ui::Card& c = p->AddCard();
+        p->AddRow(c, kIconAaNav, L"Anti-aliasing", L"Smooth jagged edges in the finished picture", {{u.aa, kToggleW}});
+        p->AddRow(c, kIconPersonalize, L"Method", L"Choose the anti-aliasing method", {{u.aaMode, 240.0f}});
+        p->AddInfo(u.aaModeNote);
+        ui::Card& look = p->AddCard();
+        p->AddRow(look, kIconIntensity, L"Strength", L"How much of the filtered image is blended in",
+                  {{u.aaStrength, 300.0f}});
+        p->AddRow(look, kIconQuality, L"Quality", L"Performance is cheapest; Quality smooths diagonals further",
+                  {{u.aaQuality, 200.0f}});
+        p->AddRow(look, kIconDetail, L"Edge threshold", L"Contrast that counts as an edge",
+                  {{u.aaEdgeThreshold, 300.0f}});
+        p->AddRow(look, kIconShadow, L"Dark-scene floor", L"Absolute contrast floor for dark scenes",
+                  {{u.aaEdgeFloor, 300.0f}});
+        ui::Card& protect = p->AddCard();
+        p->AddRow(protect, kIconShield, L"Protect text and thin lines", L"Keeps one-pixel strokes and fine text sharp",
+                  {{u.aaProtectText, kToggleW}});
+        p->AddRow(protect, kIconShield, L"Protect static HUD", L"Stored for later tiers; the spatial filter protects HUD strokes with the text test",
+                  {{u.aaProtectHud, kToggleW}});
+        p->AddRow(protect, kIconShield, L"Reduce when already smooth", L"Experimental: lower the strength when the picture has few hard edges",
+                  {{u.aaAutoReduce, kToggleW}});
+        ui::Card& debug = p->AddCard();
+        p->AddRow(debug, kIconCompare, L"Diagnostic view", L"Show edges, blend weight, or an A/B split",
+                  {{u.aaDebug, 220.0f}});
     }
 
     // ---------------------------------------------------------------- Smart parallax (experimental)

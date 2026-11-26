@@ -152,12 +152,32 @@ Rgb ThinZones(double x, double y, double u, double v, double w, double h, double
     return band(std::hypot(u - w * 0.75, v - h * 0.75), 7 * k, 1 * k) ? ink : bg;         // rings, 1 px
 }
 
+// Periodic, independently drifting soft particles, composited over the opaque pan.
+double ParticleOpacity(double x, double y, int t, double k) {
+    const double u = (x / k + 1.7 * t) / 64;
+    const double v = (y / k - 2.1 * t) / 64;
+    const double tileX = std::floor(u), tileY = std::floor(v);
+    const double offsetX = 0.2 * std::sin(2.7 * tileX + 4.3 * tileY);
+    const double offsetY = 0.2 * std::sin(4.1 * tileX - 2.1 * tileY);
+    const double px = u - tileX - 0.5 - offsetX, py = v - tileY - 0.5 - offsetY;
+    const double falloff = std::max(0.0, 1.0 - (px * px + py * py) / 0.0625);
+    return 0.7 * falloff * falloff;
+}
+
+int MotionSteps(int frame, int stop, int resume)
+{
+    return std::min(frame, stop - 1) + std::max(0, frame - resume + 1);
+}
+
+double DiscAngle(int t) { return 0.022 * t; }
+double DiscZoom(int t) { return 1.0 + 0.25 * std::sin(2.0 * kPi * t / 48.0); }
+
 uint8_t Q(double v) { return static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(v * 255.0)), 0, 255)); }
 
 } // namespace
 
 const std::vector<std::string>& SequenceNames() {
-    static const std::vector<std::string> n = {"pan_slow", "pan_fast", "rot_zoom", "hud_pan", "scene_cut", "thin_pan", "still"};
+    static const std::vector<std::string> n = {"pan_slow", "pan_medium", "pan_fast", "rot_zoom", "hud_pan", "scene_cut", "thin_pan", "particles", "still"};
     return n;
 }
 
@@ -176,10 +196,16 @@ std::unique_ptr<Sequence> Sequence::Create(const std::string& name, uint32_t gtW
     };
     if (name == "pan_slow") {
         s->eval_ = pan(kSeedA, 1.1, 0.5);
+        s->panX_ = 1.1 * k; s->panY_ = 0.5 * k;
+    } else if (name == "pan_medium") {
+        s->panX_ = 5.1 * k; s->panY_ = 1.7 * k;
+        s->eval_ = pan(kSeedA, 5.1, 1.7);
     } else if (name == "pan_fast") {
         s->eval_ = pan(kSeedA, 17.3, 6.1);
+        s->panX_ = 17.3 * k; s->panY_ = 6.1 * k;
     } else if (name == "hud_pan") {
         EvalFn base = pan(kSeedA, 3.7, 1.3);
+        s->panX_ = 3.7 * k; s->panY_ = 1.3 * k;
         s->eval_ = [=](double x, double y, int t) { return HudOverlay(base(x, y, t), x, y, k); };
         const int d = 6;
         for (const HudRect& r : {HudRect{48 - d, 36 - d, 448 + d, 68 + d}, HudRect{1560 - d, 30 - d, 1880 + d, 96 + d},
@@ -190,11 +216,13 @@ std::unique_ptr<Sequence> Sequence::Create(const std::string& name, uint32_t gtW
     } else if (name == "scene_cut") {
         s->cut_ = s->frames_ / 2;
         const int cut = s->cut_;
+        s->panX_ = 2.3 * k; s->panY_ = 0.9 * k;
+        s->postCutPanX_ = -1.7 * k; s->postCutPanY_ = 1.4 * k;
         EvalFn a = pan(kSeedA, 2.3, 0.9), b = pan(kSeedB, -1.7, 1.4);
         s->eval_ = [=](double x, double y, int t) { return t < cut ? a(x, y, t) : b(x, y, t - cut); };
     } else if (name == "rot_zoom") {
         s->eval_ = [=](double x, double y, int t) {
-            const double theta = 0.022 * t, zoom = 1.0 + 0.25 * std::sin(2.0 * kPi * t / 48.0);
+            const double theta = DiscAngle(t), zoom = DiscZoom(t);
             const double px = x - W * 0.5, py = y - H * 0.5;
             const double ca = std::cos(theta), sa = std::sin(theta);
             const double lx = (px * ca + py * sa) / zoom, ly = (-px * sa + py * ca) / zoom; // rotate by -theta, scale 1/zoom
@@ -210,7 +238,24 @@ std::unique_ptr<Sequence> Sequence::Create(const std::string& name, uint32_t gtW
         };
     } else if (name == "thin_pan") {
         const double vx = 0.73 * k, vy = 0.41 * k;
+        s->panX_ = 0.73 * k; s->panY_ = 0.41 * k;
         s->eval_ = [=](double x, double y, int t) { return ThinZones(x, y, x - vx * t, y - vy * t, W, H, k); };
+    } else if (name == "particles") {
+        s->panX_ = 3.7 * k; s->panY_ = 1.3 * k;
+        const auto base = pan(kSeedA, 3.7, 1.3);
+        s->eval_ = [=](double x, double y, int t) {
+            const auto bg = base(x, y, t);
+            const double a = ParticleOpacity(x, y, t, k);
+            return Rgb{bg.r * (1 - a) + a, bg.g * (1 - a) + 0.7 * a, bg.b * (1 - a) + 0.35 * a};
+        };
+    } else if (name == "start_stop") {
+        s->stop_ = std::max(1, s->frames_ / 4);
+        s->resume_ = std::max(s->stop_ + 1, 3 * s->frames_ / 4);
+        s->panX_ = 3.7 * k;
+        s->panY_ = 1.3 * k;
+        const auto base = pan(kSeedA, 3.7, 1.3);
+        const int stop = s->stop_, resume = s->resume_;
+        s->eval_ = [=](double x, double y, int t) { return base(x, y, MotionSteps(t, stop, resume)); };
     } else if (name == "still") {
         s->static_ = true;
         s->eval_ = [=](double x, double y, int) { return World(x, y, kSeedA, k); };
@@ -220,9 +265,20 @@ std::unique_ptr<Sequence> Sequence::Create(const std::string& name, uint32_t gtW
     return s;
 }
 
+std::unique_ptr<Sequence> Sequence::CreateRecorded(uint32_t gtW, uint32_t gtH, int frames) {
+    auto s = std::unique_ptr<Sequence>(new Sequence());
+    s->name_ = "native_recording";
+    s->w_ = gtW;
+    s->h_ = gtH;
+    s->frames_ = frames;
+    s->recorded_ = true;
+    return s;
+}
+
 std::unique_ptr<Sequence> Sequence::CreatePan(uint32_t gtW, uint32_t gtH, int frames, int ss, double vx, double vy) {
     auto s = std::unique_ptr<Sequence>(new Sequence());
     s->name_ = "pan_test";
+    s->panX_ = vx; s->panY_ = vy;
     s->w_ = gtW;
     s->h_ = gtH;
     s->frames_ = std::max(1, frames);
@@ -230,6 +286,60 @@ std::unique_ptr<Sequence> Sequence::CreatePan(uint32_t gtW, uint32_t gtH, int fr
     const double k = gtH / 1080.0;
     s->eval_ = [=](double x, double y, int t) { return World(x - vx * t, y - vy * t, 1000, k); };
     return s;
+}
+
+const char* Sequence::ContentClass() const {
+    if (recorded_) return "recorded";
+    if (name_ == "still") return "static";
+    if (name_ == "start_stop") return "motion_transitions";
+    if (name_ == "pan_medium") return "medium_pan";
+    if (name_ == "pan_fast") return "fast_pan";
+    if (name_ == "rot_zoom") return "rotation_zoom";
+    if (name_ == "hud_pan") return "hud";
+    if (name_ == "particles") return "particles_translucency";
+    if (name_ == "scene_cut") return "scene_cut";
+    if (name_ == "thin_pan") return "thin_features";
+    return "slow_pan";
+}
+
+bool Sequence::BackwardFlow(double x, double y, int frame, double& dx, double& dy) const {
+    if (recorded_ || frame <= 0 || frame == cut_) return false;
+    const double k = h_ / 1080.0;
+    const bool afterCut = cut_ >= 0 && frame > cut_;
+    dx = -(afterCut ? postCutPanX_ : panX_);
+    dy = -(afterCut ? postCutPanY_ : panY_);
+    if (stop_ >= 0 && MotionSteps(frame, stop_, resume_) == MotionSteps(frame - 1, stop_, resume_))
+        dx = dy = 0.0;
+
+    if (name_ == "rot_zoom") {
+        const double px = x - w_ * 0.5, py = y - h_ * 0.5;
+        const double radius = std::hypot(px, py);
+        const double current = 280 * k * DiscZoom(frame);
+        const double previous = 280 * k * DiscZoom(frame - 1);
+        if (radius < current) {
+            const double theta = DiscAngle(frame - 1) - DiscAngle(frame);
+            const double ratio = DiscZoom(frame - 1) / DiscZoom(frame);
+            dx = ratio * (std::cos(theta) * px - std::sin(theta) * py) - px;
+            dy = ratio * (std::sin(theta) * px + std::cos(theta) * py) - py;
+        } else if (radius < previous) {
+            return false; // newly visible background
+        }
+    }
+    if (name_ == "thin_pan") {
+        // A sample crossing the static divider has no match in the translated pattern.
+        const double px = x - w_ * 0.5, py = y - h_ * 0.5;
+        if (std::abs(px) < 2 * k || std::abs(py) < 2 * k) return false;
+        if (std::abs(px + dx) < 2 * k || std::abs(py + dy) < 2 * k ||
+            (px < 0) != (px + dx < 0) || (py < 0) != (py + dy < 0)) return false;
+    }
+    if (name_ == "particles" &&
+        (ParticleOpacity(x, y, frame, k) > 0 || ParticleOpacity(x + dx, y + dy, frame - 1, k) > 0)) return false;
+    for (const auto& r : hud_) {
+        const auto inside = [&r](double a, double b) { return a >= r.x0 && a < r.x1 && b >= r.y0 && b < r.y1; };
+        // HUD rectangles include translucency and padding, so their composited flow is ambiguous.
+        if (inside(x, y) || inside(x + dx, y + dy)) return false;
+    }
+    return x + dx >= 0 && x + dx < w_ && y + dy >= 0 && y + dy < h_;
 }
 
 Image Sequence::GroundTruth(int frame) const {

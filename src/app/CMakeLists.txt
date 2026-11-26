@@ -33,4 +33,4 @@ add_executable(MoonSR WIN32
     app.manifest
 )
 set_source_files_properties(app.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/brand/moonsr.ico")
-target_link_libraries(MoonSR PRIVATE moonsr_engine d2d1 dwrite dwmapi user32 gdi32 ole32 advapi32 shell32 comctl32)
+target_link_libraries(MoonSR PRIVATE moonsr_engine d2d1 dwrite dwmapi user32 gdi32 ole32 advapi32 shell32 comctl32 winmm)

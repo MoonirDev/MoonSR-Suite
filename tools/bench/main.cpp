@@ -1,5 +1,6 @@
 // moonsr_bench: offline upscaling benchmark harness. Runs the real shaders through the real ScalePass on a chosen GPU.
 // See documentation/BENCHMARKS.md for methodology and results.
+#include "aa_bench.h"
 #include "gen.h"
 #include "gpu_runner.h"
 #include "imageops.h"
@@ -10,7 +11,9 @@
 
 #include <windows.h>
 
+#include <charconv>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <map>
 #include <set>
@@ -35,6 +38,8 @@ struct Options {
     bool reliefMotionDepth = false;
     float reliefDetail = -1.0f;
     std::vector<std::string> reliefImages;
+    bool aa = false, aaNoTime = false;
+    std::vector<std::string> aaImages;
     TemporalOptions tmp;
     uint32_t genW = 1920, genH = 1080;
     std::vector<std::string> adapters;
@@ -44,7 +49,7 @@ struct Options {
     std::vector<std::pair<moonsr::Size, moonsr::Size>> timeSizes{{{1280, 720}, {1920, 1080}}, {{1920, 1080}, {3840, 2160}}};
     uint32_t iterations = 200, warmup = 50;
     uint32_t idleMs = 0;
-    fs::path outDir, gtDir;
+    fs::path outDir, gtDir, captureSet;
     std::string tag;
 };
 
@@ -83,6 +88,7 @@ void PrintHelp() {
     printf(R"(moonsr_bench - offline upscaling benchmark (real ScalePass shaders on a real GPU)
 
 Modes (combine freely):
+  --capture-set <dir>    score matched PNGs in input/, native/, moonsr/ and optional dlss/, fsr/, xess/
   --selftest             validate metrics / plumbing; exit code 1 if any check fails
   --gen                  (re)generate the synthetic ground truth into <out>/gt (8-bit sRGB PNG)
   --quality              downsample GT, upscale on the GPU with every available scaler, compute PSNR/SSIM
@@ -97,6 +103,10 @@ Modes (combine freely):
                           --save-images writes PNGs to <out>/relief)
   --list-adapters        list adapters and exit
   --relief-motion-depth  test Motion depth with known projective, translational and independent cell motion
+  --aa                   Anti-aliasing: synthetic aliased scenes (edges at 0/30/45/60/90 degrees, thin lines, text/HUD
+                         over texture, high-frequency texture, gradient); edge-step reduction, texture energy, stroke
+                         contrast, HUD protection, gradient safety, self-checks and GPU time
+                         (--aa-image <file> (repeatable; real screenshot)  --aa-no-time  --save-images writes to <out>/aa)
 
 Selection:
   --adapter <substr>     adapter name substring (repeatable); default: first hardware adapter
@@ -114,12 +124,19 @@ Selection:
   --verbose              print the per-image quality table
   --out-dir <dir>        default <repo>/benchmarks/output     --gt-dir <dir>  default <out>/gt
 Temporal mode (--temporal; uses --adapter, --scales (default 1.5,2), --sharpness, --out-dir, --tag, --save-images):
-  --seqs a,b             pan_slow, pan_fast, rot_zoom, hud_pan, scene_cut, thin_pan, still (default all)
+  --native-frames <dir>  use sorted native-resolution PNGs as reference, downsampled in area mode
+  --timing-sweeps N     repeat GPU timing in alternating method order (1-12, default 1)
+  --refined-flow         score MoonSR refined vectors with analytic flow in synthetic scenes
+  --seqs a,b             pan_slow, pan_medium, pan_fast, rot_zoom, hud_pan, scene_cut, thin_pan, particles, still (default suite); start_stop is opt-in
   --frames N             frames per sequence (default 64)      --seq-warmup N  frames excluded from averages (default 8)
   --seq-size WxH         ground-truth / output size (default 1920x1080)    --seq-ss N  GT supersampling per axis (default 3)
   --input-modes a,b      aliased (point sampled), area (box filtered); default both
   --methods a,b          substrings of: Nearest, Bilinear, Bicubic, Lanczos-3, MoonSR Spatial, MoonSR (temporal; "alsr" also
-                         selects it) (default Lanczos-3, MoonSR Spatial, MoonSR)
+                         selects it) (default Lanczos-3, MoonSR Spatial, MoonSR). "seed" selects single-frame candidates.
+                         "temporal" selects seed trials in temporal reconstruction. "fused" selects inline accumulation; "gated" selects cubic with a zero-gain fast path.
+                         "robust" selects thin-feature protection; "tiled" selects the compute registration reference.
+                         "point" selects evidence accumulation trials; "auto" selects the GPU sampling detector.
+                         "focus" selects stationary reconstruction. "affine", "hud" and "pixel" select motion and overlay trials. "lite" selects the motion-free tier.
   --save-frame N         with --save-images: frame index written as PNG (default 40)
   --tag <name>           result file tag (default: timestamp)
 )");
@@ -138,14 +155,29 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--quality") o.quality = true;
         else if (a == "--time") o.time = true;
         else if (a == "--list-adapters") o.listAdapters = true;
+        else if (a == "--capture-set") { if (!(v = need(i))) return false; o.captureSet = v; }
         else if (a == "--temporal") { o.temporal = true; }
         else if (a == "--relief") o.relief = true;
         else if (a == "--relief-no-time") o.reliefNoTime = true;
         else if (a == "--relief-parallax") { o.reliefParallax = true; o.relief = true; }
         else if (a == "--relief-motion-depth") o.reliefMotionDepth = true;
+        else if (a == "--aa") o.aa = true;
+        else if (a == "--aa-no-time") o.aaNoTime = true;
+        else if (a == "--aa-image") { if (!(v = need(i))) return false; o.aaImages.push_back(v); o.aa = true; }
         else if (a == "--relief-image") { if (!(v = need(i))) return false; o.reliefImages.push_back(v); o.relief = true; }
         else if (a == "--relief-detail") { if (!(v = need(i))) return false; o.reliefDetail = static_cast<float>(atof(v)); }
         else if (a == "--relief-strengths") { if (!(v = need(i))) return false; for (auto& t : Split(v, ',')) o.reliefStrengths.push_back(static_cast<float>(atof(t.c_str()))); }
+        else if (a == "--native-frames") { if (!(v = need(i))) return false; o.tmp.nativeFrames = v; o.temporal = true; }
+        else if (a == "--timing-sweeps") {
+            if (!(v = need(i))) return false;
+            const auto end = v + strlen(v);
+            const auto parsed = std::from_chars(v, end, o.tmp.timingSweeps);
+            if (parsed.ec != std::errc{} || parsed.ptr != end || o.tmp.timingSweeps < 1 || o.tmp.timingSweeps > 12) {
+                err = "--timing-sweeps must be an integer from 1 to 12";
+                return false;
+            }
+        }
+        else if (a == "--refined-flow") { o.tmp.scoreRefinedFlow = true; o.temporal = true; }
         else if (a == "--seqs") { if (!(v = need(i))) return false; o.tmp.seqs = Split(v, ','); }
         else if (a == "--input-modes") { if (!(v = need(i))) return false; o.tmp.modes = Split(v, ','); for (auto& s : o.tmp.modes) if (s != "aliased" && s != "area") { err = "bad --input-modes"; return false; } }
         else if (a == "--methods") { if (!(v = need(i))) return false; for (auto& s : Split(v, ',')) o.tmp.methods.push_back(Lower(s)); }
@@ -562,7 +594,7 @@ int main(int argc, char** argv) {
         PrintHelp();
         return 2;
     }
-    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.reliefMotionDepth && !o.listAdapters)) {
+    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.reliefMotionDepth && !o.aa && !o.listAdapters && o.captureSet.empty())) {
         PrintHelp();
         return o.help ? 0 : 2;
     }
@@ -579,11 +611,12 @@ int main(int argc, char** argv) {
     printf("moonsr_bench | OS %s | git %s | sources %s | %s\n", si.osBuild.c_str(), si.gitCommit.c_str(), si.sourceHash.c_str(), si.date.c_str());
 
     int rc = 0;
+    if (!o.captureSet.empty()) rc |= ScoreCaptureSet(o.captureSet, o.outDir / "results", FileTag(o, si));
     if (o.listAdapters) {
         for (auto& a : moonsr::GpuDevice::EnumerateAdapters())
             printf("%s%s | driver UMD %s | VEN_%04X DEV_%04X | VRAM %llu MiB\n", Narrow(a.name).c_str(), a.isSoftware ? " [software]" : "",
                    DriverVersionString(a.driverVersion).c_str(), a.vendorId, a.deviceId, static_cast<unsigned long long>(a.dedicatedVideoMemory >> 20));
-        if (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal) return 0;
+        if (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal) return rc;
     }
     if (o.gen) {
         std::vector<GtImage> gts;
@@ -593,7 +626,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<AdapterInfo> adapters;
-    if (o.selftest || o.quality || o.time || o.temporal || o.relief || o.reliefMotionDepth) {
+    if (o.selftest || o.quality || o.time || o.temporal || o.relief || o.reliefMotionDepth || o.aa) {
         adapters = PickAdapters(o, err);
         if (adapters.empty()) {
             if (o.selftest && !o.quality && !o.time) printf("warning: %s; GPU self-checks skipped\n", err.c_str());
@@ -637,6 +670,14 @@ int main(int argc, char** argv) {
     }
     if (o.reliefMotionDepth)
         for (const auto& a : adapters) rc |= RunReliefMotionBench(a);
+    if (o.aa && !adapters.empty()) {
+        AaBenchOptions aa;
+        aa.timing = !o.aaNoTime;
+        aa.saveImages = o.saveImages;
+        aa.outDir = o.outDir / "aa";
+        for (const auto& im : o.aaImages) aa.images.emplace_back(im);
+        for (auto& a : adapters) rc |= aa.images.empty() ? RunAaBench(aa, a) : RunAaImage(aa, a);
+    }
     CoUninitialize();
     return rc;
 }

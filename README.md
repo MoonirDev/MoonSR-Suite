@@ -31,13 +31,18 @@ It is an experimental personal project. Quality and speed claims come only from 
   - Intel: the DLSS5_INTEL runtime (experimental and far from real time).
 
   See [documentation/NR_BRIDGE.md](documentation/NR_BRIDGE.md).
-- **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling, Smart parallax) can run on
+- **GPU per stage:** on the Load order page, each stage (neural rendering, frame generation, upscaling,
+  anti-aliasing, Smart parallax) can run on
   its own GPU; frames are copied between GPUs where consecutive stages differ. NVIDIA neural rendering on a second GPU
   runs in a small helper process (`MoonSR_NrHost.exe`).
 - **Smart parallax (experimental):** adds surface relief to textured parts of the captured picture. Shading adds
   highlights and shadows. Parallax also shifts surface detail by up to 3 output pixels. Motion depth reuses compatible
   frame-generation motion and uses Parallax when that motion is unavailable. See the
   [Smart parallax design](documentation/research/screen_space_relief.md).
+- **Anti-aliasing (experimental):** a spatial filter that detects hard, slanted edges in the captured picture and
+  blends them, with protection for text, HUD strokes and fine textures. Only the spatial tier exists; the other modes
+  fall back to it. It is off by default, sits after upscaling in Load order, and can run on its own GPU. See the
+  [anti-aliasing design note](documentation/research/anti_aliasing.md).
 - **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
   ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.
 - **Notices and warnings:** close them with the × button. They briefly shrink and fade when visual effects are on.

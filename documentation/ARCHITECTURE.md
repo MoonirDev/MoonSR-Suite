@@ -61,6 +61,7 @@ Status: Phase 2 (functional foundation). Sections marked *planned* describe agre
 | app | `src/app` | — | ui-engineer | Phase 2 |
 | framegen | `src/framegen` | `frame_generator.h` | frame-generation-engineer | iteration 1 |
 | relief | `src/relief` | `relief_pass.h` | upscaling-engineer | experimental |
+| aa | `src/aa` | `aa_pass.h` | upscaling-engineer (algorithms), shader-engineer (HLSL) | experimental (spatial tier T1) |
 | pacing | `src/pacing` | *planned* | gpu-rendering-engineer | Phase 4-5 |
 | addon | `src/addon`, `sdk/` | *planned* C ABI | addon-developer | Phase 6 |
 | profiles / config | `src/config` | *planned* | ui-engineer | Phase 2-3 |
@@ -115,6 +116,45 @@ as soon as it is ready and the rest of that frame's schedule shifts by the same 
 limited only by the monitor refresh rate. When the GPU cannot keep up, frames are shown late (higher latency, and
 capture drops real frames latest-wins); the status note says so.
 
+### MoonSR temporal upscaling
+
+The temporal scaler takes the frame generator's newest real frame and backward motion field.
+It reprojects history, fills low-trust pixels with the single-frame seed, then performs area
+back-projection. The history target and the final destination are written separately. With
+sharpness enabled, a gamma intermediate feeds the final sharpening pass.
+
+Generated frames use the same seed through `RenderSingle`. At sharpness 0 the seed writes
+directly to the destination. With sharpening enabled it writes a temporary RGBA8 texture first.
+The Spatial seed loads the 4×4 reconstruction window directly. It shares the same filter
+arithmetic and 8-bit quantization between the generated-frame and history fallback shaders.
+The seed variants and fused accumulation experiments are selectable through the offline
+benchmark. Its history-protection trial stores reprojected lock lifetime, shading reference
+and two luma samples in a ping-pong RGBA8 texture. The tiled registration variant keeps the
+blur halo in compute group memory and writes directly to the reference texture. The
+harness evaluates per-pass GPU timestamps, flow end-point error and edge-step evidence
+outside the frame path. In experimental automatic sampling mode, a compute shader reduces
+edge-step evidence from the captured input into a three-texel texture. The update shader
+reads the first texel and uses area back-projection for uncertain input. The second records
+the classifier's evidence and reset flag for benchmark scoring. The pooled trial keeps an
+edge-count-weighted estimate in the third texel and restarts it on cuts. The adaptive-seed trial also
+writes a pair of indirect draw arguments. The history fallback and `RenderSingle` submit
+the existing MoonSR Spatial and covariance shaders with a zero instance count for the
+inactive filter. A confirmed point model enables covariance. The padded adaptive trial
+uses shared-memory back-projection and the same motion-gated point blend as the separate
+passes. The footprint trial applies the sampling decision when predicting each source
+sample, then uses the existing interpolated correction. The cached hull trial stores the
+current colour alongside the source residual tile so neighbouring output pixels can reuse
+the same anti-ringing samples. In the separate static-focus
+trial the same state texture tracks frame agreement and controls the stationary seed blend.
+Only benchmark scoring reads the state back.
+
+Motion trials fit an affine displacement to adjacent refined cells and optionally
+take a bounded per-pixel correction before the visibility test. HUD persistence
+can keep a long-term color statistic alongside the overlay mask. These paths
+remain benchmark options. The Lite trial skips the motion estimator and uses a
+spatial seed and its preceding unfiltered value. At zero sharpness, the display
+and next seed are written in the same draw.
+
 ### Smart parallax
 
 Smart parallax runs at its position in Load order and on its selected GPU. Legacy three-stage orders keep their
@@ -144,6 +184,47 @@ For generated frames, apply samples both real-frame height maps at their motion-
 available, blending by display phase. It uses the stronger protection from the two frames, keeps HUD protection in
 screen coordinates, and attenuates relief where motion is unreliable or discontinuous. The generated path uses
 unwarped height blending when matching motion is unavailable.
+
+### Anti-aliasing (spatial tier T1, experimental)
+
+Design note, contract and decisions: `documentation/research/anti_aliasing.md`. Implementation: `src/aa/aa_pass.h`,
+`shaders/aa/*`.
+
+The stage is `PipelineStage::AntiAliasing` with its own entry in `StageAdapters` (`antiAliasing`, token `aa` in
+`pipelineOrder`, `StageGpuAntiAliasing` in `AppSettings::stageGpu`). Its default position is **after upscaling** (owner's
+choice, 2026-11-25): the filter then works on output pixels and sees the scaler's result. The order stays user-editable;
+the default order is Neural rendering, Frame generation, Upscaling, Anti-aliasing, Relief.
+
+Load-order migration: `NormalizeOrder` keeps an existing order as it is, inserts Anti-aliasing immediately before
+Relief when it is missing, and appends any other missing default stage. Unknown, duplicate or empty orders fall back to
+the default, so a settings file written by 1.1.x (three stages) still loads and gains the new stage.
+
+T1 is a single-frame spatial pass, clean-room from the published detect / orient / average / blend method (no
+third-party shader code). Per pixel it reads the 3x3 luma neighbourhood and:
+
+1. rejects flat areas by a relative edge threshold with an absolute floor for dark scenes;
+2. rejects edges within about 5 degrees of vertical or horizontal, which the pixel grid already resolves exactly (this
+   also protects vertical and horizontal text stems);
+3. requires the two samples one texel across the edge to differ strongly and the centre to lie between them, and both
+   along-edge neighbours to stay on the centre's side, which rejects one-pixel strokes, corners and dense checker
+   textures.
+
+It then blends the centre towards the average of the two sides by a sub-pixel weight scaled by the strength and the
+quality preset (Performance / Balanced / Quality change the sample distance and the maximum weight). Alpha is written
+as 1.0; letterbox areas outside the game image are copied bit for bit. The pass is skipped entirely when disabled, so
+the off cost is zero.
+
+Settings live in the `[AntiAliasing]` section (mode, quality, strength, edge threshold, floor, text/HUD protection,
+auto-reduce, debug view) and are applied live through `Engine::SetAaSettings`; the AA page is "Anti-aliasing".
+
+Statistics: a compute pass samples a 128x128 grid of the game image, counts pixels that pass the same gates (plus a
+long-edge coherence test), and reads the counters back a few frames later through a staging ring (no stall).
+`edgeCoverage` is a hard-edge density, not a quality measure; it drives the optional "already anti-aliased" reduction
+(off by default) and the Home status text; `gpuMs` is the median of eight timestamp pairs. See KNOWN_ISSUES.md.
+
+When AA and Smart parallax both run, `ComposeAndPresent` applies AA first so relief shading is not blurred. A custom
+order with Relief before Anti-aliasing is therefore not honoured; that is a documented limitation, not a silent
+behaviour change.
 
 ### Original plan (Phase 4-5), kept for reference
 
@@ -185,6 +266,13 @@ triangle `common/fullscreen_vs.hlsl`. The viewport selects the destination recta
 
 `t0` source texture, `s0` linear clamp, `s1` point clamp. Samples must stay inside the source region.
 Details and the shader table: `shaders/README.md`.
+
+Anti-aliasing shaders do not use `ScaleConstants`. `shaders/aa/aa_spatial_ps.hlsl` reads
+`cbuffer AaConstants (b0)` — 64 bytes, mirrored by `AaConstants` in `src/aa/aa_pass.cpp` — with the full texture size
+and texel size, the game-image rectangle, effective strength, the two edge thresholds, output scale, quality preset,
+text-protection flag and debug view. `shaders/aa/aa_stats_cs.hlsl` reads `AaStatsConstants` (48 bytes) with the same
+rectangle and thresholds plus the sample grid. Both are compiled by `fxc` at build time and embedded like every other
+shader.
 
 ## 7. Addon framework (*planned*, Phase 6 — needs lead approval before it is frozen)
 

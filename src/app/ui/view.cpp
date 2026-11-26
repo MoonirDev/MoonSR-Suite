@@ -1,3 +1,5 @@
+#include <windows.h>
+#include <timeapi.h>
 #include "view.h"
 
 #include "core/log.h"
@@ -29,7 +31,7 @@ View::View(Gfx& gfx) : gfx_(gfx), canvas_(gfx), popup_(gfx) {
 
 View::~View() {
     popup_.onClosed = nullptr;
-    if (hwnd_ && animating_) KillTimer(hwnd_, kAnimTimerId);
+    if (hwnd_ && animating_) { KillTimer(hwnd_, kAnimTimerId); timeEndPeriod(1); }
     if (hwnd_ && blinking_) KillTimer(hwnd_, kBlinkTimerId);
 }
 
@@ -91,7 +93,7 @@ void View::SetShown(bool shown) {
     if (shown_ == shown) return;
     shown_ = shown;
     if (!shown) {
-        if (animating_ && hwnd_) KillTimer(hwnd_, kAnimTimerId);
+        if (animating_ && hwnd_) { KillTimer(hwnd_, kAnimTimerId); timeEndPeriod(1); }
         animating_ = false;
         pageT_ = 1.0f;
         SnapStates();
@@ -149,7 +151,10 @@ bool View::AnyAnimPending() const {
 void View::StartAnimTimer() {
     if (!hwnd_ || animating_ || !shown_) return;
     lastTick_ = GetTickCount64();
-    animating_ = SetTimer(hwnd_, kAnimTimerId, 16, nullptr) != 0;
+    // 10 ms frames; a 1 ms system timer period is held only while animating so the timer can run that fast.
+    timeBeginPeriod(1);
+    animating_ = SetTimer(hwnd_, kAnimTimerId, 10, nullptr) != 0;
+    if (!animating_) timeEndPeriod(1);
 }
 
 void View::SetNavStatus(const std::wstring& text, bool active) {
@@ -197,7 +202,7 @@ void View::OnAnimTimer() {
     }
     if (!again) {
         animating_ = false;
-        KillTimer(hwnd_, kAnimTimerId);
+        { KillTimer(hwnd_, kAnimTimerId); timeEndPeriod(1); }
     }
     Invalidate();
 }
