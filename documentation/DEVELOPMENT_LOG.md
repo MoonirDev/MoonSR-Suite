@@ -17,7 +17,7 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
   which is the diagnostic the bench reports.
 - Measured on the RTX 5060 (driver 621.14): synthetic slanted edges keep 0.437-0.584 of their strongest scanline step,
   exact 0/90 edges keep 1.000, one-pixel lines and 4 px texture are unchanged (stddev and high-pass 1.000), gradient 0.
-  Isolated pass: 0.154 ms at 1080p, 0.278 ms at 1440p (budget 0.3 / 0.6). RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU
+  Isolated pass: 0.152 ms at 1080p, 0.280 ms at 1440p (budget 0.3 / 0.6). RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU
   3.943 / 6.489 ms (correctness only; all checks pass with the same metrics).
 - Real recordings (isolated pass on the no-AA inputs): HD2 1.52 % of pixels changed, mean 0.21/255, high-pass energy
   0.989; Black Mesa 2.89 %, mean 0.53, energy 0.960. The previous FXAA build changed 15.7-17.7 % by a mean of about 2.9

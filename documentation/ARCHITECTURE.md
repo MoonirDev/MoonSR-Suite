@@ -216,7 +216,7 @@ resolution.
 
 Measured on the RTX 5060: slanted edges lose 42-56 % of their strongest scanline step, exactly vertical and horizontal
 edges keep their step (ratio 1.000), one-pixel lines and the synthetic text/HUD stress scene are unchanged, and a 4 px
-checker keeps 100 % of its luma contrast and high-pass energy. The isolated pass costs 0.154 ms at 1080p and 0.278 ms
+checker keeps 100 % of its luma contrast and high-pass energy. The isolated pass costs 0.152 ms at 1080p and 0.280 ms
 at 1440p (budget 0.3 / 0.6 ms); a real HD2 frame measures 0.19 ms. The pass is skipped entirely when disabled, so the
 off cost is zero and no resources are allocated. Full measurements and known limits: `BENCHMARKS.md` and
 `KNOWN_ISSUES.md`.

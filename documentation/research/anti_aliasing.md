@@ -704,8 +704,8 @@ Cost:
 
 | Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
 |---|---:|---:|---:|---:|
-| 1920x1080 | 0.154 ms | 1.144 ms | 3.943 ms | 0.3 ms |
-| 2560x1440 | 0.278 ms | 1.989 ms | 6.489 ms | 0.6 ms |
+| 1920x1080 | 0.152 ms | 1.144 ms | 3.943 ms | 0.3 ms |
+| 2560x1440 | 0.280 ms | 1.989 ms | 6.489 ms | 0.6 ms |
 
 The Radeon is a correctness check, not a performance target. All checks pass with the same reported metrics on the
 three adapters; no vendor-specific path is used. On a real HD2 frame the isolated pass measures 0.190-0.195 ms; in the
@@ -715,10 +715,10 @@ Real recordings (120 frames each, `%LOCALAPPDATA%\MoonSR\recordings\AAtests`; is
 
 | Recorded input | Hard-edge density | Pixels changed | Mean \|d\| | High-pass energy | Ratio | GPU |
 |---|---:|---:|---:|---|---:|---:|
-| Helldivers 2, AA off, frame 2180 | 1.4 % | 1.52 % | 0.21 | 52.67 -> 52.09 | 0.989 | 0.197 ms |
-| Helldivers 2, AA off, frame 2200 | 1.5 % | 1.52 % | 0.21 | 52.62 -> 52.04 | 0.989 | 0.196 ms |
-| Black Mesa, AA off, frame 1033 | 1.2 % | 2.89 % | 0.53 | 51.55 -> 49.47 | 0.960 | 0.190 ms |
-| Black Mesa, AA off, frame 1050 | 1.1 % | 2.90 % | 0.53 | 51.61 -> 49.54 | 0.960 | 0.189 ms |
+| Helldivers 2, AA off, frame 2180 | 1.4 % | 1.52 % | 0.21 | 52.67 -> 52.09 | 0.989 | 0.19 ms |
+| Helldivers 2, AA off, frame 2200 | 1.5 % | 1.52 % | 0.21 | 52.62 -> 52.04 | 0.989 | 0.19 ms |
+| Black Mesa, AA off, frame 1033 | 1.2 % | 2.89 % | 0.53 | 51.55 -> 49.47 | 0.960 | 0.19 ms |
+| Black Mesa, AA off, frame 1050 | 1.1 % | 2.90 % | 0.53 | 51.61 -> 49.54 | 0.960 | 0.19 ms |
 
 The previous FXAA-style build changed 15.7 % (HD2) and 17.7 % (Black Mesa) of pixels by a mean of 2.94 / 2.95 and
 removed 21-24 % of the high-pass energy. The new filter touches far fewer pixels but moves each one further where it
@@ -726,7 +726,7 @@ acts; the energy column shows it is not a blur. This is not a like-for-like qual
 truth and the recordings are not the same camera pose across AA states. The owner's eye decides.
 
 Presets on the same HD2 frame produce identical output because every run is shorter than 8 texels; only the cost
-differs: Performance 0.174 ms, Balanced 0.193 ms, Quality 0.205 ms. Quality is the setting for shallow (near-horizontal
+differs: Performance about 0.17 ms, Balanced 0.19 ms, Quality about 0.21 ms. Quality is the setting for shallow (near-horizontal
 or near-vertical) staircases whose run exceeds 12 texels.
 
 ### Honest limits

@@ -274,8 +274,8 @@ Still open:
   (0.03). No HDR or linear-light path.
 - Load order: when Anti-aliasing and Smart parallax both run, the engine always applies anti-aliasing first so relief
   shading is not blurred. A custom order with Relief before Anti-aliasing is not honoured.
-- GPU per stage is supported for the AA stage. Isolated pass on the reference hardware: RTX 5060 0.153 ms at 1080p and
-  0.277 ms at 1440p; RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU 3.943 / 6.489 ms. The iGPU is far over the RTX 5060
+- GPU per stage is supported for the AA stage. Isolated pass on the reference hardware: RTX 5060 0.152 ms at 1080p and
+  0.280 ms at 1440p; RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU 3.943 / 6.489 ms. The iGPU is far over the RTX 5060
   budget and is used for correctness only. The fixed three passes dominate on low-end GPUs, so the Performance preset
   does not make the filter cheap there.
 - Presets differ only in the run-search length (8 / 12 / 16 texels). On a 45-degree edge and on the tested HD2 frame

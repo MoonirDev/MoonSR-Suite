@@ -2567,7 +2567,11 @@ already smooth" option was removed because the number is a density, not a measur
 
 Self-tests: `moonsr_bench --selftest` and `moonsr_fgbench --selftest` pass (0 failures).
 
-## Anti-aliasing on real game frames (2026-11-26)
+## Anti-aliasing on real game frames (2026-11-26, FXAA build, historical)
+
+This section measured the FXAA-style spatial build. It is superseded by the T1 rebuild section at the end of
+this file; kept as the record of that build.
+
 
 Owner recordings, 120 frames each, `in_*` (captured input) and `out_*_real` (presented output) PNG pairs plus an
 `index.csv`:
@@ -2609,3 +2613,81 @@ Honest limits: the recordings are not the same camera pose across AA states, so 
 score against TAA/DLAA. There is no reference image and no ground truth, so no PSNR/SSIM claim is made. The filter is
 spatial: it cannot recover sub-pixel detail the game never rendered, it softens corner-rich patterns (2 px checker) by
 design, and it is not a substitute for temporal anti-aliasing.
+
+## Anti-aliasing T1 rebuild (2026-11-26)
+
+Hardware: Ryzen 9 7900X, 31 GB, NVIDIA GeForce RTX 5060 (driver 621.14, UMD 32.0.16.2114), Windows 11 build
+26300.9974. Comparison adapters: NVIDIA RTX A400 (same driver) and AMD Radeon 610M iGPU (driver 31.0.24002.92), the
+latter for correctness only. Commit `82f7985` (the AA rebuild). Settings: spatial mode, Balanced unless stated,
+strength 1.0, text and HUD protection on. Timings are the isolated `AaPass` plus its statistics dispatch, median of
+eight timestamp pairs on an otherwise idle GPU, not in-game cost.
+
+Commands:
+
+```
+build\aa-rebuild\bin\moonsr_bench.exe --aa
+build\aa-rebuild\bin\moonsr_bench.exe --aa --aa-quality performance|balanced|quality
+build\aa-rebuild\bin\moonsr_bench.exe --aa --aa-strength 0.5
+build\aa-rebuild\bin\moonsr_bench.exe --aa --adapter "RTX A400"        (see --list-adapters for the exact name)
+build\aa-rebuild\bin\moonsr_bench.exe --aa-image <recording>\in_2180.png
+```
+
+Synthetic scenes, 1280x720 (Balanced):
+
+| Scene | Before | After | Ratio | High-pass | Max diff | HUD changed | Check |
+|---|---:|---:|---:|---:|---:|---:|---|
+| edge 20 deg, strongest scanline step | 110.717 | 64.153 | 0.579 | 1.000 | 92 | - | pass |
+| edge 30 deg | 121.803 | 53.227 | 0.437 | 1.000 | 92 | - | pass |
+| edge 45 deg | 143.615 | 71.879 | 0.501 | 1.000 | 92 | - | pass |
+| edge 60 deg | 181.408 | 90.791 | 0.500 | 1.000 | 92 | - | pass |
+| edge 70 deg | 151.454 | 88.381 | 0.584 | 1.000 | 92 | - | pass |
+| exact 0 deg | 92.000 | 92.000 | 1.000 | 1.000 | 25 | - | pass |
+| exact 90 deg | 92.000 | 92.000 | 1.000 | 1.000 | 25 | - | pass |
+| one-pixel line grid | 225.000 | 224.969 | 1.000 | 1.000 | 37 | - | pass |
+| text/HUD over 2 px checker | 245.000 | 245.000 | 1.000 | 1.000 | 60 | 0.00 % | pass |
+| 4 px checker | 71.667 | 71.654 | 1.000 | 1.000 | 44 | - | pass |
+| 2 px checker (informational) | 71.683 | 71.568 | 0.998 | 1.001 | 61 | - | not judged |
+| smooth gradient | - | - | - | - | 0 | - | pass |
+
+The checks are: slanted edges reduce the strongest scanline step by at least 20 %; exact 0/90 edges change by less
+than 2 %; the 4 px checker keeps at least 95 % of its luma contrast and 90 % of its high-pass energy; one-pixel lines
+keep at least 90 % of their luma; text/HUD strokes keep at least 99 % of their mean luma, change in at most 1 % of
+their pixels and never move by more than 64/255; the gradient changes by at most 4/255. All pass. With
+`--aa-no-protect` the text scene changes 58.8 % of stroke pixels (mean 0.898) and fails, which is the expected
+diagnostic for the protection toggle.
+
+Cost:
+
+| Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
+|---|---:|---:|---:|---:|
+| 1920x1080 | 0.152 ms | 1.144 ms | 3.943 ms | 0.3 ms |
+| 2560x1440 | 0.280 ms | 1.989 ms | 6.489 ms | 0.6 ms |
+
+All checks pass with the same reported metrics on the three adapters. The Radeon is 7-26x the RTX 5060 and is not a
+performance target. Presets on the HD2 frame 2180: Performance 0.171 ms, Balanced 0.191 ms, Quality 0.204 ms; their
+output is identical on that frame because every run is shorter than 8 texels.
+
+Real recordings (120 frames each, isolated pass on the recorded no-AA inputs):
+
+| Recorded input | Hard-edge density | Pixels changed | Mean abs diff | High-pass energy | Ratio | GPU |
+|---|---:|---:|---:|---|---:|---:|
+| HD2, AA off, frame 2180 | 1.4 % | 1.52 % | 0.21 | 52.67 -> 52.09 | 0.989 | 0.194 ms |
+| HD2, AA off, frame 2200 | 1.5 % | 1.52 % | 0.21 | 52.62 -> 52.04 | 0.989 | 0.199 ms |
+| Black Mesa, AA off, frame 1033 | 1.2 % | 2.89 % | 0.53 | 51.55 -> 49.47 | 0.960 | 0.193 ms |
+| Black Mesa, AA off, frame 1050 | 1.1 % | 2.90 % | 0.53 | 51.61 -> 49.54 | 0.960 | 0.192 ms |
+
+The previous FXAA-style build changed 15.7 % (HD2) and 17.7 % (Black Mesa) of pixels by a mean of 2.94 / 2.95 and
+removed 21-24 % of the high-pass energy. The new filter touches fewer pixels but moves each one further where it acts;
+the energy column shows it is not a blur. This is not a like-for-like quality comparison: there is no ground truth,
+the recordings are not the same camera pose across AA states, and no PSNR/SSIM is claimed against TAA or DLAA.
+
+Live engine: `moonsr_cli --window "MoonSR Test Pattern" --seconds 8 --aa spatial --aa-quality balanced` on a
+1280x720 -> 1080p test pattern. 485 frames captured and presented, 59.8 fps, 0 drops, AA active, 0.117-0.124 ms per
+frame, clean stop to Idle. The page was rendered in Windows 11 Light, Windows 11 Dark, Retro and Retro Amber through
+`tools\ui_shots.ps1 -Pages aa -Themes light,dark,retro,retro-amber`.
+
+Self-tests: `moonsr_bench --selftest` and `moonsr_fgbench --selftest` pass (0 failures) at this commit.
+
+Honest limits: the pass is spatial; it cannot recover sub-pixel detail the game never rendered. Static HUD masking
+and temporal accumulation are not built. One-texel game features are protected rather than anti-aliased. The owner's
+same-scene in-game A/B is still pending, and no quality claim against the game's own AA is made.
