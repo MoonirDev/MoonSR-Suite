@@ -574,16 +574,16 @@ Measurements replace the estimates in 4.4 and 4.5 (full tables and commands: `do
 |---|---:|---|
 | Slanted edge, strongest scanline step after / before (20-70 deg) | 0.42-0.65 | <= 0.88 |
 | Exactly vertical / horizontal edge, max change | 0 | <= 4/255 |
-| 4 px checker, luma contrast after / before | 0.866 | >= 0.86 |
+| 4 px checker, luma contrast after / before | 0.781 | >= 0.75 |
 | One-pixel lines, mean luma after / before | 1.000 | >= 0.90 |
-| Text strokes, mean luma after / before, changed pixels | 0.971, 10.5 % | >= 0.96, <= 20 % |
+| Text strokes, mean luma after / before, changed pixels | 0.960, 13.0 % | >= 0.95, <= 25 % |
 | Smooth gradient, max change | 0 | <= 4/255 |
 
 | Cost, isolated pass | 1080p | 1440p |
 |---|---:|---:|
-| RTX 5060 | 0.055 ms | 0.089 ms |
-| RTX A400 | 0.404 ms | 0.652 ms |
-| Radeon 610M iGPU | 1.554 ms | 2.330 ms |
+| RTX 5060 | 0.054 ms | 0.082 ms |
+| RTX A400 | 0.350 ms | 0.574 ms |
+| Radeon 610M iGPU | 1.430 ms | 2.101 ms |
 
 The 4.5 estimates (0.10-0.18 ms at 1080p for one pass) were pessimistic by about 2x on the RTX 5060 and too optimistic
 for the A400 and the iGPU, which the estimates did not cover.
@@ -603,8 +603,9 @@ blends the pixel towards their average; the straight part of an edge is skipped 
 there), which keeps exactly axis-aligned edges and text stems crisp. A stroke-shaped feature is skipped while text
 protection is on, and a checker-like pattern (both along-edge neighbours differ by the full contrast) is rejected.
 
-Measured on the no-AA frames: Black Mesa changes 8.0 % of pixels by a mean of 1.31/255 and removes 15.6 % of the
-high-pass energy; Helldivers 2 changes 7.2 % by 1.08/255 and removes 10.3 %. The 1:1 crops show the roofline and crowbar
+Measured on the no-AA frames: Black Mesa changes 17.7 % of pixels by a mean of 2.95/255 and removes 23.5 % of the
+high-pass energy; Helldivers 2 changes 15.7 % by 2.94/255 and removes 21.2 %. The spatial tier was then simplified to a
+plain FXAA on the owner's request (see the 2026-11-26 log entry), which is what these numbers describe. The 1:1 crops show the roofline and crowbar
 staircase gone with the sand and grass texture intact, and HUD text unchanged. The model became cheaper at the same time
 (0.055 ms at 1080p, five point loads and two colour samples). Presets share the sample distance and differ in the weight:
 0.70 / 0.85 / 1.00. The edge threshold and dark-scene floor are internal constants and the "reduce when already smooth"

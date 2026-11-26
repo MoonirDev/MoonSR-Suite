@@ -4,6 +4,27 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing: simple FXAA spatial tier
+
+- Owner request after the morphological build: "replace the spatial method with a simple FXAA implementation for now".
+- `aa_spatial_ps.hlsl` is now a plain FXAA-style filter: luma cross, orientation from N/S vs E/W variation, average the
+  two sides, blend towards it with the preset weight (0.70 / 0.85 / 1.00). A one-texel ridge is skipped while text
+  protection is on; a straight axis-aligned run is skipped always. The along-edge term was measured and dropped: at a
+  staircase corner the along neighbours sit on the far side, so mixing them in pulls the colour past the two sides and
+  the step comes back (the strongest preset made the step larger).
+- Measured (Balanced, 1080p): slanted edges 0.42-0.65 of their strongest step, exact 0/90 bit-identical, thin lines
+  100 %, text stroke mean 96.0 % with 13 % changed, 4 px texture 78.1 % contrast, 2 px texture 16.5 % (informational),
+  gradient 0. Real frames: Black Mesa 17.7 % changed / mean 2.95 / energy 0.765, HD2 15.7 % / 2.94 / 0.788. Cost
+  0.054 / 0.082 ms at 1080p / 1440p (A400 0.35 / 0.57 ms, Radeon iGPU 1.43 / 2.10 ms).
+- Bench bounds adjusted to the FXAA trade-off: HUD stroke mean >= 95 %, changed <= 25 %, max <= 140; 4 px texture
+  contrast >= 0.75. Both are documented in BENCHMARKS.md with the reason.
+- Note recorded for the owner: DLAA is temporal (8-16 jittered samples per pixel with the game's motion vectors) and a
+  spatial filter cannot match it; a temporal tier using MoonSR's motion estimation is the only way to get that character
+  of result.
+- Verified: full build, `--aa` at all presets, both self-tests; 1:1 crops of the Black Mesa roofline and crowbar.
+
+---
+
 ## 2026-11-26 - Anti-aliasing rework: staircase reconstruction
 
 - Third in-game report (Black Mesa, `BM_1080p_MoonSR_AA_2`): edges still rough. The measured filter was working

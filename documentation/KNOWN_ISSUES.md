@@ -245,23 +245,25 @@ Still open:
 - Real-game material exists: 120-frame recordings of Helldivers 2 (game AA off, TAA, DLAA, two MoonSR AA runs) and
   Black Mesa (game AA off, two MoonSR AA runs), measured in BENCHMARKS.md. Two games, no ground truth, and the runs are
   not the same camera pose, so there is no objective quality score and no head-to-head against the game's TAA.
-- The filter was reworked after three in-game reports that it was not visible. It now blends the pixels where an edge
-  turns inside the pixel, sampling the two sides along the axis the edge steps on; the straight part of an edge is
-  skipped, which is what keeps exactly axis-aligned edges and text stems crisp. On the Black Mesa no-AA frame it changes
-  8.0 % of pixels by a mean of 1.31/255 and removes 15.6 % of the high-pass energy; on the HD2 frame 7.2 % / 1.08 / 10.3 %.
+- The spatial tier is now a simple FXAA-style filter (the owner asked for it directly after the morphological build
+  still left visible steps). On the Black Mesa no-AA frame it changes 17.7 % of pixels by a mean of 2.95/255 and removes
+  23.5 % of the high-pass energy; on HD2 15.7 % / 2.94 / 21.2 %. It is visibly stronger than the morphological build and
+  softer: a 4 px texture keeps 78 % of its contrast and a 2 px checker is flattened.
+- FXAA-class filtering cannot match native DLAA, which accumulates 8-16 jittered samples per pixel over time with the
+  game's motion vectors. A temporal tier using MoonSR's own motion estimation is the only path to that character of
+  result; it is not built.
 - Balanced is the default; Quality uses the same sample distance with a full blend towards the two-side average and is
 - Balanced is the default; Quality uses the same sample distance with a full blend towards the two-side average and is
   the setting to try when Balanced still looks too subtle. Performance leaves more aliasing.
 - The edge threshold (10 %) and dark-scene floor (3 %) are internal constants now, and the "reduce when already smooth"
   option was removed: the coverage number is a density, not a measure of how well the edges are resolved, so it is shown
   on Home but never changes the strength.
-- Text/HUD protection is geometric, not a HUD mask: a stroke-shaped feature (one-texel ridge with the same background on
-  both sides) is skipped while the toggle is on and blended when it is off. Straight stems and UI rules never blend even
-  with protection off, because the edge does not step there. Glyph corners are legitimate staircase pixels and do blend:
-  synthetic text keeps 97.1 % of its stroke mean with 10.5 % of stroke pixels changing. Glyph stems two or more pixels
-  wide are not detected as ridges and can soften.
-- A 4 px checker keeps 86.6 % of its luma contrast; a 2 px checker loses most of it because every one of its pixels is a
-  staircase corner. Real fine textures (sand, grass, cloth) keep their structure in the 1:1 crops.
+- Text/HUD protection is geometric, not a HUD mask: a one-texel ridge is skipped while the toggle is on and blended when
+  it is off, and straight stems and UI rules never blend because the edge does not step there. Synthetic text keeps
+  96.0 % of its stroke mean with 13 % of stroke pixels changing (worst pixel 119/255 at a glyph corner). Small in-scene
+  labels (keyboard keys, signs) do get softer - that is the FXAA trade-off.
+- A 4 px checker keeps 78 % of its luma contrast and a 2 px checker is flattened. Real fine textures (sand, grass,
+  cloth) keep their structure in the 1:1 crops.
 - The "already anti-aliased" detector counts hard steps on a 128x128 sample grid with a long-edge coherence test. It
   reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the one-pixel text and 2 px checker scenes, and 1.0 % on a real
   already-anti-aliased screenshot. That is a hard-edge *density*, not a measure of how well the edges are resolved, so

@@ -199,30 +199,23 @@ Load-order migration: `NormalizeOrder` keeps an existing order as it is, inserts
 Relief when it is missing, and appends any other missing default stage. Unknown, duplicate or empty orders fall back to
 the default, so a settings file written by 1.1.x (three stages) still loads and gains the new stage.
 
-Anti-aliasing is a single-frame spatial pass, clean-room from the published detect / reconstruct method (no third-party
-shader code). It recognises the pixels where an edge *turns inside the pixel* (a staircase step) and gives them the value
-an area resolve would have produced - the average of the two sides. Per pixel it reads the 3x3 luma neighbourhood and:
+Anti-aliasing is a single-frame spatial pass: a simple FXAA-style filter, written clean-room from the published
+description (no third-party shader code). Per pixel it reads the 3x3 luma neighbourhood and:
 
 1. rejects flat areas and smooth gradients by a relative edge threshold (10 % of the local maximum) with an absolute
    floor (3 %) for dark scenes;
-2. decides which axis the edge steps on from the larger of the N/S and E/W luma variation, and samples the two sides
-   **along that axis** (N/S or E/W). Sampling along the gradient normal instead lands on the diagonal neighbour at 45
-   degrees, which sits on the same side of a staircase, so the sides look equal and nothing is blended - that was the
-   reason the first two builds were almost invisible;
-3. leaves the straight part of an edge alone: if the luma variation *along* the edge is below 12 % of the local range,
-   the edge runs exactly along the pixel grid and is already resolved. Only where it steps does the along-edge variation
-   appear;
-4. rejects high-frequency texture: when both along-edge neighbours differ from the centre by the full contrast (a
-   checkerboard or a dot pattern), the pixel is not an edge.
-
-A thin one-texel ridge (railing, bezel or specular highlight) is an L-shaped junction like a glyph stem, so it is skipped
-while "Protect text and thin lines" is on and blended when it is off. Straight stems and UI rules never blend regardless,
-because of (3).
+2. decides which axis the edge steps on from the larger of the N/S and E/W luma variation, and averages the two sides
+   along that axis (N/S or E/W). Sampling along the gradient normal, as the first builds did, lands on the diagonal
+   neighbour at 45 degrees - the same side of a staircase - so the sides look equal and nothing is blended;
+3. leaves a straight, axis-aligned run alone: if the luma variation along the edge is below 10 % of the local range, the
+   edge is already resolved (this is what keeps text stems and UI rules crisp);
+4. skips a one-texel ridge (railing, bezel highlight, glyph stem - both sides the same background) while "Protect text
+   and thin lines" is on.
 
 The centre is blended towards the two-side average by `strength * weight`, where the weight is 0.70 / 0.85 / 1.00 for
-Performance / Balanced / Quality, scaled by how far the centre sits from that average (half at a clean staircase step).
-Alpha is written as 1.0; letterbox areas outside the game image are copied bit for bit. The pass is skipped entirely
-when disabled, so the off cost is zero.
+Performance / Balanced / Quality. Alpha is written as 1.0; letterbox areas outside the game image are copied bit for bit.
+The pass is skipped entirely when disabled, so the off cost is zero. Known cost of this shape: a 4 px checker keeps 78 %
+of its contrast and a 2 px checker is flattened - the standard FXAA trade-off, recorded in KNOWN_ISSUES.md.
 
 Settings live in the `[AntiAliasing]` section (mode, quality, strength, text/HUD protection) and are applied live through
 `Engine::SetAaSettings`; the AA page is "Anti-aliasing". The threshold and floor are internal constants with no UI. The

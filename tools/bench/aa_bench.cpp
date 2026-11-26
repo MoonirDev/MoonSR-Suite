@@ -461,7 +461,7 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
             r.before = LumaStdDev(s.img);
             r.after = LumaStdDev(out);
             r.ratio = r.before > 0.0 ? r.after / r.before : 1.0;
-            r.ok = s.kind == Kind::TextureInfo || r.ratio >= 0.86;
+            r.ok = s.kind == Kind::TextureInfo || r.ratio >= 0.75;
             break;
         case Kind::Lines: {
             // One-pixel line pixels are every 8th column/row; measure their mean luma.
@@ -488,7 +488,7 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
             r.before = before;
             r.after = after;
             r.ratio = before > 0.0 ? after / before : 1.0;
-            r.ok = r.hudChangedPct <= 20.0 && r.ratio >= 0.96 && r.hudMaxDiff <= 96;
+            r.ok = r.hudChangedPct <= 25.0 && r.ratio >= 0.95 && r.hudMaxDiff <= 140;
             break;
         }
         case Kind::Gradient:

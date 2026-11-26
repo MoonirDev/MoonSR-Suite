@@ -2533,9 +2533,9 @@ Synthetic scenes, 1280x720 hard (aliased) edges, Balanced, strength 1.0, text pr
 | exact 0 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
 | exact 90 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
 | thin lines (mean stroke luma) | 225.000 | 225.000 | 1.000 | 84 (off-line pixels) | pass |
-| text / HUD (mean stroke luma) | 245.000 | 237.971 | 0.971 | 87, 10.5 % of pixels changed | pass |
-| 4 px texture (luma contrast) | 71.667 | 62.085 | 0.866 | 82 | pass |
-| 2 px texture (luma contrast, informational) | 71.683 | 40.335 | 0.563 | 82 | - |
+| text / HUD (mean stroke luma) | 245.000 | 235.132 | 0.960 | 119, 13.0 % of pixels changed | pass |
+| 4 px texture (luma contrast) | 71.667 | 55.940 | 0.781 | 88 | pass |
+| 2 px texture (luma contrast, informational) | 71.683 | 11.816 | 0.165 | 88 | - |
 | gradient | - | - | - | 0 | pass |
 
 Interpretation:
@@ -2554,8 +2554,8 @@ GPU time (isolated pass + statistics dispatch, median of eight timestamp pairs o
 
 | Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
 |---|---:|---:|---:|---:|
-| 1920x1080 | 0.055 ms | 0.404 ms | 1.554 ms | 0.3 ms |
-| 2560x1440 | 0.089 ms | 0.652 ms | 2.330 ms | 0.6 ms |
+| 1920x1080 | 0.054 ms | 0.350 ms | 1.430 ms | 0.3 ms |
+| 2560x1440 | 0.082 ms | 0.574 ms | 2.101 ms | 0.6 ms |
 
 The pass got cheaper when the algorithm changed from eight bilinear run taps to five point loads and two colour samples.
 All quality checks produce the same output on the three adapters; the Radeon can differ in the last bit of the bilinear
@@ -2581,19 +2581,17 @@ The numbers are the isolated pass on the recorded **inputs** (no upscaling or sh
 
 | Recorded input | Coverage | Pixels changed | Mean \|d\| | High-pass energy | Ratio | GPU |
 |---|---:|---:|---:|---|---:|---:|
-| Black Mesa, AA off | 1.2 % | 7.98 % | 1.31 | 51.62 -> 43.56 | 0.844 | 0.050 ms |
-| Black Mesa, MoonSR AA run input | 1.7 % | 12.15 % | 1.73 | 56.40 -> 49.58 | 0.879 | 0.052 ms |
-| Helldivers 2, AA off | 1.9 % | 7.19 % | 1.08 | 50.99 -> 45.73 | 0.897 | 0.047 ms |
-| Helldivers 2, TAA | 1.6 % | 5.96 % | 0.59 | 27.30 -> 24.83 | 0.909 | 0.046 ms |
-| Helldivers 2, DLAA | 2.1 % | 6.68 % | 0.79 | 35.46 -> 32.14 | 0.906 | 0.046 ms |
+| Black Mesa, AA off | 1.2 % | 17.68 % | 2.95 | 51.62 -> 39.48 | 0.765 | 0.047 ms |
+| Black Mesa, MoonSR AA run input | 1.7 % | 25.35 % | 4.32 | 56.40 -> 44.49 | 0.789 | 0.045 ms |
+| Helldivers 2, AA off | 1.9 % | 15.72 % | 2.94 | 50.99 -> 40.20 | 0.788 | 0.047 ms |
 
-Presets on the Black Mesa frame (same sample distance; the weight sets how far the pixel moves):
+Presets on the synthetic ladder (the same sample distance; the weight sets how far the pixel moves):
 
-| Preset | Weight | Pixels changed | Mean \|d\| | Max change | Energy ratio |
-|---|---:|---:|---:|---:|---:|
-| Performance | 0.70 | 11.83 % | 1.43 | 92 | 0.880 |
-| Balanced (default) | 0.85 | 12.15 % | 1.73 | 112 | 0.879 |
-| Quality | 1.00 | 12.40 % | 2.04 | 132 | 0.888 |
+| Preset | Weight | Edge 45 deg step | Text stroke mean | 4 px texture contrast |
+|---|---:|---:|---:|---:|
+| Performance | 0.70 | 0.348 | 0.967 | 0.796 |
+| Balanced (default) | 0.85 | 0.424 | 0.960 | 0.781 |
+| Quality | 1.00 | 0.501 | 0.953 | 0.777 |
 
 All three presets pass every synthetic check.
 
