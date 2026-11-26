@@ -25,4 +25,3 @@ add_executable(moonsr_bench
     aa_suite.h
 )
 target_link_libraries(moonsr_bench PRIVATE moonsr_upscale moonsr_relief moonsr_aa moonsr_framegen moonsr_gpu moonsr_core windowscodecs ole32 gdi32 user32 advapi32)
-

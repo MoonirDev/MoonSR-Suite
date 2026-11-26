@@ -998,12 +998,21 @@ int RunAaSuite(const AaSuiteOptions& o, const moonsr::AdapterInfo& adapter) {
             r.scenes.push_back(MeasureScene(s, out));
         }
         if (o.timing && cost1080.pass && cost1440.pass) {
-            cost1080.pass->Reset();
-            cost1440.pass->Reset();
-            cost1080.Run(60, c.Settings());
-            cost1440.Run(60, c.Settings());
-            r.ms1080 = cost1080.pass->Stats().gpuMs;
-            r.ms1440 = cost1440.pass->Stats().gpuMs;
+            // Three independent medians; a single clock/thermal spike must not decide the ranking.
+            auto measure = [](Harness& h, const AaSettings& s) {
+                h.pass->Reset();
+                h.Run(20, s);
+                double v[3]{};
+                for (double& x : v) {
+                    h.pass->Reset();
+                    h.Run(45, s);
+                    x = h.pass->Stats().gpuMs;
+                }
+                std::sort(v, v + 3);
+                return v[1];
+            };
+            r.ms1080 = measure(cost1080, c.Settings());
+            r.ms1440 = measure(cost1440, c.Settings());
             if (r.ms1080 > kBudget1080Ms) {
                 r.pass = false;
                 r.fail += "1080p budget; ";
@@ -1027,7 +1036,14 @@ int RunAaSuite(const AaSuiteOptions& o, const moonsr::AdapterInfo& adapter) {
 
     std::sort(results.begin(), results.end(), [](const CandidateResult& a, const CandidateResult& b) {
         if (a.pass != b.pass) return a.pass > b.pass;
-        return a.score > b.score;
+        if (std::abs(a.score - b.score) > 0.05) return a.score > b.score;
+        const double ca = a.ms1080 + a.ms1440, cb = b.ms1080 + b.ms1440;
+        if (std::abs(ca - cb) > 0.02) return ca < cb;
+        const auto distance = [](const Candidate& c) {
+            return std::abs(c.threshold - 0.10f) + 0.1f * std::abs(c.quality - 1) +
+                   0.1f * std::abs(c.strength - 1.0f);
+        };
+        return distance(a.candidate) < distance(b.candidate);
     });
     const CandidateResult& top = results.front();
     const CandidateResult* def = nullptr;
