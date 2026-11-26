@@ -14,6 +14,7 @@
 //              [--relief off|shading|parallax|motion] [--relief-strength 0..1] (Smart parallax, experimental)
 //              [--relief-parallax-px 0..3] [--relief-view none|split|height|normals|protection|offset|depth]
 //              [--aa off|spatial|directional|temporal] [--aa-strength 0..1] [--aa-quality performance|balanced|quality]
+//              [--aa-edge-threshold 0.02..0.5] [--aa-edge-floor 0..0.2] [--aa-no-protect]
 //              [--aa-view none|edges|weights|split] (Anti-aliasing, experimental)
 //   moonsr_cli --relief-selftest [--adapter <name substring>]
 //              (Smart parallax identity check: Analyse + Apply at strength 0 on a 1920x1080 noise image into a BGRA8 and
@@ -229,6 +230,8 @@ int wmain(int argc, wchar_t** argv) {
     bool reliefSelfTest = false;
     std::wstring aaMode = L"off", aaQuality = L"balanced", aaView = L"none";
     float aaStrength = -1.0f; // < 0: the AaSettings default
+    float aaEdgeThreshold = -1.0f, aaEdgeFloor = -1.0f; // < 0: the AaSettings defaults
+    bool aaProtect = true;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
@@ -273,6 +276,9 @@ int wmain(int argc, wchar_t** argv) {
         else if (a == L"--aa") aaMode = Lower(next());
         else if (a == L"--aa-strength") aaStrength = static_cast<float>(_wtof(next().c_str()));
         else if (a == L"--aa-quality") aaQuality = Lower(next());
+        else if (a == L"--aa-edge-threshold") aaEdgeThreshold = static_cast<float>(_wtof(next().c_str()));
+        else if (a == L"--aa-edge-floor") aaEdgeFloor = static_cast<float>(_wtof(next().c_str()));
+        else if (a == L"--aa-no-protect") aaProtect = false;
         else if (a == L"--aa-view") aaView = Lower(next());
         else if (a == L"--compare") compare = true;
         else {
@@ -398,6 +404,9 @@ int wmain(int argc, wchar_t** argv) {
     }
     cfg.aa.mode = aaRequested;
     if (aaStrength >= 0.0f) cfg.aa.strength = std::clamp(aaStrength, 0.0f, 1.0f);
+    if (aaEdgeThreshold >= 0.0f) cfg.aa.edgeThreshold = std::clamp(aaEdgeThreshold, 0.02f, 0.5f);
+    if (aaEdgeFloor >= 0.0f) cfg.aa.edgeThresholdMin = std::clamp(aaEdgeFloor, 0.0f, 0.2f);
+    cfg.aa.protectText = cfg.aa.protectHud = aaProtect;
     cfg.aa.quality = aaQuality == L"performance" ? AaQuality::Performance
                    : aaQuality == L"quality"     ? AaQuality::Quality
                                                  : AaQuality::Balanced;

@@ -763,3 +763,145 @@ or near-vertical) staircases whose run exceeds 12 texels.
 - **D18: Temporal remains deferred.** The frame generator's field is 8-pixel cells. A temporal AA tier needs a
   per-pixel refinement, a ghosting bound on thin features, and a static-HUD mask before it can be offered. Shipping a
   temporal mode on the block field alone would ghost exactly the text and railings this tier protects.
+
+---
+
+## Appendix: spatial options compared for the capture-only path (2026-11-26)
+
+This appendix closes the survey for the current tier. It compares the options that can run on a finished capture, with
+no depth, motion vectors, jitter or MSAA samples, on the D3D11 FL 11_0 / SM 5.0 baseline. Costs marked [C] were measured
+this session; [E] are estimates and must not be copied into BENCHMARKS.md; [M] is prior knowledge not re-fetched.
+
+### A.1 Options
+
+| Option | Inputs it needs | Structure | Strength | Weakness on captured frames | Licence / use |
+|---|---|---|---|---|---|
+| **FXAA 3.11** | Luma (one frame) | One pass: luma edge test, gradient orientation, bounded search, blend | Cheapest visible option; simple | Blends the whole edge band; softens 1-px text and fine texture; weak on near-horizontal staircases | NVIDIA GameWorks BSD-3-Clause [M]; original blog release effectively public domain [M]. We did not copy it; the earlier FXAA-style build was clean-room |
+| **SMAA 1x** | Luma or colour (one frame) | Three passes: edge mask, blending weights using a precomputed area/search LUT, neighbourhood blend | Better diagonals and thin-shape handling than FXAA; corner detection | Needs the area/search textures (or a generated equivalent); text still softens without a history mask; 2-3x the passes | MIT (Jimenez et al. 2013 demo, including its data) [C: local reference LICENSE]; not bundled |
+| **SMAA T2x** | Luma/colour + **velocity + sub-pixel jitter** | SMAA 1x plus temporal resolve | Near-2x supersampling on edges | The capture path has neither jitter nor per-pixel velocity; block flow ghosts thin features | MIT [C]; not applicable to the universal path |
+| **CMAA2** | Luma/colour (one frame) | Compute: edge/line queue, local-contrast adaptation, shape processing | Good quality/cost on Intel; handles thin lines | Compute queue and more complex than the 3-pass PS path; cross-vendor cost unverified | MIT (Intel) [M]; not built |
+| **MLAA / run-length** | Luma (one frame) | Edge mask, run search along the edge, coverage from the run shape | Straight runs untouched; good text/texture behaviour; no lookup data | Shallow staircases get small coverage; diagonal corners need care | Paper (Reshetov 2009) [M]; **this is the shipped T1**, original HLSL |
+| **Edge-directed single pass** (the earlier MoonSR build) | Luma | One pass, N/S vs E/W axis, two-side average | 0.054 ms at 1080p [C] | The owner reported it was not visible in three games; it softens texture and text | Original, superseded |
+| **TAA** | Jitter + per-pixel motion vectors (+ depth) | Reproject history, clamp, accumulate | DLAA-like edge stability when the data exists | No jitter or vectors on the capture path; 8-px block flow cannot follow text or railings; ghosting | Common industry practice [M]; research tier only |
+| **DLAA** | NVIDIA DLSS runtime + Tensor Cores | Neural temporal resolve | Best-in-class edge stability | Vendor-specific hardware and runtime, forbidden as a requirement; weights/runtime not bundled | Proprietary [M]; not used |
+
+### A.2 Quality vs cost on our budget
+
+The budget is <= 0.3 ms at 1080p and <= 0.6 ms at 1440p on the RTX 5060, one isolated pass at output resolution. The
+shipped T1 measures 0.152 / 0.280 ms [C]. The earlier one-pass build measured 0.054 / 0.082 ms [C] but failed the
+owner's visibility test. SMAA 1x is estimated at 0.18-0.30 / 0.32-0.55 ms [E] for three passes plus LUT sampling; CMAA2
+is unknown [U] and likely similar or higher. Both fit the budget on the RTX 5060 but not on the A400/iGPU without a
+quality tier. The T1 result passes every synthetic check at 0.152 ms, so there is headroom for a Directional (SMAA-style)
+tier later; it is not justified until the owner's real-game A/B says the current diagonals are insufficient.
+
+### A.3 Text, HUD and fine texture
+
+- FXAA blends every detected edge, including one-texel strokes; the earlier build changed 13 % of the synthetic text
+  stroke pixels [C].
+- SMAA's corner detection and area lookup reduce corner bleeding, but without a static-overlay mask a glyph corner is
+  still a small staircase; measured evidence is not available in-tree.
+- The shipped T1 computes a sign-based one-texel-stroke flag in the edge pass, dilates it by one texel in the weights
+  pass and drops every coverage weight there. On the text-over-checker stress scene 0 % of stroke pixels change [C].
+  One-texel game features are protected for the same reason.
+- A 4 px checker keeps 100 % of its luma contrast and high-pass energy; a 2 px checker is effectively preserved
+  (0.998 / 1.001) [C]. Fine texture is not used as an AA target.
+- Static HUD masking is not in this tier. It needs history (or the frame generator's `staticMask`) and is deferred; the
+  two page toggles currently drive the same geometric stroke guard.
+
+### A.4 "Already anti-aliased" detection
+
+- The shipped statistics pass samples a 128x128 grid and counts long, slanted, hard one-pixel steps with a 2/4-texel
+  coherence test and a centre-versus-two-side deviation of at least 0.25. On the real recordings it reads 1.1-1.5 %;
+  on synthetic slanted edges 0.0-0.1 % [C].
+- That is a **hard-edge density**, not a quality score. A frame with one aliased silhouette reads lower than a
+  text-heavy frame with smooth text. It is shown on Home and never changes the strength.
+- A useful detector would compare one-pixel and two-pixel transition shares, but it needs ground truth to calibrate and
+  must never silently disable the filter. The decision remains "display, do not act" (D12, D15).
+
+### A.5 Where the stage belongs
+
+| Position | Runs per | Resolution | Pros | Cons |
+|---|---|---|---|---|
+| Before upscaling | real frame | game | Cheapest; the upscaler sees clean edges; generated frames inherit it | Cannot fix upscaler ringing; edge width is in game pixels; modifies the generator's input |
+| Before frame generation | real frame | game | Generated frames inherit AA; one cost per real frame | Same input concern for the motion estimator; after the current default order it is the same position as "before upscaling" |
+| **After upscaling (default)** | displayed frame | output | Cleans the scaler output and residual aliasing at the pixels the viewer sees | Cost multiplies with the frame-generation multiplier; needs an output-resolution pass |
+| After frame generation, before upscaling | displayed frame | game | None over "before upscaling" | More calls for the same resolution; excluded by the load-order meaning |
+
+The owner chose **after upscaling** on 2026-11-25. The stage remains orderable; the engine honours the position for
+AA and relief except that `ComposeAndPresent` always applies AA before relief. A custom order with relief before AA is
+not honoured (documented).
+
+### A.6 Interactions
+
+- **Neural rendering:** if AA runs before NR, the model sees filtered input; if after, AA cleans the model's output.
+  The default order is NR, FG, upscaling, AA, relief, so NR sees the original capture.
+- **MoonSR temporal upscaling (ALSR):** after upscaling, AA cleans the reconstruction; before, it removes high-frequency
+  input the reconstruction could use. There is no automatic reduction when ALSR is selected; the user chooses by order.
+- **Smart parallax:** AA runs first, so relief shading is not filtered. Relief derives height from the image; AA before
+  relief removes a little of that signal, but relief's band-pass is at a larger scale than the AA correction.
+- **A/B compare:** left half is the raw capture, right half the final image. Edge-mask/blend-weight views are CLI tools
+  (`moonsr_cli --aa-view edges|weights`); the split view is also A/B compare.
+
+### A.7 Contract as shipped (for owner confirmation)
+
+The contract was already in the tree from the 2026-11-25 approval; this rebuild kept it unchanged. It is repeated here
+so the owner can confirm it without reading headers.
+
+```cpp
+enum class AaMode : uint32_t { Off = 0, Spatial = 1, Directional = 2, Temporal = 3 };
+enum class AaQuality : uint32_t { Performance = 0, Balanced = 1, Quality = 2 };
+enum class AaDebugView : uint32_t { None = 0, EdgeMask, BlendWeight, Split };
+
+struct AaSettings {
+    AaMode mode = AaMode::Off;          // enable + tier
+    AaQuality quality = AaQuality::Balanced;
+    float strength = 1.0f;              // 0..1
+    float edgeThreshold = 0.10f;        // relative luma contrast, 0.02..0.5
+    float edgeThresholdMin = 0.03f;     // absolute floor for dark scenes, 0..0.2
+    bool protectText = true;
+    bool protectHud = true;
+    AaDebugView debugView = AaDebugView::None;
+    bool operator==(const AaSettings&) const = default;
+};
+```
+
+- **Engine:** `EngineConfig::aa`; `Engine::SetAaSettings`; `EngineStats::{aaActive, aaMode, aaEdgeCoverage,
+  aaStrength, aaNote, aaGpuMs}`; `PipelineStage::AntiAliasing`; `StageAdapters::antiAliasing`; token `aa` in
+  `pipelineOrder`.
+- **Persistence:** `[AntiAliasing]` `Enabled`, `Mode`, `Quality`, `StrengthPercent`, `ProtectText`, `ProtectHud`.
+  Files without the section load off / Balanced / 100 % / protection on. Old 3- and 4-stage orders load and gain the
+  missing stage before relief; `NormalizeOrder` appends, never resets.
+- **Placement:** default after upscaling, before relief; user-orderable; per-stage GPU.
+- **UI:** enable, method, quality, strength, protect text, protect HUD. The threshold and floor are internal constants
+  (the owner removed those sliders on 2026-11-26 because they invited misconfiguration). The debug views are developer
+  tools, CLI-only, as requested in the same change.
+- **Headless:** `moonsr_cli --aa off|spatial|directional|temporal`, `--aa-strength`, `--aa-quality`,
+  `--aa-edge-threshold`, `--aa-edge-floor`, `--aa-no-protect`, `--aa-view`.
+- **Off:** the engine does not create `AaPass`; no textures, buffers, queries or shaders for the stage are allocated,
+  so the disabled cost is zero.
+
+### A.8 Decisions
+
+| ID | Decision | Status |
+|---|---|---|
+| D1 | Clean-room spatial filter from published descriptions; no third-party shader code | Shipped |
+| D2 | Default position after upscaling, before relief; orderable | Shipped (owner's 2026-11-25 choice) |
+| D3 | Load-order migration appends missing stages; explicit `StageAdapters` entry; `aa` token | Shipped |
+| D4 | Off by default; opt-in like Smart parallax | Shipped |
+| D5 | Spatial, Balanced, strength 1.0, threshold 0.10, floor 0.03 | Shipped; thresholds internal in UI |
+| D6 | Measure sharpening interaction; do not silently change sharpness | Open (default order gives AA the scaler's sharpened output) |
+| D7 | Text protection on by default, toggle exposed | Shipped |
+| D8 | AA together with MoonSR temporal upscaling allowed and noted; no auto-off | Shipped; auto-reduce removed |
+| D9 | Temporal tier deferred | Deferred |
+| D10 | `src/aa/` owned by upscaling-engineer (algorithms) + shader-engineer (HLSL) | Shipped |
+| D11 | Page named "Anti-aliasing"; modes labelled experimental | Shipped |
+| D12 | No automatic quality drop; show the measured time | Shipped |
+| D13 | Rebuild T1 as pattern-based morphological (run-length coverage) | Shipped |
+| D14 | Endpoint falloff `0.5 / sqrt(L)` (exact area is `1/(2L)`) | Shipped; revisit on owner A/B |
+| D15 | Text/HUD protection is a sign-based 1-texel stroke mask, dilated 1 texel | Shipped; static HUD mask deferred |
+| D16 | Default position stays after upscaling | Shipped |
+| D17 | Defaults Balanced, 100 %, protections on; Quality only lengthens the run search | Shipped |
+| D18 | Temporal remains deferred until per-pixel motion refinement, a ghosting bound and a static-HUD mask exist | Deferred |
+
+The open decisions are the owner's: D6 (sharpening interaction), D14 (shallow-edge falloff), D18 (temporal), and the
+release version bump.
