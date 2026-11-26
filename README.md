@@ -1,6 +1,6 @@
 # MoonSR Suite
 
-**Version 1.1.4**
+**Version 1.2.0**
 
 MoonSR brings upscaling, frame generation, and neural rendering (plus more to come) to any game, program or window.
 It then shows the result in a borderless window at monitor resolution. It runs on Windows 10/11 and works across 
@@ -41,7 +41,8 @@ It is an experimental personal project. Quality and speed claims come only from 
   [Smart parallax design](documentation/research/screen_space_relief.md).
 - **Anti-aliasing (experimental):** a spatial filter that finds the ends of hard edge runs and reconstructs their
   coverage, leaving straight edges, text, HUD strokes and fine texture alone. Only the spatial tier exists; the other
-  modes fall back to it. It is off by default, sits after upscaling in Load order, and can run on its own GPU. See the
+  modes fall back to it. It is off by default, sits after upscaling in Load order, and can run on its own GPU. A
+  ground-truth benchmark (`moonsr_bench --aa-suite` / `--aa-sweep`) ranks settings and writes a visual review pack. See the
   [anti-aliasing design note](documentation/research/anti_aliasing.md).
 - **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
   ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.
@@ -105,6 +106,13 @@ Binaries are written to `build\main\bin`:
   tests in `tests/`.
 
 ## Releases
+
+- **1.2.0** (2026-11-26): adds the experimental Anti-aliasing stage to Load order (after upscaling by default) with
+  its own page, Home status, per-stage GPU and text/HUD/thin-line protection. The spatial filter is a pattern-based
+  morphological pass that only touches staircase ends; a 4 px texture keeps its contrast and high-pass energy. The
+  source tree also gains a ground-truth benchmark suite and automated settings sweep (`moonsr_bench --aa-suite` /
+  `--aa-sweep`) with a visual review pack, measured on Helldivers 2, Black Mesa and ATLYSS. Anti-aliasing stays off by
+  default.
 
 - **1.1.4** (2026-11-25): Added a permanent explanation under About in the Neural rendering tab. Replaced the Settings switch for restoring dismissed notices with a button.
 
