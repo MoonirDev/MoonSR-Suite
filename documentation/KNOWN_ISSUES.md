@@ -249,6 +249,10 @@ Still open:
   same character and camera. They are at different in-game times, so only the isolated pass on the no-AA capture and the
   per-image edge metrics are comparable. The game's 8x MSAA is smoother on geometry in the 4x crop, as expected; the
   capture is not a like-for-like score. See BENCHMARKS.md.
+- The ground-truth suite (`--aa-sweep`, 36 candidates) ranks strength 0.60 first (score 53.0, +1.99 dB GT PSNR),
+  0.70 a close second (52.9, +1.59 dB, more step reduction) and the 1.00 default third (31.5, -0.23 dB). The default is
+  unchanged until the owner reviews the crops. The suite also shows subpixel straight bars untouched, the 4.6-degree
+  roofline at 0.876, and the 1.5 px text scene at 6.61 % changed (the fast 1 px test is 0 %). See BENCHMARKS.md.
 - Real-game material exists: 120-frame recordings of Helldivers 2 (game AA off, TAA, DLAA, two MoonSR AA runs) and
   Black Mesa (game AA off, two MoonSR AA runs), measured in BENCHMARKS.md. Two games, no ground truth, and the runs are
   not the same camera pose, so there is no objective quality score and no head-to-head against the game's TAA.

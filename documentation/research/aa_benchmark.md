@@ -184,3 +184,25 @@ The suite only knows `AaPass::Create`, `SetSettings`, `Apply`, `Reset`, `Stats`.
 - Does the game's own AA look better, worse, or different? That is allowed; record it.
 
 The answer is a go/no-go on the candidate, not a PSNR number.
+
+## 12. First run findings (2026-11-26)
+
+The 36-candidate sweep at commit `0824187` (RTX 5060, 1280x720/SS=4) ranked:
+
+| Candidate | Score | Mean dPSNR | Mean step | 1080p | 1440p |
+|---|---:|---:|---:|---:|---:|
+| Balanced, strength 0.60, threshold 0.10 | 53.0 | +1.992 | 0.329 | 0.151 ms | 0.258 ms |
+| Balanced, strength 0.70, threshold 0.10 | 52.9 | +1.589 | 0.368 | 0.151 ms | 0.258 ms |
+| Balanced, strength 1.00, threshold 0.10 (current) | 31.5 | -0.227 | 0.339 | 0.151 ms | 0.258 ms |
+| No AA | 0.0 | 0.000 | 0.000 | 0.078 ms | 0.126 ms |
+
+All eligible candidates pass the exact, checker, gradient, colour and budget gates. The suite found a real
+over-blur at 45 degrees: the area ground truth has one half-covered pixel (`34 149 218`), the 1.00 default produces a
+symmetric two-pixel band (`34 126 126 218`), and 0.60 produces `34 89 163 218`. The 0.60/0.70 settings are closer in
+squared error and less blurry; 0.70 retains more staircase reduction. The suite also records the limits: subpixel
+straight bars are untouched (step ratio 1.000, diagnostic), the 4.6-degree roofline is 0.876 (10 % gate), and the
+1.5 px text scene changes 6.61 % (10 % gate; the fast one-texel test remains 0 %). Real ATLYSS captures change 3.55 %
+(no-AA input) and 3.39 % (8x MSAA) at 0.60, with a lower mean/max than 1.00.
+
+The suite does **not** change the default. The visual review pack is the next step; the owner chooses between 0.60,
+0.70 and 1.00 after inspecting the crops. Full tables: `documentation/BENCHMARKS.md`.

@@ -4,6 +4,31 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing: ground-truth benchmark suite and first sweep
+
+- Added `moonsr_bench --aa-suite` / `--aa-sweep` and its design note `documentation/research/aa_benchmark.md`: ten
+  scenes generated at 4x and box-downsampled as the area ground truth, the aliased input point-sampled from the same
+  scene, gate checks for exact edges, thin lines, text/HUD, checker texture, gradients, colour and the cost budget,
+  a 36-candidate settings grid, stable cost (three timestamp medians), CSV/JSON output and an HTML review pack with
+  input/GT/output 1:1 and 4x crops. The suite is variant-agnostic: it only uses the `AaPass` contract.
+- First sweep at commit `0824187` (RTX 5060, 1280x720/SS=4): Balanced strength 0.60/threshold 0.10 scores 53.0
+  (+1.99 dB GT PSNR, step 0.329, 0.151/0.258 ms); 0.70 scores 52.9 (+1.59 dB, step 0.368); the current 1.00 default
+  scores 31.5 (-0.23 dB, step 0.339). The 0.60/0.70 difference is a statistical tie; 0.70 keeps more staircase
+  reduction, 0.60 is closer to the area reference.
+- The GT exposed a real issue: at 45 degrees the reference has one half-covered pixel (`34 149 218`), the 1.00 default
+  makes a symmetric two-pixel band (`34 126 126 218`), 0.60 makes `34 89 163 218` and 0.70 `34 98 154 218`. The lower
+  strengths are less blurry and closer in squared error, at the cost of less step reduction on 20/70-degree edges.
+- Also recorded: subpixel straight bars are untouched (step 1.000, diagnostic), the 4.6-degree roofline is 0.876
+  (10 % gate), the 1.5 px text scene is 6.61 % changed (10 % gate; the fast 1 px test remains 0 %), and real ATLYSS
+  changes 3.55 % (no-AA) / 3.39 % (8x MSAA) at 0.60 with lower mean/max than 1.00. The real HUD remains 11-22 % and
+  is a T2 item.
+- Verified: `build\aa-rebuild` compiles under /W4; the suite runs end-to-end and writes `index.html`, `candidates.csv`,
+  `scenes.csv`, `meta.json`; the fast `--aa` and both self-tests remain green. The review pack is
+  `build\aa_final\aa_suite\index.html`; the 45-degree five-way sheet is `build\aa_45_review.png`.
+- No default change and no release: the owner reviews 0.60 / 0.70 / 1.00 visually before the default is touched.
+
+---
+
 ## 2026-11-26 - Anti-aliasing: ATLYSS owner captures
 
 - The owner supplied four 1920x1080 ATLYSS captures: no AA, MoonSR Balanced, MoonSR Quality and game 8x MSAA. They are

@@ -2745,3 +2745,68 @@ crisply. The synthetic text scene is 0 % because its strokes are one texel; ATLY
 one-texel guard does not cover. A two-texel guard was tried and rejected: it reduced the whole ATLYSS effect from
 3.55 % to 0.94 % changed (high-pass 0.985), and the 4x weapon crop became almost indistinguishable from no-AA. Static
 HUD masking is the T2 item; the one-texel guard is the tier-1 trade-off.
+
+## Anti-aliasing benchmark suite (2026-11-26)
+
+Design: `documentation/research/aa_benchmark.md`. Command:
+
+```
+build\aa-rebuild\bin\moonsr_bench.exe --aa-sweep --aa-image "%LOCALAPPDATA%\MoonSR\recordings\AAtests\ATLYSS_noAA.png" --aa-image "%LOCALAPPDATA%\MoonSR\recordings\AAtests\ATLYSS_8xMSAA.png" --out-dir build\aa_final
+```
+
+Hardware: Ryzen 9 7900X, 31 GB, NVIDIA GeForce RTX 5060 (driver 621.14, UMD 32.0.16.2114), Windows 11 build
+26300.9974; commit `0824187`. Suite scenes 1280x720 with 4x supersampling; 36 candidates plus a no-AA baseline.
+Cost is the middle of three independent timestamp medians at 1080p and 1440p on a busy 2-px checker.
+
+Ranking (score = 100 * mean step reduction + 10 * mean dPSNR + 1000 * mean dSSIM; heuristic, not a quality claim):
+
+| Candidate | Eligible | Score | Mean dPSNR | Mean dSSIM | Mean step | 1080p | 1440p |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Balanced, strength 0.60, threshold 0.10 | yes | 53.0 | +1.992 | +0.0002 | 0.329 | 0.151 ms | 0.258 ms |
+| Balanced, strength 0.70, threshold 0.10 | yes | 52.9 | +1.589 | +0.0002 | 0.368 | 0.151 ms | 0.258 ms |
+| Balanced, strength 1.00, threshold 0.10 (current default) | yes | 31.5 | -0.227 | -0.0002 | 0.339 | 0.151 ms | 0.258 ms |
+| No AA | no (edge gates) | 0.0 | 0.000 | 0.0000 | 0.000 | 0.078 ms | 0.126 ms |
+
+The 0.60 and 0.70 differ by 0.1 score point: 0.60 is closer to the area ground truth, 0.70 gives more staircase
+reduction. The 1.00 default is dominated on ground truth and only marginally ahead on some per-scene step metrics.
+The suite does not change the default; the owner decides after the visual review.
+
+Per-scene, strength 0.60 vs the current 1.00 (dPSNR in dB; lower step ratio = more smoothing):
+
+| Scene | 0.60 dPSNR | 0.60 step | 1.00 dPSNR | 1.00 step |
+|---|---:|---:|---:|---:|
+| edge_20 | +3.11 | 0.661 | +0.83 | 0.578 |
+| edge_45 | +1.70 | 0.402 | -2.76 | 0.500 |
+| edge_70 | +3.65 | 0.593 | +0.88 | 0.583 |
+| roofline_8 (4.6 deg) | +1.27 | 0.876 | +1.23 | 0.866 |
+| color_30 | +2.23 | 0.493 | -1.56 | 0.438 |
+| exact_0 | (GT=input) | 1.000, max 15 | (GT=input) | 1.000, max 25 |
+| text_hud (1.5 px glyphs) | -0.08 | changed 6.61 %, mean 0.995, max 39 | -0.23 | changed 6.61 %, mean 0.992, max 65 |
+| thin_lines (1.5 px grid) | +0.67 | mean 0.977, changed 21.3 % | +0.59 | mean 0.962, changed 21.3 % |
+| checker_4px | -0.01 | high-pass 1.000 | -0.04 | high-pass 1.000 |
+| gradient | 0.00 | max 0 | 0.00 | max 0 |
+| subpixel_edges | +0.004 | 1.000 (diagnostic) | +0.005 | 1.000 (diagnostic) |
+
+The 45-degree finding is the clearest visual item. The area ground truth has one half-covered pixel per corner
+(row values `34 149 218`); the 1.00 default produces a symmetric two-pixel band (`34 126 126 218`), the 0.60 output
+produces `34 89 163 218`, and 0.70 produces `34 98 154 218`. The lower strengths are closer in squared error and
+less blurry, at the cost of less step reduction on 20/70-degree edges. The 4x crops are in the review pack.
+
+Real ATLYSS captures (same source; no ground truth, do-no-harm only):
+
+| Capture | Candidate | Pixels changed | Mean | High-pass | Max |
+|---|---|---:|---:|---:|---:|
+| ATLYSS no AA | 0.60 | 3.55 % | 0.37 | 0.908 | 76 |
+| ATLYSS no AA | 1.00 | 3.55 % | 0.62 | 0.930 | 127 |
+| ATLYSS 8x MSAA | 0.60 | 3.39 % | 0.33 | 0.917 | 76 |
+| ATLYSS 8x MSAA | 1.00 | 3.39 % | 0.56 | 0.937 | 127 |
+
+Gates and limits: all candidates pass the exact, checker, gradient, colour and budget gates; the 1.5 px text scene
+passes the calibrated 10 % bound at 6.61 % (the fast one-texel stress scene remains 0 %); the 4.6-degree roofline
+passes the 0.90 bound at 0.876; subpixel straight edges are diagnostic (step ratio 1.000) because a vertical bar at a
+fractional position is not a staircase and the endpoint model does not move it. The real ATLYSS HUD remains 11-22 %
+changed by bright text pixels and stays a T2 item. The suite's ground truth is area coverage, not a game reference;
+the owner's visual review is still required.
+
+Review pack (not committed): `build\aa_final\aa_suite\index.html`; the 45-degree five-way comparison is
+`build\aa_45_review.png` (no AA, ground truth, default 100 %, suite top 60 %, close second 70 %).

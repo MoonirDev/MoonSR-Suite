@@ -21,7 +21,8 @@ interface sketch in Part 7 is a proposal for the lead, who owns the contract hea
 Implementation update (2026-11-26): the spatial tier was rebuilt as a three-pass pattern-based morphological filter
 (MLAA family). The FXAA-style build whose measurements appear under "Measured after T1" is superseded; the rebuild and
 its measurements are at the end of this note. The contract, the settings section, the page and the load-order stage are
-unchanged.
+unchanged. Automated evaluation and the settings sweep are described in `aa_benchmark.md` and run with
+`moonsr_bench --aa-suite` / `--aa-sweep`.
 
 ---
 
