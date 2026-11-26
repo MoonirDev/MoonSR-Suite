@@ -135,9 +135,8 @@ public:
                const RectI& contentInDst, float outputPixelScale) override;
 
     void Reset() override {
-        // No history in T1. Drop the measurement window so the next reading describes the new scene; the readback
-        // ring is left to drain on its own (a staging buffer must not be overwritten while a copy is in flight).
-        for (QuerySet& q : timing_.sets) q.pending = false;
+        // No history in T1. Drop the measurement window so the next reading describes the new scene. Pending timestamp
+        // queries are left alone: the GPU may still own them, and Apply only starts a new set when that set is free.
         timing_.sampleCount = timing_.sampleNext = 0;
         coverageEma_ = -1.0f;
         appliedFrames_ = 0;
