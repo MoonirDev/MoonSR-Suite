@@ -67,13 +67,13 @@ float3 AaSample(float2 pTexels)
     return srcTex.SampleLevel(linearClamp, clamp(pTexels, lo, hi) * aaTexelSize, 0).rgb;
 }
 
-// Quality presets: distance of the two side samples from the centre (source px) and the blend weight at a full
-// staircase step. Quality samples slightly further out and blends harder, which smooths diagonals more.
-void AaQualityParams(out float span, out float blend)
+// Quality presets: the maximum blend weight at a clean staircase step. The sample distance is fixed at one texel across
+// the edge, so the preset only decides how far the pixel is moved towards the two-side average.
+float AaBlendWeight()
 {
-    if (aaQuality == 0)      { span = 1.30; blend = 0.70; } // Performance
-    else if (aaQuality == 2) { span = 1.30; blend = 1.00; } // Quality
-    else                     { span = 1.30; blend = 0.85; } // Balanced
+    if (aaQuality == 0) return 0.70; // Performance
+    if (aaQuality == 2) return 1.00; // Quality
+    return 0.85;                     // Balanced
 }
 
 #endif

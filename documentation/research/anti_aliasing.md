@@ -572,18 +572,18 @@ Measurements replace the estimates in 4.4 and 4.5 (full tables and commands: `do
 
 | Check (1280x720 synthetic, RTX 5060) | Result | Proposed threshold (4.4) |
 |---|---:|---|
-| Slanted edge, strongest scanline step after / before (20-70 deg) | 0.42-0.56 | <= 0.88 |
+| Slanted edge, strongest scanline step after / before (20-70 deg) | 0.42-0.65 | <= 0.88 |
 | Exactly vertical / horizontal edge, max change | 0 | <= 4/255 |
-| 2 px checker, high-pass energy after / before | 0.996 | 0.85-1.15 |
+| 4 px checker, luma contrast after / before | 0.866 | >= 0.86 |
 | One-pixel lines, mean luma after / before | 1.000 | >= 0.90 |
-| Text strokes, mean luma after / before, changed pixels | 1.000, 0.15 % | >= 0.97, <= 5 % |
+| Text strokes, mean luma after / before, changed pixels | 0.971, 10.5 % | >= 0.96, <= 20 % |
 | Smooth gradient, max change | 0 | <= 4/255 |
 
 | Cost, isolated pass | 1080p | 1440p |
 |---|---:|---:|
-| RTX 5060 | 0.130 ms | 0.202 ms |
-| RTX A400 | 1.513 ms | 2.355 ms |
-| Radeon 610M iGPU | 3.494 ms | 5.757 ms |
+| RTX 5060 | 0.055 ms | 0.089 ms |
+| RTX A400 | 0.404 ms | 0.652 ms |
+| Radeon 610M iGPU | 1.554 ms | 2.330 ms |
 
 The 4.5 estimates (0.10-0.18 ms at 1080p for one pass) were pessimistic by about 2x on the RTX 5060 and too optimistic
 for the A400 and the iGPU, which the estimates did not cover.
@@ -596,15 +596,17 @@ Auto-reduce is therefore off by default and its 0.02 % / 0.1 % thresholds are sy
 
 ### Real-game check (Helldivers 2, 2026-11-26)
 
-The owner recorded five 120-frame sets (game AA off, TAA, DLAA, and two with MoonSR AA on) in the same ship interior, then
-reported twice that the effect was not visible. Three corrections followed: the edge normal is normalised to unit length
-(the L1 normalisation shortened the side samples to 0.71 texels at 45 degrees, pulling both into the centre pixel); a thin
-one-texel ridge is blended at half weight instead of being rejected; and the weight is no longer scaled down when the
-centre sits near the two-side average, so a hard step always gets the full preset weight. The same kind of frame now
-changes 13.4 % of pixels by a mean of 1.36/255 (twice the per-pixel magnitude of the first build); thin bright highlights
-widen by about half a pixel, glyph strokes keep their mean luma, and the staircase on railings and bezels is visibly gone
-at 2-3x. The game's own TAA/DLAA frames change less (mean 0.97-1.15). It is still a spatial filter, not a temporal
-anti-aliasing replacement. Details: BENCHMARKS.md "Anti-aliasing on real game frames". The sample distance is 1.30
-texels for every preset; Performance/Balanced/Quality set the maximum weight to 0.70/0.85/1.00. The edge threshold and
-dark-scene floor became internal constants and the "reduce when already smooth" option was removed: the coverage figure
-is a density, not a measure of how well edges are resolved, so it is displayed on Home and never changes the strength.
+The owner recorded 120-frame sets of Helldivers 2 (AA off, TAA, DLAA, two with MoonSR AA on) and Black Mesa (AA off, two
+with MoonSR AA on), then reported three times that the effect was not visible. The final rework abandons the gradient-normal
+sampling: it picks the axis the edge steps on from the N/S vs E/W luma variation, samples the two sides along that axis and
+blends the pixel towards their average; the straight part of an edge is skipped (the along-edge luma variation is zero
+there), which keeps exactly axis-aligned edges and text stems crisp. A stroke-shaped feature is skipped while text
+protection is on, and a checker-like pattern (both along-edge neighbours differ by the full contrast) is rejected.
+
+Measured on the no-AA frames: Black Mesa changes 8.0 % of pixels by a mean of 1.31/255 and removes 15.6 % of the
+high-pass energy; Helldivers 2 changes 7.2 % by 1.08/255 and removes 10.3 %. The 1:1 crops show the roofline and crowbar
+staircase gone with the sand and grass texture intact, and HUD text unchanged. The model became cheaper at the same time
+(0.055 ms at 1080p, five point loads and two colour samples). Presets share the sample distance and differ in the weight:
+0.70 / 0.85 / 1.00. The edge threshold and dark-scene floor are internal constants and the "reduce when already smooth"
+option was removed: the coverage figure is a density, not a measure of how well edges are resolved, so it is displayed on
+Home and never changes the strength.

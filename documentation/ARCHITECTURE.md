@@ -199,36 +199,41 @@ Load-order migration: `NormalizeOrder` keeps an existing order as it is, inserts
 Relief when it is missing, and appends any other missing default stage. Unknown, duplicate or empty orders fall back to
 the default, so a settings file written by 1.1.x (three stages) still loads and gains the new stage.
 
-T1 is a single-frame spatial pass, clean-room from the published detect / orient / average / blend method (no
-third-party shader code). Per pixel it reads the 3x3 luma neighbourhood and:
+Anti-aliasing is a single-frame spatial pass, clean-room from the published detect / reconstruct method (no third-party
+shader code). It recognises the pixels where an edge *turns inside the pixel* (a staircase step) and gives them the value
+an area resolve would have produced - the average of the two sides. Per pixel it reads the 3x3 luma neighbourhood and:
 
-1. rejects flat areas and smooth gradients by a relative edge threshold with an absolute floor for dark scenes;
-2. rejects edges within about 4 degrees of vertical or horizontal, which the pixel grid already resolves exactly (this
-   is also what keeps straight text stems and UI rules crisp);
-3. requires the edge to continue along its own direction (taps at 2, 4, 6 and 8 texels must stay on the centre's
-   side), which rejects isolated dots, stroke tips and noise.
+1. rejects flat areas and smooth gradients by a relative edge threshold (10 % of the local maximum) with an absolute
+   floor (3 %) for dark scenes;
+2. decides which axis the edge steps on from the larger of the N/S and E/W luma variation, and samples the two sides
+   **along that axis** (N/S or E/W). Sampling along the gradient normal instead lands on the diagonal neighbour at 45
+   degrees, which sits on the same side of a staircase, so the sides look equal and nothing is blended - that was the
+   reason the first two builds were almost invisible;
+3. leaves the straight part of an edge alone: if the luma variation *along* the edge is below 12 % of the local range,
+   the edge runs exactly along the pixel grid and is already resolved. Only where it steps does the along-edge variation
+   appear;
+4. rejects high-frequency texture: when both along-edge neighbours differ from the centre by the full contrast (a
+   checkerboard or a dot pattern), the pixel is not an edge.
 
-Two shapes pass those gates: a real step (two different sides, centre between them) and a thin one-texel ridge (a
-railing, a specular or bezel highlight, a glyph stem - both sides are the same background). The ridge is blended too,
-because it is aliased like any other edge, at half weight while "Protect text and thin lines" is on. At this scale a
-glyph stem and a railing have the same shape, so the protection is a weight and not a veto; turning it off restores
-full weight.
+A thin one-texel ridge (railing, bezel or specular highlight) is an L-shaped junction like a glyph stem, so it is skipped
+while "Protect text and thin lines" is on and blended when it is off. Straight stems and UI rules never blend regardless,
+because of (3).
 
-It then blends the centre towards the average of the two sides by a sub-pixel weight scaled by the strength and the
-quality preset. The sample distance is along the unit edge normal at 0.95 / 1.15 / 1.25 texels and the maximum weight is
-0.45 / 0.55 / 0.70 for Performance / Balanced / Quality. Alpha is written as 1.0; letterbox areas outside the game image
-are copied bit for bit. The pass is skipped entirely when disabled, so the off cost is zero.
+The centre is blended towards the two-side average by `strength * weight`, where the weight is 0.70 / 0.85 / 1.00 for
+Performance / Balanced / Quality, scaled by how far the centre sits from that average (half at a clean staircase step).
+Alpha is written as 1.0; letterbox areas outside the game image are copied bit for bit. The pass is skipped entirely
+when disabled, so the off cost is zero.
 
-Settings live in the `[AntiAliasing]` section (mode, quality, strength, edge threshold, floor, text/HUD protection,
-auto-reduce) and are applied live through `Engine::SetAaSettings`; the AA page is "Anti-aliasing". The diagnostic views
-(edge mask, blend weight, split) are developer tools reached with `moonsr_cli --aa-view`; A/B compare on Home covers the
-split.
+Settings live in the `[AntiAliasing]` section (mode, quality, strength, text/HUD protection) and are applied live through
+`Engine::SetAaSettings`; the AA page is "Anti-aliasing". The threshold and floor are internal constants with no UI. The
+diagnostic views (edge mask, blend weight, split) are developer tools reached with `moonsr_cli --aa-view`; A/B compare on
+Home covers the split.
 
 Statistics: a compute pass samples a 128x128 grid of the game image and counts pixels that are long, slanted, hard steps
 - a stricter subset of the filter gates, so text and dense textures do not read as aliased - and reads the counters back a
 few frames later through a staging ring (no stall).
-`edgeCoverage` is a hard-edge density, not a quality measure; it drives the optional "already anti-aliased" reduction
-(off by default) and the Home status text; `gpuMs` is the median of eight timestamp pairs. See KNOWN_ISSUES.md.
+`edgeCoverage` is a hard-edge density, not a quality measure; it is shown on Home and never changes the strength; `gpuMs`
+is the median of eight timestamp pairs. See KNOWN_ISSUES.md.
 
 When AA and Smart parallax both run, `ComposeAndPresent` applies AA first so relief shading is not blurred. A custom
 order with Relief before Anti-aliasing is therefore not honoured; that is a documented limitation, not a silent

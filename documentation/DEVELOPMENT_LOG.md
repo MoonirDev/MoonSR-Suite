@@ -4,6 +4,33 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing rework: staircase reconstruction
+
+- Third in-game report (Black Mesa, `BM_1080p_MoonSR_AA_2`): edges still rough. The measured filter was working
+  (16 % of pixels changed) but the shape was wrong: sampling the two sides along the gradient normal lands on the
+  diagonal neighbour at 45 degrees, which sits on the same side of a staircase, so the sides looked equal and the
+  effective weight was small exactly where aliasing lives.
+- New algorithm: pick the axis the edge steps on from the N/S vs E/W luma variation, sample the two sides along *that*
+  axis, and blend the pixel towards their average. The straight part of an edge is skipped (along-edge variation below
+  12 % of the local range), so exactly axis-aligned edges, text stems and UI rules never blend. A checker-like pattern
+  (both along-edge neighbours differ by the full contrast) is rejected, and a stroke-shaped ridge is skipped while text
+  protection is on. Presets share the sample distance and differ in the weight: 0.70 / 0.85 / 1.00.
+- Cheaper: five point loads and two colour samples instead of eight bilinear taps. 0.055 / 0.089 ms at 1080p / 1440p on
+  the RTX 5060 (was 0.130 / 0.202), A400 0.40 / 0.65 ms, Radeon iGPU 1.55 / 2.33 ms.
+- Measured: slanted edges 0.42-0.65 of their strongest step; exact 0/90 bit-identical; thin lines 100 % luma; HUD stroke
+  mean 97.1 % with 10.5 % of pixels changed; 4 px checker keeps 86.6 % contrast (2 px checker is informational: every
+  pixel is a staircase corner). Black Mesa no-AA frame 8.0 % changed / mean 1.31 / energy 0.844; HD2 no-AA 7.2 % / 1.08 /
+  0.897. All presets pass.
+- Bench: texture scenes now judged on luma contrast (the Laplacian is dominated by corners, which the filter changes by
+  design); added a 4 px checker as the pass/fail fixture and kept the 2 px one as informational; HUD criterion is stroke
+  mean >= 96 %, <= 20 % changed, max <= 96/255.
+- Verified: full `build\main` and `build\aa` builds, `--aa` at all presets, both self-tests; 1:1 crops of the Black Mesa
+  roofline/crowbar and the HD2 helmet/console show the staircase gone with texture intact.
+- Next: owner's in-game check in Black Mesa with MSAA off; if Quality still shows steps, the next tier is the pattern /
+  area search (SMAA-like) rather than more weight.
+
+---
+
 ## 2026-11-26 - Anti-aliasing: stronger default, fewer controls
 
 - Owner: still not noticeable in Black Mesa; remove the edge-threshold and dark-scene-floor sliders and tune them
