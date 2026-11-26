@@ -442,12 +442,6 @@ void BuildPages(ui::View& view, AppUi& u) {
         u.aaProtectText = p->Make<ToggleSwitch>();
         u.aaProtectHud = p->Make<ToggleSwitch>();
         u.aaAutoReduce = p->Make<ToggleSwitch>();
-        u.aaDebug = p->Make<ComboBox>();
-        u.aaDebug->AddItem(L"Off", 0);
-        u.aaDebug->AddItem(L"Edge mask", 1);
-        u.aaDebug->AddItem(L"Blend weight", 2);
-        u.aaDebug->AddItem(L"Split (left half off)", 3);
-        u.aaDebug->SetSelected(0);
 
         p->AddInfo(u.aaDev);
         p->AddInfo(about);
@@ -472,9 +466,6 @@ void BuildPages(ui::View& view, AppUi& u) {
                   {{u.aaProtectHud, kToggleW}});
         p->AddRow(protect, kIconShield, L"Reduce when already smooth", L"Experimental: lower the strength when the picture has few hard edges",
                   {{u.aaAutoReduce, kToggleW}});
-        ui::Card& debug = p->AddCard();
-        p->AddRow(debug, kIconCompare, L"Diagnostic view", L"Show edges, blend weight, or an A/B split",
-                  {{u.aaDebug, 220.0f}});
     }
 
     // ---------------------------------------------------------------- Smart parallax (experimental)

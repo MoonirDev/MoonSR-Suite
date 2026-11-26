@@ -1021,7 +1021,7 @@ void MainWindow::WireHandlers() {
             OnLiveChange();
         };
     for (ui::Control* control : std::initializer_list<ui::Control*>{ui_.aa, ui_.aaMode, ui_.aaQuality, ui_.aaStrength,
-             ui_.aaEdgeThreshold, ui_.aaEdgeFloor, ui_.aaProtectText, ui_.aaProtectHud, ui_.aaAutoReduce, ui_.aaDebug})
+             ui_.aaEdgeThreshold, ui_.aaEdgeFloor, ui_.aaProtectText, ui_.aaProtectHud, ui_.aaAutoReduce})
         control->onChange = [this] {
             UpdateAaUi();
             if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
@@ -1222,7 +1222,6 @@ void MainWindow::ApplySettingsToUi() {
     ui_.aaProtectText->SetChecked(settings_.aaProtectText);
     ui_.aaProtectHud->SetChecked(settings_.aaProtectHud);
     ui_.aaAutoReduce->SetChecked(settings_.aaAutoReduce);
-    ui_.aaDebug->SetSelected(std::clamp(settings_.aaDebugView, 0, 3));
     UpdateAaUi();
     if (!engineActive_) ui_.details->SetValue(DetAa, AaSummary(nullptr));
     SetOrderUi(OrderFromString(settings_.pipelineOrder));
@@ -1272,7 +1271,6 @@ AppSettings MainWindow::CaptureSettings() const {
     s.aaProtectText = ui_.aaProtectText->checked();
     s.aaProtectHud = ui_.aaProtectHud->checked();
     s.aaAutoReduce = ui_.aaAutoReduce->checked();
-    s.aaDebugView = std::clamp(ui_.aaDebug->Selected(), 0, 3);
     s.pipelineOrder = OrderToString(CurrentOrder());
 
     s.monitorDevice.clear();
@@ -3146,9 +3144,9 @@ AaSettings MainWindow::CurrentAa() const {
     a.protectText = ui_.aaProtectText->checked();
     a.protectHud = ui_.aaProtectHud->checked();
     a.autoReduce = ui_.aaAutoReduce->checked();
-    const long long debug = ui_.aaDebug->Selected() >= 0 ? ui_.aaDebug->ItemData(ui_.aaDebug->Selected()) : 0;
-    a.debugView = debug == 1 ? AaDebugView::EdgeMask : debug == 2 ? AaDebugView::BlendWeight
-                : debug == 3 ? AaDebugView::Split : AaDebugView::None;
+    // No diagnostic view on the page: the edge mask, blend weight and split views are developer tools, reached with
+    // `moonsr_cli --aa-view`, and A/B compare on Home covers the split.
+    a.debugView = AaDebugView::None;
     return a;
 }
 
@@ -3162,7 +3160,6 @@ void MainWindow::UpdateAaUi() {
     ui_.aaProtectText->SetEnabled(on);
     ui_.aaProtectHud->SetEnabled(on);
     ui_.aaAutoReduce->SetEnabled(on);
-    ui_.aaDebug->SetEnabled(on);
     const long long mode = ui_.aaMode->Selected() >= 0 ? ui_.aaMode->ItemData(ui_.aaMode->Selected()) : 0;
     const bool layoutChange = ui_.aaModeNote->visible != (mode != 0);
     ui_.aaModeNote->SetVisible(mode != 0);

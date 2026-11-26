@@ -71,7 +71,6 @@ struct AppSettings {
     bool aaProtectText = true;
     bool aaProtectHud = true;
     bool aaAutoReduce = false;        // opt-in: lower the strength when the picture already looks resolved
-    int aaDebugView = 0;              // 0 = None, 1 = Edge mask, 2 = Blend weight, 3 = Split
     // Processing order, e.g. "neural,framegen,upscaling,aa,relief"; empty / invalid = default
     std::wstring pipelineOrder;
     // Window position (top-left, virtual-desktop pixels)

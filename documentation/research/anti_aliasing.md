@@ -434,8 +434,8 @@ licence go into the shader header **and** `THIRD_PARTY_NOTICES.md`, and the lice
   readback; GPU timings.
 - Engine wiring: stage creation/release on settings change, load-order position, per-stage GPU, cross-GPU copies,
   reset on resize/scene change, statistics in `EngineStats`.
-- UI: new "Anti-aliasing" page with its own vector glyph, mode/quality/strength/edge threshold/text protection/debug
-  view, live apply, Home details row.
+- UI: new "Anti-aliasing" page with its own vector glyph, mode/quality/strength/edge threshold/text protection, live
+  apply, Home details row. The diagnostic views are CLI-only (`moonsr_cli --aa-view`).
 - Settings persistence with an old-file default of off.
 - `moonsr_bench --aa` and `--aa-image`.
 - *Exit:* all synthetic checks of 4.4 pass or are recorded as limitations; measured cost ≤ 0.3 ms at 1080p on the
@@ -521,8 +521,9 @@ fallback (default order).
 
 **UI (proposal):** sidebar page "Anti-aliasing" between Frame generation and Neural rendering, with its own vector
 glyph (a stepped line becoming a straight one). Rows: enable, mode, quality, strength, edge threshold, text
-protection, HUD protection (disabled until T2), auto-reduce, debug view. Home details row "Anti-aliasing" with the
-state and the measured GPU time, like the Smart parallax row.
+protection, HUD protection (disabled until T2), auto-reduce. Home details row "Anti-aliasing" with the
+state and the measured GPU time, like the Smart parallax row. *(Updated 2026-11-26: the diagnostic-view row was removed
+from the page; the views are CLI-only and A/B compare on Home covers the split.)*
 
 ---
 

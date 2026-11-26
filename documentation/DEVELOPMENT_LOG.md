@@ -4,6 +4,18 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing page: drop the diagnostic-view row
+
+- Owner request: the diagnostic view belongs under Home. Removed the "Diagnostic view" card and combo from the
+  Anti-aliasing page, the control handle, the live-apply wiring and the `[AntiAliasing] DebugView` persistence. Old
+  settings files still load (the key is ignored), and a debug view can no longer survive a restart.
+- The engine capability stays: edge mask, blend weight and split are selected with `moonsr_cli --aa-view`, and A/B
+  compare on Home covers the split. `AaSettings::debugView` and the shader paths are unchanged.
+- Full build in `build\main` clean; the page was captured in Windows 11 Dark and Retro after the change and the layout
+  closes on the protection card.
+
+---
+
 ## 2026-11-26 - Anti-aliasing on Helldivers 2 recordings
 
 - Measured the owner's four 120-frame HD2 recordings (game AA off, TAA, DLAA, MoonSR AA on) with `moonsr_bench

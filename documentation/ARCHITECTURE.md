@@ -215,7 +215,9 @@ as 1.0; letterbox areas outside the game image are copied bit for bit. The pass 
 the off cost is zero.
 
 Settings live in the `[AntiAliasing]` section (mode, quality, strength, edge threshold, floor, text/HUD protection,
-auto-reduce, debug view) and are applied live through `Engine::SetAaSettings`; the AA page is "Anti-aliasing".
+auto-reduce) and are applied live through `Engine::SetAaSettings`; the AA page is "Anti-aliasing". The diagnostic views
+(edge mask, blend weight, split) are developer tools reached with `moonsr_cli --aa-view`; A/B compare on Home covers the
+split.
 
 Statistics: a compute pass samples a 128x128 grid of the game image, counts pixels that pass the same gates (plus a
 long-edge coherence test), and reads the counters back a few frames later through a staging ring (no stall).

@@ -188,7 +188,6 @@ AppSettings LoadSettings() {
     s.aaProtectText = ReadSignedInt(path, L"AntiAliasing", L"ProtectText", 1) != 0;
     s.aaProtectHud = ReadSignedInt(path, L"AntiAliasing", L"ProtectHud", 1) != 0;
     s.aaAutoReduce = ReadSignedInt(path, L"AntiAliasing", L"AutoReduce", 0) != 0;
-    s.aaDebugView = std::clamp(ReadSignedInt(path, L"AntiAliasing", L"DebugView", 0), 0, 3);
     s.pipelineOrder = ReadString(path, L"Pipeline", L"Order");
     s.hasWindowPos = ReadInt(path, L"Window", L"HasPosition", 0) != 0;
     s.windowX = ReadSignedInt(path, L"Window", L"X", 0);
@@ -287,7 +286,6 @@ bool SaveSettings(const AppSettings& s) {
     ok &= WriteInt(path, L"AntiAliasing", L"ProtectText", s.aaProtectText ? 1 : 0);
     ok &= WriteInt(path, L"AntiAliasing", L"ProtectHud", s.aaProtectHud ? 1 : 0);
     ok &= WriteInt(path, L"AntiAliasing", L"AutoReduce", s.aaAutoReduce ? 1 : 0);
-    ok &= WriteInt(path, L"AntiAliasing", L"DebugView", s.aaDebugView);
     ok &= WriteString(path, L"Pipeline", L"Order", s.pipelineOrder);
     ok &= WriteInt(path, L"Window", L"HasPosition", s.hasWindowPos ? 1 : 0);
     ok &= WriteInt(path, L"Window", L"X", s.windowX);

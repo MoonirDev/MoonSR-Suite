@@ -270,8 +270,9 @@ Still open:
   shading is not blurred. A custom order with Relief before Anti-aliasing is not honoured.
 - GPU per stage is supported for the AA stage. Only the RTX 5060, RTX A400 and the Radeon 610M iGPU were measured; the
   iGPU is far over budget (1.67 ms at 1080p, 2.87 ms at 1440p).
-- The debug views (edge mask, blend weight, split) exist for development and are not documented in the UI beyond their
-  names.
+- The debug views (edge mask, blend weight, split) are developer tools with no control on the page: they are selected
+  with `moonsr_cli --aa-view`, and the split view is also reachable as A/B compare on Home. The setting is not
+  persisted, so a debug view can never survive a restart.
 - The AA page and its glyph were rendered and checked in all four themes (Windows 11 Light, Windows 11 Dark, Retro,
   Retro Amber) through the `--test-page` / `--test-theme` harness and a window capture. The controls were not clicked
   through live, and the diagnostics views were not looked at in a running pipeline.

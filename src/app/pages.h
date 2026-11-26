@@ -89,7 +89,7 @@ struct AppUi {
     // Anti-aliasing (experimental)
     ui::InfoBar *aaDev = nullptr, *aaNote = nullptr, *aaModeNote = nullptr;
     ui::ToggleSwitch *aa = nullptr, *aaProtectText = nullptr, *aaProtectHud = nullptr, *aaAutoReduce = nullptr;
-    ui::ComboBox *aaMode = nullptr, *aaQuality = nullptr, *aaDebug = nullptr;
+    ui::ComboBox *aaMode = nullptr, *aaQuality = nullptr;
     ui::Slider *aaStrength = nullptr, *aaEdgeThreshold = nullptr, *aaEdgeFloor = nullptr;
     // Smart parallax (experimental)
     ui::InfoBar *reliefDev = nullptr, *reliefNote = nullptr, *reliefModeNote = nullptr;
