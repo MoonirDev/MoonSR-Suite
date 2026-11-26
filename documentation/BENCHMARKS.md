@@ -2738,3 +2738,10 @@ capture has clear staircases on the red blades, the white ring and the emblem; b
 pass smooth them, while the flat blade interiors keep their texture. The 8x MSAA capture is at least as smooth on the
 geometry edges. This is the first same-character material from ATLYSS; one scene, one game, no ground truth, and the
 owner's in-motion judgement remains the deciding check.
+
+HUD caveat on the same source: bright HUD text pixels (luma > 200) change 11.6 % in the action bar (mean 4.60/255),
+22.6 % in the inventory numbers (mean 8.96) and 17.6 % in the minimap (mean 11.20); at 3x the text still reads
+crisply. The synthetic text scene is 0 % because its strokes are one texel; ATLYSS has two-texel HUD stems that the
+one-texel guard does not cover. A two-texel guard was tried and rejected: it reduced the whole ATLYSS effect from
+3.55 % to 0.94 % changed (high-pass 0.985), and the 4x weapon crop became almost indistinguishable from no-AA. Static
+HUD masking is the T2 item; the one-texel guard is the tier-1 trade-off.

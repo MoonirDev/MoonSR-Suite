@@ -19,9 +19,11 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
   the 4x crop. That is the expected advantage of geometry supersampling over a post-process; it is not a like-for-like
   score.
 - Visual: the no-AA weapon, ring and emblem staircases are smoothed in both MoonSR captures and in the isolated pass
-  output; flat blade interiors keep their texture, and the HUD is not part of the filter. Next: the owner's in-motion
-  judgement. If geometry still looks weaker than 8x MSAA, that is the known post-process limit; a temporal or
-  SMAA-style Directional tier remains optional, not justified yet.
+  output; flat blade interiors keep their texture. The HUD text stays readable but is not bit-identical: bright text
+  pixels change 11.6-22.6 % by a mean of 4.6-11.2/255. A two-texel guard was tried and reduced the whole ATLYSS effect
+  from 3.55 % to 0.94 % changed, so it was rejected. Next: the owner's in-motion judgement. If geometry still looks
+  weaker than 8x MSAA, that is the known post-process limit; a temporal or SMAA-style Directional tier remains
+  optional, not justified yet.
 
 ---
 

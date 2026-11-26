@@ -258,8 +258,11 @@ Still open:
   acts; this is not a like-for-like quality comparison and the owner has not yet judged it in a real game.
 - Text/HUD protection is geometric, not a HUD mask: a sign-based one-texel-stroke mask, dilated by one texel, drops the
   coverage weights on glyphs, thin lines and HUD strokes. Both page toggles drive the same guard in this tier. On the
-  synthetic text-over-checker stress scene no stroke pixel changes. Thicker-than-one-texel HUD strokes, translucent
-  overlays and animated HUD elements can still be softened; a real static-overlay mask needs frame history (T2).
+  synthetic text-over-checker stress scene no stroke pixel changes. On the real ATLYSS HUD, bright text pixels
+  (luma > 200) change 11.6-22.6 % by a mean of 4.6-11.2/255; the 3x crops still read crisply. A two-texel guard was
+  tried and rejected because it cut the whole ATLYSS effect from 3.55 % to 0.94 % changed and removed the visible
+  weapon smoothing. Thicker/translucent/animated HUD and two-texel stems can still be softened; a static-overlay mask
+  needs frame history (T2).
 - One-texel game features (railings, wires, fine highlights) are protected rather than anti-aliased. That is the price
   of leaving text intact without a history mask.
 - A 4 px checker keeps 100 % of its luma contrast and high-pass energy; a 2 px checker is effectively preserved
