@@ -39,6 +39,8 @@ struct Options {
     float reliefDetail = -1.0f;
     std::vector<std::string> reliefImages;
     bool aa = false, aaNoTime = false;
+    int aaQuality = -1;        // history overrides for --aa-image; -1 keeps the defaults
+    float aaStrength = -1.0f;
     std::vector<std::string> aaImages;
     TemporalOptions tmp;
     uint32_t genW = 1920, genH = 1080;
@@ -106,7 +108,8 @@ Modes (combine freely):
   --aa                   Anti-aliasing: synthetic aliased scenes (edges at 0/30/45/60/90 degrees, thin lines, text/HUD
                          over texture, high-frequency texture, gradient); edge-step reduction, texture energy, stroke
                          contrast, HUD protection, gradient safety, self-checks and GPU time
-                         (--aa-image <file> (repeatable; real screenshot)  --aa-no-time  --save-images writes to <out>/aa)
+                         (--aa-image <file> (repeatable; real screenshot)  --aa-no-time  --aa-quality
+                         performance|balanced|quality  --aa-strength 0..1  --save-images writes to <out>/aa)
 
 Selection:
   --adapter <substr>     adapter name substring (repeatable); default: first hardware adapter
@@ -163,6 +166,8 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--relief-motion-depth") o.reliefMotionDepth = true;
         else if (a == "--aa") o.aa = true;
         else if (a == "--aa-no-time") o.aaNoTime = true;
+        else if (a == "--aa-quality") { if (!(v = need(i))) return false; o.aaQuality = std::strcmp(v, "performance") == 0 ? 0 : std::strcmp(v, "quality") == 0 ? 2 : std::strcmp(v, "balanced") == 0 ? 1 : -1; }
+        else if (a == "--aa-strength") { if (!(v = need(i))) return false; o.aaStrength = static_cast<float>(atof(v)); }
         else if (a == "--aa-image") { if (!(v = need(i))) return false; o.aaImages.push_back(v); o.aa = true; }
         else if (a == "--relief-image") { if (!(v = need(i))) return false; o.reliefImages.push_back(v); o.relief = true; }
         else if (a == "--relief-detail") { if (!(v = need(i))) return false; o.reliefDetail = static_cast<float>(atof(v)); }
@@ -675,6 +680,8 @@ int main(int argc, char** argv) {
         aa.timing = !o.aaNoTime;
         aa.saveImages = o.saveImages;
         aa.outDir = o.outDir / "aa";
+        aa.quality = o.aaQuality;
+        aa.strength = o.aaStrength;
         for (const auto& im : o.aaImages) aa.images.emplace_back(im);
         for (auto& a : adapters) rc |= aa.images.empty() ? RunAaBench(aa, a) : RunAaImage(aa, a);
     }

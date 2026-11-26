@@ -14,6 +14,9 @@ struct AaBenchOptions {
     bool saveImages = false;
     std::filesystem::path outDir;
     std::vector<std::filesystem::path> images; // --aa-image: real screenshots (any WIC-decodable format)
+    // Settings override; -1 / empty keeps the defaults (Balanced, strength 1.0).
+    int quality = -1;   // 0 Performance, 1 Balanced, 2 Quality
+    float strength = -1.0f;
 };
 
 // Runs the synthetic scenes (hard edges at several angles, thin lines, text/HUD over texture, high-frequency texture,

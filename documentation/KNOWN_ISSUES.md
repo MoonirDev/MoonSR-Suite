@@ -242,10 +242,17 @@ Still open:
 
 - Experimental. Only the spatial tier is built: choosing Directional or Temporal runs the spatial filter and the status
   reason says so. There is no temporal history, no motion input, no depth and no MSAA sample reconstruction.
-- No real-game comparison exists yet. The measurements in BENCHMARKS.md are synthetic scenes plus one captured UI
-  screenshot. The owner's A/B (game AA off, game AA/TAA on, MoonSR AA on in the same scene) is still needed before any
-  quality claim.
-- No comparison with FXAA, SMAA, CMAA2, TAA or DLAA has been made.
+- Real-game material now exists: four 120-frame Helldivers 2 recordings (game AA off, TAA, DLAA, MoonSR AA on) measured
+  in BENCHMARKS.md. It is one game, one room, no ground truth, and the four runs are not the same camera pose, so there
+  is still no objective quality score and no head-to-head against the game's TAA. What the numbers show is scale: the
+  filter changes about 11 % of pixels in a 1080p frame by a mean of 0.7/255 and lowers high-pass energy by 7 % on a
+  no-AA frame - a light spatial filter, not a temporal anti-aliasing replacement.
+- Balanced is the default because Quality visibly softens thin bright features (a 1-2 px specular rim gets dimmer and
+  wider) and slightly softens glyph edges on the HD2 frames. Performance leaves more aliasing. All three presets pass
+  the synthetic checks, but only Balanced and Quality were looked at on real frames.
+- Single-pixel glyph edges in the game's own anti-aliased HUD still change (up to 62/255 at the worst pixel; mean 0.78
+  over the text region). It is not visible at 1:1 in the crops checked, but high-contrast thin text can lose a little
+  contrast.
 - Text/HUD protection is a geometric stroke guard (two-sidedness plus along-edge agreement), not a HUD mask. Thin
   coloured text on a background of similar luma, glyph stems two or more pixels wide, and UI elements at 45 degrees can
   still be softened. Turning the protection off removes the stroke guards but keeps the two-sidedness test.

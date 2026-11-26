@@ -4,6 +4,25 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing on Helldivers 2 recordings
+
+- Measured the owner's four 120-frame HD2 recordings (game AA off, TAA, DLAA, MoonSR AA on) with `moonsr_bench
+  --aa-image` on the recorded inputs and with paired output-vs-input diffs. Added `--aa-quality` and `--aa-strength` to
+  the bench so presets can be measured, and the image run now reports changed pixels and mean |d| as well as energy.
+- Isolated filter on the no-AA frame: 10.95 % of pixels changed, mean 0.70/255, high-pass energy 52.68 -> 48.85
+  (0.927), 0.056-0.061 ms at 1080p; stable to the second decimal over eight frames. TAA and DLAA inputs change less
+  (mean 0.43-0.53), i.e. the filter does little on top of temporal anti-aliasing.
+- Presets on the same frame: Performance 10.06 % / mean 0.51 / 0.938, Quality 11.20 % / mean 0.91 / 0.929. All presets
+  pass the synthetic checks. Quality visibly softens a 1-2 px specular rim and slightly softens glyph edges, so Balanced
+  stays the default.
+- Pipeline check: the AA-off recording's output matches its input (0.07 % changed), the AA-on recording changes 10.98 %
+  (mean 0.80), which matches the isolated filter. Visual 1:1 crops show cleaner slanted silhouettes with no halo,
+  preserved fine detail, and no visible HUD damage.
+- Recorded in BENCHMARKS.md and KNOWN_ISSUES.md. Still open: no ground truth, one game only, and no head-to-head
+  quality score against the game's TAA.
+
+---
+
 ## 2026-11-25 - Anti-aliasing stage, spatial tier T1
 
 - Added the anti-aliasing section: research and contract note `documentation/research/anti_aliasing.md` (FXAA, SMAA,

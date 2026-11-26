@@ -593,3 +593,13 @@ test, so text and dense textures no longer read as aliased (0.0 %); what it meas
 a single synthetic edge, 1.0 % on a text-heavy screenshot), which is not the same as "the edges are already resolved".
 Auto-reduce is therefore off by default and its 0.02 % / 0.1 % thresholds are synthetic-only constants. The stroke
 guards were tuned on synthetic text; real glyphs and HUDs may still be softened.
+
+### Real-game check (Helldivers 2, 2026-11-26)
+
+The owner recorded four 120-frame sets (game AA off, TAA, DLAA, MoonSR AA on) in the same ship interior. On the no-AA
+1080p frame the isolated filter changes 10.95 % of pixels by a mean of 0.70/255 and lowers high-pass energy from 52.68
+to 48.85 (0.927); the game's own TAA and DLAA inputs sit much lower (27.3 and 35.5) and change less under the filter
+(mean 0.43 and 0.53). 1:1 crops show cleaner slanted silhouettes without halos and no visible loss of fine detail or
+HUD text, but the effect is mild: this tier is not a substitute for the game's temporal anti-aliasing. Details:
+BENCHMARKS.md "Anti-aliasing on real game frames". Balanced stays the default; Quality (span 1.2, weight 0.62) removes
+more staircase at the cost of thin bright features.

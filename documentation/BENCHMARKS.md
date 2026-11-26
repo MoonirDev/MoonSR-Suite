@@ -2603,3 +2603,66 @@ With auto-reduce enabled on the same window the reported strength fell to 0.25-0
 
 Self-tests after the change: `moonsr_bench --selftest` and `moonsr_fgbench --selftest` both pass (0 failures). Full
 build in `build\aa` with `/W4`, no warnings from the AA code.
+
+## Anti-aliasing on real game frames (Helldivers 2, 2026-11-26)
+
+Owner recording, four runs of 120 frames each in the same ship interior: game anti-aliasing off, game TAA, game DLAA
+(where the game's menu calls it that), and game AA off with MoonSR anti-aliasing on. The recordings are
+`%LOCALAPPDATA%\MoonSR\recordings\AAtests\HD2_1080p_{NoAA,TAA,DLAA,MoonSR_AA}` with `in_*` (captured input) and
+`out_*_real` (presented output) PNG pairs and an `index.csv` that pairs them.
+
+The filter numbers below are the isolated pass on the recorded **inputs**, so they do not include upscaling or
+sharpening:
+
+```powershell
+build\main\bin\moonsr_bench.exe --aa-image <in_frame.png> --aa-no-time
+```
+
+Settings: spatial, Balanced, strength 1.0, edge threshold 0.10, floor 0.03, text protection on. RTX 5060, 1920x1080.
+
+| Recorded input | Coverage | Pixels changed | Mean \|d\| | High-pass energy | Ratio | GPU |
+|---|---:|---:|---:|---|---:|---:|
+| Game AA off | 1.4-1.7 % | 10.95 % | 0.70 | 52.68 -> 48.85 | 0.927 | 0.056-0.061 ms |
+| Game TAA | 1.5-1.6 % | 9.47 % | 0.43 | 27.30 -> 24.60 | 0.901 | 0.054-0.057 ms |
+| Game DLAA | 2.0-2.1 % | 10.30 % | 0.53 | 35.46 -> 32.37 | 0.913 | 0.055-0.058 ms |
+| Game AA off, MoonSR AA run | 1.7 % | 10.92 % | 0.72 | 54.68 -> 50.66 | 0.927 | 0.055 ms |
+
+Eight consecutive frames of the no-AA run vary only in the second decimal (changed 10.94-10.97 %, ratio 0.927), so the
+filter is temporally stable on a near-static scene.
+
+Quality presets on the same no-AA frame:
+
+| Preset | Pixels changed | Mean \|d\| | Max change | Energy ratio | Synthetic slanted-edge ratio |
+|---|---:|---:|---:|---:|---:|
+| Performance | 10.06 % | 0.51 | 42 | 0.938 | 0.73-0.80 |
+| Balanced (default) | 10.95 % | 0.70 | 62 | 0.927 | 0.62-0.70 |
+| Quality | 11.20 % | 0.91 | 84 | 0.929 | 0.46-0.58 |
+
+All three presets pass every synthetic check (`--aa --aa-quality <preset>`): exact 0/90 degree edges unchanged, text
+stroke pixels unchanged, gradient unchanged.
+
+Pipeline check (the `out_*` frames against their paired `in_*` frames, which include the 1:1 MoonSR Spatial scaler at
+sharpness 0.25 and the MoonSR frame counter):
+
+- AA-off recording: 0.07 % of pixels changed, mean 0.08. The stage was off and the 1:1 scaler plus sharpening is a
+  near no-op.
+- MoonSR AA recording: 10.98 % changed, mean 0.80, i.e. the same magnitude as the isolated filter above. The app log
+  shows the stage being created for this run and the toggles before it.
+
+What the 1:1 crops show (viewed at 2-3x, saved under `build\aareal\` during this run, not committed):
+
+- Slanted silhouettes (helmet rim, console bezels, ceiling struts, the diagonal light strip) are visibly cleaner.
+  The staircase is split between two pixels instead of one, with no halo, ringing or double edge.
+- Fine detail survives: the striped light diffuser, floor grating, screen dithering and the specular scratches are not
+  blurred, and the game's own anti-aliased HUD text looked unchanged to the eye.
+- Quality softens thin bright features a little more than Balanced (a 1-2 px specular rim on the helmet gets dimmer
+  and wider) and slightly softens glyph edges. Balanced is the safer default; Quality is a visible step up on
+  diagonals.
+- The TAA and DLAA frames barely change under the filter (mean |d| 0.43-0.53 versus 0.70 on the aliased frame), so
+  running MoonSR AA on top of a temporal anti-aliased game adds little.
+
+Honest limits of this comparison: the four recordings are the same room but not the same camera pose, so the energy
+columns are not a like-for-like scoring of MoonSR AA against TAA or DLAA. What they do show is the scale: the game's
+TAA/DLAA captures sit at 27-35 high-pass energy against 53 for no AA, while MoonSR AA moves a no-AA frame by 7 %
+(52.68 -> 48.85). MoonSR AA is a light spatial filter, not a replacement for temporal anti-aliasing. There is no
+reference image and no ground truth, so no PSNR/SSIM claim is made.

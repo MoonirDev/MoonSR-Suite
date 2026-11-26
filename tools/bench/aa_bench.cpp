@@ -237,6 +237,32 @@ int MaxDifference(const Image& a, const Image& b) {
     return d;
 }
 
+// How much of the picture the filter touched: share of pixels with any channel change, mean and maximum change per pixel
+// (0..255). On a real frame this is the honest "did it do anything" number; the energy ratio says whether the finest
+// detail survived.
+struct PixelChangeStats {
+    double changedPct = 0.0;
+    double meanAbs = 0.0;
+    int maxDiff = 0;
+};
+
+PixelChangeStats PixelChange(const Image& a, const Image& b) {
+    PixelChangeStats s;
+    size_t changed = 0;
+    double sum = 0.0;
+    const size_t n = a.px.size() / 4;
+    for (size_t i = 0; i < a.px.size(); i += 4) {
+        int d = 0;
+        for (int c = 0; c < 3; ++c) d = std::max(d, std::abs(static_cast<int>(a.px[i + c]) - static_cast<int>(b.px[i + c])));
+        if (d > 0) ++changed;
+        s.maxDiff = std::max(s.maxDiff, d);
+        sum += static_cast<double>(d);
+    }
+    s.changedPct = n ? 100.0 * static_cast<double>(changed) / static_cast<double>(n) : 0.0;
+    s.meanAbs = n ? sum / static_cast<double>(n) : 0.0;
+    return s;
+}
+
 // ------------------------------------------------------------------ GPU harness
 struct Harness {
     GpuDevice* dev = nullptr;
@@ -302,11 +328,13 @@ struct SceneResult {
     bool ok = false;
 };
 
-AaSettings DefaultSettings() {
+AaSettings DefaultSettings(const AaBenchOptions& o) {
     AaSettings s;
     s.mode = AaMode::Spatial;
-    s.quality = AaQuality::Balanced;
-    s.strength = 1.0f;
+    s.quality = o.quality == 0   ? AaQuality::Performance
+              : o.quality == 2   ? AaQuality::Quality
+                                 : AaQuality::Balanced;
+    s.strength = o.strength >= 0.0f ? o.strength : 1.0f;
     s.edgeThreshold = 0.10f;
     s.edgeThresholdMin = 0.03f;
     s.protectText = true;
@@ -327,7 +355,12 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
         return 1;
     }
     printf("\n-- Adapter: %s (VEN_%04X DEV_%04X)\n", Narrow(adapter.name).c_str(), adapter.vendorId, adapter.deviceId);
-    printf("Anti-aliasing: spatial tier, Balanced, strength 1.0, edge threshold 0.10, floor 0.03, text protection on.\n");
+    const AaSettings def = DefaultSettings(o);
+    printf("Anti-aliasing: spatial tier, %s, strength %.2f, edge threshold %.2f, floor %.2f, text protection %s.\n",
+           def.quality == AaQuality::Performance ? "Performance"
+           : def.quality == AaQuality::Quality   ? "Quality" : "Balanced",
+           static_cast<double>(def.strength), static_cast<double>(def.edgeThreshold),
+           static_cast<double>(def.edgeThresholdMin), def.protectText ? "on" : "off");
     printf("Synthetic scenes %ux%u, hard (aliased) edges, one frame each. Measurements are of this filter only.\n\n",
            1280u, 720u);
 
@@ -355,7 +388,7 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
     }
 
     Harness h;
-    if (!h.Init(*dev, W, H, DefaultSettings(), err)) {
+    if (!h.Init(*dev, W, H, DefaultSettings(o), err)) {
         printf("error: %s\n", err.c_str());
         return 1;
     }
@@ -440,7 +473,7 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
     if (o.timing) {
         for (const auto& [tw, th] : {std::pair<uint32_t, uint32_t>{1920, 1080}, {2560, 1440}}) {
             Harness th2;
-            if (!th2.Init(*dev, tw, th, DefaultSettings(), err)) { printf("error: %s\n", err.c_str()); ++failures; continue; }
+            if (!th2.Init(*dev, tw, th, DefaultSettings(o), err)) { printf("error: %s\n", err.c_str()); ++failures; continue; }
             Scene busy;
             GenTextHud(tw, th, busy);
             th2.Upload(busy.img);
@@ -491,7 +524,7 @@ int RunAaImage(const AaBenchOptions& o, const AdapterInfo& adapter) {
             continue;
         }
         Harness h;
-        if (!h.Init(*dev, src.w, src.h, DefaultSettings(), err)) {
+        if (!h.Init(*dev, src.w, src.h, DefaultSettings(o), err)) {
             printf("error: %s\n", err.c_str());
             ++failures;
             continue;
@@ -505,9 +538,14 @@ int RunAaImage(const AaBenchOptions& o, const AdapterInfo& adapter) {
         const double before = HighPassEnergy(src);
         const double after = HighPassEnergy(out);
         const double ratio = before > 0.0 ? after / before : 1.0;
-        printf("%s: %ux%u, aliased-edge coverage %.1f %%, high-pass energy %.2f -> %.2f (%.3f), max change %d, GPU %.3f ms\n",
-               path.filename().string().c_str(), src.w, src.h, static_cast<double>(st.edgeCoverage) * 100.0, before, after,
-               ratio, MaxDifference(src, out), st.gpuMs);
+        const PixelChangeStats cs = PixelChange(src, out);
+        const AaSettings def = DefaultSettings(o);
+        printf("%s: %ux%u, %s strength %.2f, coverage %.1f %%, changed %.2f %% of pixels (mean |d| %.2f), "
+               "high-pass energy %.2f -> %.2f (%.3f), max change %d, GPU %.3f ms\n",
+               path.filename().string().c_str(), src.w, src.h,
+               def.quality == AaQuality::Performance ? "Performance" : def.quality == AaQuality::Quality ? "Quality" : "Balanced",
+               static_cast<double>(def.strength), static_cast<double>(st.edgeCoverage) * 100.0, cs.changedPct, cs.meanAbs,
+               before, after, ratio, cs.maxDiff, st.gpuMs);
         if (o.saveImages && !o.outDir.empty()) {
             std::error_code ec;
             fs::create_directories(o.outDir, ec);
