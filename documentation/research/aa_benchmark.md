@@ -103,12 +103,12 @@ good score but a bad per-scene row is visible immediately. The owner's visual re
 `--aa-sweep` evaluates a grid of `AaSettings`:
 
 - quality: Performance / Balanced / Quality (search length 8 / 12 / 16)
-- strength: 0.7 / 0.85 / 1.0
+- strength: 0.60 / 0.70 / 0.85 / 1.0
 - relative edge threshold: 0.08 / 0.10 / 0.12
 - absolute floor: 0.03 (configurable)
 - text/HUD protection: on for eligible candidates; off only as a diagnostic
 
-The default grid is 27 candidates. Each candidate runs the scene set at 1280x720/SS=4, then a cost pass at 1080p and
+The default grid is 36 candidates. Each candidate runs the scene set at 1280x720/SS=4, then a cost pass at 1080p and
 1440p on a busy 2-px checker/text scene. The run prints a ranked table and writes `candidates.csv` plus a per-scene
 `scenes.csv`.
 

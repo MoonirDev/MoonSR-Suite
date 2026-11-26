@@ -21,7 +21,7 @@ struct AaSuiteOptions {
     // Candidate grid. The current default (Balanced, 1.0, 0.10, 0.03, protection on) is always added.
     bool sweep = false;
     std::vector<int> qualities{0, 1, 2};
-    std::vector<float> strengths{0.70f, 0.85f, 1.0f};
+    std::vector<float> strengths{0.60f, 0.70f, 0.85f, 1.0f};
     std::vector<float> thresholds{0.08f, 0.10f, 0.12f};
     std::vector<float> floors{0.03f};
     bool protect = true;
