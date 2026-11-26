@@ -175,9 +175,9 @@ struct EngineStats {
     std::wstring reliefNote;
     double reliefGpuMs = 0.0;
     // Anti-aliasing. aaActive: the filter is changing the image. aaMode: the mode in effect (may be lower than
-    // requested while a tier is not built). aaEdgeCoverage: measured share of aliased-edge samples. aaStrength: the
-    // effective strength after the already-anti-aliased reduction. aaNote: plain-language state. aaGpuMs: measured
-    // GPU time per applied frame (timestamp median, lagged; 0 when off or not measured).
+    // requested while a tier is not built). aaEdgeCoverage: measured share of sampled pixels that are long, slanted,
+    // hard steps (a density, not a quality score). aaStrength: the strength the pass used. aaNote: plain-language
+    // state. aaGpuMs: measured GPU time per applied frame (timestamp median, lagged; 0 when off or not measured).
     bool aaActive = false;
     AaMode aaMode = AaMode::Off;
     float aaEdgeCoverage = 0.0f;

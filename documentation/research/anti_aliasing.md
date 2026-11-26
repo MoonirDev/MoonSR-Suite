@@ -18,6 +18,11 @@ interface sketch in Part 7 is a proposal for the lead, who owns the contract hea
 | **[E]** | Cost or quality **estimate**. Not a measurement. Must not appear in `BENCHMARKS.md`. |
 | **[U]** | Unknown, or not publicly documented. |
 
+Implementation update (2026-11-26): the spatial tier was rebuilt as a three-pass pattern-based morphological filter
+(MLAA family). The FXAA-style build whose measurements appear under "Measured after T1" is superseded; the rebuild and
+its measurements are at the end of this note. The contract, the settings section, the page and the load-order stage are
+unchanged.
+
 ---
 
 ## Part 0: Summary and recommendation
@@ -564,6 +569,9 @@ from the page; the views are CLI-only and A/B compare on Home covers the split.)
 
 ## Measured after T1 (2026-11-25)
 
+**Historical: this is the FXAA-style build, superseded by the rebuild below.** Kept as the record of what that build
+measured and why the owner asked for a rebuild.
+
 The contract in 7.2 was approved as proposed; the owner chose **after upscaling** as the default position (overriding
 the recommendation in 3.1), with the pass still orderable. T1 is the spatial tier only; Directional and Temporal are
 accepted by the settings but fall back to Spatial with a status reason.
@@ -611,3 +619,147 @@ staircase gone with the sand and grass texture intact, and HUD text unchanged. T
 0.70 / 0.85 / 1.00. The edge threshold and dark-scene floor are internal constants and the "reduce when already smooth"
 option was removed: the coverage figure is a density, not a measure of how well edges are resolved, so it is displayed on
 Home and never changes the strength.
+
+---
+
+## T1 rebuild: pattern-based morphological filter (2026-11-26)
+
+This is the current spatial tier. It replaces the FXAA-style build above. The contract, settings, page, per-stage GPU,
+load-order token and statistics fields were kept; only the filter and its benchmark checks changed.
+
+### Why the rebuild
+
+The FXAA-style build reduced the strongest scanline step to 0.42-0.65 of its input on synthetic edges and changed
+15.7-17.7 % of pixels on the owner's real frames, but the owner reported three times that it was not visible in Black
+Mesa and Helldivers 2. A flat two-side average changes a wide band of every edge, which both softens texture and still
+leaves the shallow staircase read as a step. The rebuild returns to the morphological family (MLAA and SMAA) and makes
+the correction geometric: a straight edge run is not touched, and only the staircase end pixels receive coverage.
+
+### Algorithm
+
+1. **Edge mask** (`shaders/aa/aa_edge_ps.hlsl`, RGBA8). Luma is `dot(rgb, (0.299, 0.587, 0.114))` on the gamma-encoded
+   capture. A vertical edge is written when `|L(p) - L(p-W)|` exceeds `max(floor, threshold * localMax)`; a horizontal
+   edge uses `p-N`. The edge survives only when its delta is at least half the largest delta in the 3x3 neighbourhood
+   (the SMAA local-contrast adaptation). This is what keeps weak texture grain next to a silhouette out of the mask.
+   The B channel holds a sign-based one-texel-stroke flag: both neighbours on an axis must be on the same side of the
+   centre. It survives a textured background, unlike an equality test, and does not fire on a straight half-plane edge,
+   where one neighbour is on the centre's side.
+2. **Coverage weights** (`aa_weights_ps.hlsl`, RGBA8: north, south, west, east). For each of the pixel's four edges,
+   walk the run along the edge until it ends or a crossing edge turns the staircase, up to 8 / 12 / 16 texels for
+   Performance / Balanced / Quality. A pixel in the middle of a run gets zero. A pixel at an end gets
+   `0.5 / sqrt(runLength)`. The exact area of the triangle cut by the approximating line is `1 / (2 * runLength)`; the
+   sqrt falloff is a deliberate perceptual tuning (D14) because the exact area was measured as too subtle on real
+   frames. The thin-stroke flag, dilated by one texel, drops all four weights in the protected region, so glyph caps and
+   arm/stem junctions are protected as well as the straight sides. Two per-edge far-side tests additionally protect a
+   one-texel feature when the pixel being blended is the background beside it.
+3. **Blend** (`aa_blend_ps.hlsl`). Read the four weights, pick the largest, and blend the centre towards that neighbour
+   with that weight. No 3x3 average and no along-edge taps: the texture on both sides of the edge is never mixed into
+   the result. Letterbox pixels are copied bit for bit.
+4. **Statistics** (`aa_stats_cs.hlsl`). A 128x128 sample grid counts long, slanted, hard one-pixel steps with a
+   two-/four-texel coherence test and a centre-versus-two-side deviation of at least 0.25. The counters are copied to a
+   staging ring and read a few frames later without waiting. The figure is a hard-edge density, not a quality score; it
+   is shown on Home and never changes the strength.
+
+The filter is original HLSL written from the published MLAA and SMAA descriptions. No SMAA demo code, area texture or
+search texture is bundled. `tools/aa_lab/_reference/` holds a local SMAA demo for visual comparison only and is
+git-ignored.
+
+### Placement and interactions
+
+The stage remains user-orderable and runs on its own GPU. The default position is still **after upscaling** (the
+owner's 2026-11-25 choice), before Smart parallax. At that position it runs once per displayed frame at output
+resolution. Before upscaling it runs once per real frame at game resolution and generated frames inherit it; that is
+cheaper but filters at the lower resolution. `outputPixelScale` is reserved and unused in this tier.
+
+- **Frame generation:** with the default order, generated frames receive the pass like real frames. Before upscaling,
+  the generator interpolates already-filtered frames and no per-generated-frame cost is paid.
+- **MoonSR temporal upscaling (ALSR):** after upscaling, the pass cleans the reconstruction's output; before it, the
+  pass removes high-frequency input the reconstruction could have used. The user chooses by the load order. There is no
+  automatic reduction when ALSR is selected.
+- **Smart parallax:** `ComposeAndPresent` applies AA first, so relief shading is not filtered. A custom order that puts
+  relief before AA is not honoured; this is the same documented limitation as before.
+- **A/B compare:** the left half shows the raw capture, the right half the final image. The edge-mask and blend-weight
+  debug views are developer tools reached with `moonsr_cli --aa-view edges|weights`.
+
+### Measurements
+
+Hardware: Ryzen 9 7900X, 31 GB, NVIDIA GeForce RTX 5060 (driver 621.14, UMD 32.0.16.2114), Windows 11 build
+26300.9974. Synthetic scenes are 1280x720; timings are the isolated pass plus statistics dispatch, median of eight
+timestamp pairs on an otherwise idle GPU. Commands and the full table are in `documentation/BENCHMARKS.md`.
+
+Synthetic checks (Balanced, strength 1.0, text/HUD protection on):
+
+| Check | Result | Bound |
+|---|---:|---|
+| Slanted edge, strongest scanline step after / before (20 / 30 / 45 / 60 / 70 deg) | 0.579 / 0.437 / 0.501 / 0.500 / 0.584 | <= 0.80 |
+| Exactly vertical / horizontal edge, step ratio | 1.000 | >= 0.98 |
+| One-pixel line grid, mean luma after / before | 1.000 | >= 0.90 |
+| Small text over a 2 px checker, stroke pixels changed / mean luma / max change | 0.00 % / 1.000 / 0 | <= 1 %, >= 0.99, <= 64 |
+| 4 px checker, luma stddev after / before | 1.000 | >= 0.95 |
+| 4 px checker, high-pass energy after / before | 1.000 | >= 0.90 |
+| 2 px checker (informational), stddev / high-pass | 0.998 / 1.001 | not judged |
+| Smooth gradient, maximum change | 0 | <= 4/255 |
+
+Cost:
+
+| Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
+|---|---:|---:|---:|---:|
+| 1920x1080 | 0.154 ms | 1.144 ms | 3.943 ms | 0.3 ms |
+| 2560x1440 | 0.278 ms | 1.989 ms | 6.489 ms | 0.6 ms |
+
+The Radeon is a correctness check, not a performance target. All checks pass with the same reported metrics on the
+three adapters; no vendor-specific path is used. On a real HD2 frame the isolated pass measures 0.190-0.195 ms; in the
+live engine on a 1280x720 -> 1080p test pattern it measures 0.117-0.124 ms with 485 frames, no drops and a clean stop.
+
+Real recordings (120 frames each, `%LOCALAPPDATA%\MoonSR\recordings\AAtests`; isolated pass on the recorded inputs):
+
+| Recorded input | Hard-edge density | Pixels changed | Mean \|d\| | High-pass energy | Ratio | GPU |
+|---|---:|---:|---:|---|---:|---:|
+| Helldivers 2, AA off, frame 2180 | 1.4 % | 1.52 % | 0.21 | 52.67 -> 52.09 | 0.989 | 0.197 ms |
+| Helldivers 2, AA off, frame 2200 | 1.5 % | 1.52 % | 0.21 | 52.62 -> 52.04 | 0.989 | 0.196 ms |
+| Black Mesa, AA off, frame 1033 | 1.2 % | 2.89 % | 0.53 | 51.55 -> 49.47 | 0.960 | 0.190 ms |
+| Black Mesa, AA off, frame 1050 | 1.1 % | 2.90 % | 0.53 | 51.61 -> 49.54 | 0.960 | 0.189 ms |
+
+The previous FXAA-style build changed 15.7 % (HD2) and 17.7 % (Black Mesa) of pixels by a mean of 2.94 / 2.95 and
+removed 21-24 % of the high-pass energy. The new filter touches far fewer pixels but moves each one further where it
+acts; the energy column shows it is not a blur. This is not a like-for-like quality comparison: there is no ground
+truth and the recordings are not the same camera pose across AA states. The owner's eye decides.
+
+Presets on the same HD2 frame produce identical output because every run is shorter than 8 texels; only the cost
+differs: Performance 0.174 ms, Balanced 0.193 ms, Quality 0.205 ms. Quality is the setting for shallow (near-horizontal
+or near-vertical) staircases whose run exceeds 12 texels.
+
+### Honest limits
+
+- **Still spatial.** It cannot recover detail the game never rendered, and it cannot remove sub-pixel shimmer on moving
+  content. DLAA-class results need temporal accumulation with jitter and motion vectors; that is not this tier.
+- **Static HUD masking is deferred.** Both protection toggles drive the same geometric thin-stroke guard in T1. A HUD
+  stroke that is thicker than one texel, or a translucent/animated overlay, can still be softened. A real static-overlay
+  mask needs frame history (or the frame generator's `staticMask`) and belongs to T2.
+- **One-texel game features are protected, not anti-aliased.** A thin railing or wire stays crisp even when it is
+  jagged. That is the price of leaving text intact without a history mask.
+- **Shallow staircases get a small weight.** `0.5 / sqrt(L)` is stronger than the exact area but still modest at
+  `L = 16` (0.125). If the owner sees shallow roof lines and curbs still stepping, the next tool is the SMAA-style area
+  lookup, not more blend weight.
+- **No ground truth and no head-to-head.** No PSNR/SSIM against the game's TAA/DLAA, and the recording pairs are not
+  aligned. The synthetic checks are regression guards, not a quality score.
+- **Low-end GPUs pay for the fixed passes.** The A400 and the Radeon are 7-23x the RTX 5060 cost. The filter is off by
+  default and the Performance preset does not remove the fixed edge/weight/blend passes.
+
+### Decisions recorded by this rebuild
+
+- **D13: Rebuild the spatial tier as a pattern-based morphological filter.** Run-length coverage replaces the flat
+  two-side average. The contract, page, settings and load-order stage stay. Accepted: this is the owner's "clean
+  rebuild" request, and the result passes every synthetic check the FXAA-style build passed plus the strict text one.
+- **D14: Endpoint falloff `0.5 / sqrt(L)`, not the exact `1 / (2L)`.** The exact area changed 1.5 % of HD2 pixels by a
+  mean of 0.18 and left shallow steps; the sqrt falloff costs no measured texture or text contrast and corrects the
+  shallow case more. Revisit only with the owner's real-game A/B on near-horizontal edges.
+- **D15: Text/HUD protection is a sign-based one-texel stroke mask, dilated by one texel, shared by both toggles.**
+  Static-overlay masking is a T2 item because it needs history; do not claim it works before it exists.
+- **D16: Default position stays after upscaling, before relief.** The owner chose it on 2026-11-25; the stage remains
+  orderable and works before upscaling at game resolution.
+- **D17: Defaults stay Balanced, strength 100 %, both protections on.** Quality only lengthens the run search. It does
+  not change the blend weight, so a review that compares presets on a 45-degree edge will see no difference.
+- **D18: Temporal remains deferred.** The frame generator's field is 8-pixel cells. A temporal AA tier needs a
+  per-pixel refinement, a ghosting bound on thin features, and a static-HUD mask before it can be offered. Shipping a
+  temporal mode on the block field alone would ghost exactly the text and railings this tier protects.

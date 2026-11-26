@@ -89,7 +89,10 @@ moonsr_add_shader(relief/relief_apply_ps.hlsl       ps_5_0 g_ps_relief_parallax_
 moonsr_add_shader(relief/relief_apply_ps.hlsl       ps_5_0 g_ps_relief_motion_apply DEFINES RELIEF_PAIR=1 RELIEF_PARALLAX=1 RELIEF_MOTION_DEPTH=1)
 
 # --- upscaling-engineer: anti-aliasing (src/aa) ---
-moonsr_add_shader(aa/aa_spatial_ps.hlsl            ps_5_0 g_ps_aa_spatial)
+# T1 spatial tier: edge mask, run-length coverage weights, neighbourhood blend, hard-edge density.
+moonsr_add_shader(aa/aa_edge_ps.hlsl               ps_5_0 g_ps_aa_edge)
+moonsr_add_shader(aa/aa_weights_ps.hlsl            ps_5_0 g_ps_aa_weights)
+moonsr_add_shader(aa/aa_blend_ps.hlsl              ps_5_0 g_ps_aa_blend)
 moonsr_add_shader(aa/aa_stats_cs.hlsl              cs_5_0 g_cs_aa_stats)
 
 # --- gpu-rendering-engineer: cursor overlay ---

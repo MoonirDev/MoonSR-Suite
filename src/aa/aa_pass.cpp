@@ -1,23 +1,27 @@
-// Anti-aliasing, spatial tier (T1). Owner: upscaling-engineer (algorithms) with shader-engineer (HLSL under
-// shaders/aa/). Clean-room implementation from the published description of the technique
-// (documentation/research/anti_aliasing.md, Part 2); no third-party shader code was read or used.
+// Anti-aliasing, spatial tier (T1): pattern-based morphological filter.
 //
-// One full-screen pass: detect a luminance step, orient it from the local gradient, average across it with a
-// slope-following offset, and blend by a sub-pixel weight (aa_spatial_ps.hlsl). A tiny compute pass samples a 128x128 grid
-// of the source and counts aliased edges (aa_stats_cs.hlsl); its counters reach the CPU a few frames later through a
-// staging ring and drive the "already anti-aliased" reduction and the status text.
+// Three full-screen passes on the pipeline thread:
+//   1. edge detection (aa_edge_ps.hlsl) writes an R8G8 mask of vertical and horizontal luma steps;
+//   2. coverage weights (aa_weights_ps.hlsl) walks each edge run and writes 0.5 / runLength at the two ends;
+//   3. neighbourhood blend (aa_blend_ps.hlsl) moves the end pixel towards the neighbour across the strongest edge.
 //
-// Missing: the Directional (pattern/area) and Temporal tiers. They are accepted by the settings and reported as a
-// fallback to Spatial; the research note explains why they are separate milestones.
+// The filter is written from the published descriptions of MLAA (Reshetov, Intel, 2009) and SMAA (Jimenez et al.,
+// 2011); no third-party shader code was copied. A tiny compute pass samples a 128x128 grid and counts long, slanted,
+// hard steps; the counters reach the CPU a few frames later through a staging ring and drive the Home status. That
+// figure is a hard-edge density, not a quality score, and it never changes the strength (KNOWN_ISSUES.md).
 //
-// Threading: pipeline thread only (owner of the GpuDevice immediate context). No per-frame heap allocation: the
-// sampler, constant buffers, query sets, counters and staging buffers are created once in Create().
+// Threading: pipeline thread only (owner of the GpuDevice immediate context). No per-frame heap allocation: shaders,
+// samplers, constant buffers, query sets, counters and staging buffers are created once in Create(); the two
+// intermediate textures are recreated only when the frame size changes. All resources are released by Reset/Destroy or
+// when the engine drops the pass, so an off stage costs nothing.
 #include "aa/aa_pass.h"
 
 #include "core/log.h"
 
 #include "g_cs_aa_stats.h"
-#include "g_ps_aa_spatial.h"
+#include "g_ps_aa_blend.h"
+#include "g_ps_aa_edge.h"
+#include "g_ps_aa_weights.h"
 #include "g_vs_fullscreen.h"
 
 #include <wrl/client.h>
@@ -26,6 +30,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 namespace moonsr {
 namespace {
@@ -50,7 +55,7 @@ struct AaConstants {
     uint32_t quality;
     uint32_t protectText;
     uint32_t debug;
-    float pad;
+    uint32_t protectHud;
 };
 static_assert(sizeof(AaConstants) == 64, "AaConstants must match the HLSL constant buffer");
 
@@ -82,7 +87,6 @@ AaSettings Sanitize(const AaSettings& in) {
     return s;
 }
 
-
 struct QuerySet {
     ComPtr<ID3D11Query> disjoint, begin, end;
     bool pending = false;
@@ -103,6 +107,24 @@ double Median(const QueryRing& ring) {
     return v[ring.sampleCount / 2];
 }
 
+// The two intermediate targets of the filter, recreated only when the frame size changes.
+struct Targets {
+    Size size;
+    ComPtr<ID3D11Texture2D> edge, weight;
+    ComPtr<ID3D11RenderTargetView> edgeRtv, weightRtv;
+    ComPtr<ID3D11ShaderResourceView> edgeSrv, weightSrv;
+
+    void Reset() {
+        edgeSrv.Reset();
+        weightSrv.Reset();
+        edgeRtv.Reset();
+        weightRtv.Reset();
+        edge.Reset();
+        weight.Reset();
+        size = {};
+    }
+};
+
 class AaPassImpl final : public AaPass {
 public:
     static std::unique_ptr<AaPass> Create(GpuDevice& device, std::wstring& error);
@@ -113,13 +135,12 @@ public:
                const RectI& contentInDst, float outputPixelScale) override;
 
     void Reset() override {
-        // No history in T1; only the measurements need a clean start. A scene cut invalidates the coverage estimate,
-        // so the next reading replaces it instead of being averaged into the old one.
+        // No history in T1. Drop the measurement window so the next reading describes the new scene; the readback
+        // ring is left to drain on its own (a staging buffer must not be overwritten while a copy is in flight).
         for (QuerySet& q : timing_.sets) q.pending = false;
         timing_.sampleCount = timing_.sampleNext = 0;
-        readbackNext_ = 0;
-        for (bool& pending : readbackPending_) pending = false;
         coverageEma_ = -1.0f;
+        appliedFrames_ = 0;
     }
 
     AaStats Stats() const override;
@@ -128,15 +149,15 @@ private:
     explicit AaPassImpl(GpuDevice& device) : device_(device) {}
 
     bool Init(std::wstring& error);
+    bool EnsureTargets(Size size);
     void CollectTimings();
     void CollectStats();
-
-    float EffectiveStrength() const { return settings_.strength; }
+    void SetDrawState();
 
     GpuDevice& device_;
     AaSettings settings_;
     ComPtr<ID3D11VertexShader> vs_;
-    ComPtr<ID3D11PixelShader> ps_;
+    ComPtr<ID3D11PixelShader> psEdge_, psWeights_, psBlend_;
     ComPtr<ID3D11ComputeShader> csStats_;
     ComPtr<ID3D11Buffer> cbDraw_, cbStats_;
     ComPtr<ID3D11SamplerState> sampler_;
@@ -145,6 +166,7 @@ private:
     bool readbackPending_[kReadbackSlots]{};
     uint32_t readbackNext_ = 0;
 
+    Targets targets_;
     QueryRing timing_;
     bool timingAvailable_ = false;
     uint64_t appliedFrames_ = 0;
@@ -153,9 +175,11 @@ private:
 };
 
 bool AaPassImpl::Init(std::wstring& error) {
-    ID3D11Device* d = device_.Device();
+    ID3D11Device1* d = device_.Device();
     HRESULT hr = d->CreateVertexShader(g_vs_fullscreen, sizeof(g_vs_fullscreen), nullptr, &vs_);
-    if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_aa_spatial, sizeof(g_ps_aa_spatial), nullptr, &ps_);
+    if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_aa_edge, sizeof(g_ps_aa_edge), nullptr, &psEdge_);
+    if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_aa_weights, sizeof(g_ps_aa_weights), nullptr, &psWeights_);
+    if (SUCCEEDED(hr)) hr = d->CreatePixelShader(g_ps_aa_blend, sizeof(g_ps_aa_blend), nullptr, &psBlend_);
     if (SUCCEEDED(hr)) hr = d->CreateComputeShader(g_cs_aa_stats, sizeof(g_cs_aa_stats), nullptr, &csStats_);
     if (FAILED(hr)) {
         error = L"Anti-aliasing shaders could not be created: " + HrToString(hr);
@@ -216,6 +240,50 @@ bool AaPassImpl::Init(std::wstring& error) {
     return true;
 }
 
+bool AaPassImpl::EnsureTargets(Size size) {
+    if (targets_.size == size && targets_.edgeSrv && targets_.weightSrv) return true;
+    targets_.Reset();
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = size.width;
+    td.Height = size.height;
+    td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    ID3D11Device1* d = device_.Device();
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    HRESULT hr = d->CreateTexture2D(&td, nullptr, &targets_.edge);
+    if (SUCCEEDED(hr)) hr = d->CreateRenderTargetView(targets_.edge.Get(), nullptr, &targets_.edgeRtv);
+    if (SUCCEEDED(hr)) hr = d->CreateShaderResourceView(targets_.edge.Get(), nullptr, &targets_.edgeSrv);
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (SUCCEEDED(hr)) hr = d->CreateTexture2D(&td, nullptr, &targets_.weight);
+    if (SUCCEEDED(hr)) hr = d->CreateRenderTargetView(targets_.weight.Get(), nullptr, &targets_.weightRtv);
+    if (SUCCEEDED(hr)) hr = d->CreateShaderResourceView(targets_.weight.Get(), nullptr, &targets_.weightSrv);
+    if (FAILED(hr)) {
+        if (!logOnce_) {
+            logOnce_ = true;
+            MSR_LOG_ERROR(L"Anti-aliasing intermediates could not be created ({}x{}): {}", size.width, size.height,
+                          HrToString(hr));
+        }
+        targets_.Reset();
+        return false;
+    }
+    targets_.size = size;
+    return true;
+}
+
+void AaPassImpl::SetDrawState() {
+    ID3D11DeviceContext1* ctx = device_.Context();
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vs_.Get(), nullptr, 0);
+    ctx->RSSetState(nullptr);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->PSSetConstantBuffers(0, 1, cbDraw_.GetAddressOf());
+}
+
 bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
                        const RectI& contentInDst, float outputPixelScale) {
     if (!src || !dst || srcSize.Empty() || dstSize.Empty()) return false;
@@ -227,6 +295,7 @@ bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11Render
         }
         return false;
     }
+    if (!EnsureTargets(srcSize)) return false;
 
     RectI content = contentInDst;
     if (content.Empty()) content = {0, 0, static_cast<int32_t>(srcSize.width), static_cast<int32_t>(srcSize.height)};
@@ -234,9 +303,6 @@ bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11Render
     content.top = std::clamp(content.top, 0, static_cast<int32_t>(srcSize.height) - 1);
     content.right = std::clamp(content.right, content.left + 1, static_cast<int32_t>(srcSize.width));
     content.bottom = std::clamp(content.bottom, content.top + 1, static_cast<int32_t>(srcSize.height));
-
-    ID3D11DeviceContext1* ctx = device_.Context();
-    const float strength = EffectiveStrength();
 
     AaConstants c{};
     c.texSize[0] = static_cast<float>(srcSize.width);
@@ -247,14 +313,16 @@ bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11Render
     c.contentOrigin[1] = static_cast<float>(content.top);
     c.contentSize[0] = static_cast<float>(content.Width());
     c.contentSize[1] = static_cast<float>(content.Height());
-    c.strength = strength;
+    c.strength = settings_.strength;
     c.edgeThreshold = settings_.edgeThreshold;
     c.edgeThresholdMin = settings_.edgeThresholdMin;
     c.outputScale = ClampFinite(outputPixelScale, 0.25f, 16.0f, 1.0f);
     c.quality = static_cast<uint32_t>(settings_.quality);
     c.protectText = settings_.protectText ? 1u : 0u;
+    c.protectHud = settings_.protectHud ? 1u : 0u;
     c.debug = static_cast<uint32_t>(settings_.debugView);
 
+    ID3D11DeviceContext1* ctx = device_.Context();
     D3D11_MAPPED_SUBRESOURCE m{};
     HRESULT hr = ctx->Map(cbDraw_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m);
     if (FAILED(hr)) {
@@ -293,25 +361,46 @@ bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11Render
 
     const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(dstSize.width), static_cast<float>(dstSize.height),
                             0.0f, 1.0f};
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(vs_.Get(), nullptr, 0);
-    ctx->PSSetShader(ps_.Get(), nullptr, 0);
-    ctx->RSSetState(nullptr);
+    SetDrawState();
     ctx->RSSetViewports(1, &vp);
-    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
-    ctx->OMSetDepthStencilState(nullptr, 0);
-    ctx->OMSetRenderTargets(1, &dst, nullptr);
-    ctx->PSSetShaderResources(0, 1, &src);
-    ctx->PSSetConstantBuffers(0, 1, cbDraw_.GetAddressOf());
-    ctx->PSSetSamplers(0, 1, sampler_.GetAddressOf());
-    ctx->Draw(3, 0);
     ID3D11ShaderResourceView* nullSrv = nullptr;
-    ctx->PSSetShaderResources(0, 1, &nullSrv);
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    ID3D11RenderTargetView* nullRtv = nullptr;
+    ID3D11UnorderedAccessView* nullUav = nullptr;
 
-    // Aliased-edge coverage for the already-AA detector. One small dispatch per frame; the counters are read back a
-    // few frames later without waiting.
+    // 1. Edge mask.
+    ctx->OMSetRenderTargets(1, targets_.edgeRtv.GetAddressOf(), nullptr);
+    ctx->PSSetShader(psEdge_.Get(), nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &src);
+    ctx->Draw(3, 0);
+    ctx->OMSetRenderTargets(1, &nullRtv, nullptr);
+    ctx->PSSetShaderResources(0, 1, &nullSrv);
+
+    // 2. Coverage weights.
+    ctx->OMSetRenderTargets(1, targets_.weightRtv.GetAddressOf(), nullptr);
+    ctx->PSSetShader(psWeights_.Get(), nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &src);
+    ID3D11ShaderResourceView* edgeSrv = targets_.edgeSrv.Get();
+    ctx->PSSetShaderResources(1, 1, &edgeSrv);
+    ctx->Draw(3, 0);
+    ctx->OMSetRenderTargets(1, &nullRtv, nullptr);
+    ID3D11ShaderResourceView* nullSrvs[2] = {nullptr, nullptr};
+    ctx->PSSetShaderResources(0, 2, nullSrvs);
+
+    // 3. Blend.
+    ctx->OMSetRenderTargets(1, &dst, nullptr);
+    ctx->PSSetShader(psBlend_.Get(), nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &src);
+    edgeSrv = targets_.edgeSrv.Get();
+    ID3D11ShaderResourceView* weightSrv = targets_.weightSrv.Get();
+    ctx->PSSetShaderResources(1, 1, &edgeSrv);
+    ctx->PSSetShaderResources(2, 1, &weightSrv);
+    ctx->Draw(3, 0);
+    ctx->OMSetRenderTargets(1, &nullRtv, nullptr);
+    ID3D11ShaderResourceView* nullSrvs3[3] = {nullptr, nullptr, nullptr};
+    ctx->PSSetShaderResources(0, 3, nullSrvs3);
+    ctx->PSSetShader(nullptr, nullptr, 0);
+
+    // Aliased-edge coverage. One small dispatch per frame; the counters are read a few frames later without waiting.
     const UINT zeros[4] = {0, 0, 0, 0};
     ctx->ClearUnorderedAccessViewUint(counterUav_.Get(), zeros);
     ctx->CSSetShader(csStats_.Get(), nullptr, 0);
@@ -321,7 +410,6 @@ bool AaPassImpl::Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11Render
     ctx->CSSetSamplers(0, 1, sampler_.GetAddressOf());
     ctx->Dispatch(kStatsGrid / 8, kStatsGrid / 8, 1);
     ID3D11ShaderResourceView* nullCsSrv = nullptr;
-    ID3D11UnorderedAccessView* nullUav = nullptr;
     ctx->CSSetShaderResources(0, 1, &nullCsSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
     ctx->CSSetShader(nullptr, nullptr, 0);
@@ -391,7 +479,7 @@ AaStats AaPassImpl::Stats() const {
     st.active = settings_.mode != AaMode::Off && appliedFrames_ > 0;
     st.modeInEffect = settings_.mode == AaMode::Off ? AaMode::Off : AaMode::Spatial;
     st.edgeCoverage = coverageEma_ < 0.0f ? 0.0f : coverageEma_;
-    st.strengthInEffect = EffectiveStrength();
+    st.strengthInEffect = settings_.strength;
     st.gpuMs = Median(timing_);
     if (settings_.mode == AaMode::Directional || settings_.mode == AaMode::Temporal)
         st.reason = L"The selected anti-aliasing mode is not built yet; the spatial filter is used.";
@@ -401,7 +489,7 @@ AaStats AaPassImpl::Stats() const {
 std::unique_ptr<AaPass> AaPassImpl::Create(GpuDevice& device, std::wstring& error) {
     auto pass = std::unique_ptr<AaPassImpl>(new AaPassImpl(device));
     if (!pass->Init(error)) return nullptr;
-    MSR_LOG_INFO(L"Anti-aliasing (spatial) ready on '{}'", device.Info().name);
+    MSR_LOG_INFO(L"Anti-aliasing (spatial, pattern-based) ready on '{}'", device.Info().name);
     return pass;
 }
 

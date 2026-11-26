@@ -9,12 +9,14 @@
 //     spreads it over two pixels, so the largest step must shrink;
 //   - exact edges: the same measure on 0 and 90 degree edges, which the pixel grid already resolves exactly. The
 //     filter must leave them (nearly) alone: blurring them is softening, not anti-aliasing;
-//   - texture energy: RMS of the 4-neighbour Laplacian on a 2 px checker with noise, after / before (must stay close
-//     to 1: high-frequency texture must not be blurred);
+//   - texture preservation: luma standard deviation and RMS of the 4-neighbour Laplacian on a 4 px checker with noise,
+//     after / before. Both must stay close to 1: high-frequency texture must not be blurred. The 2 px checker is
+//     printed but not judged (every pixel of it is a staircase corner);
 //   - thin-line contrast: mean luma of one-pixel lines after / before (text and one-pixel strokes must stay sharp);
-//   - HUD protection: changed pixels and maximum change inside the known text mask over a busy background;
+//   - HUD protection: changed pixels and maximum change inside the known text mask over a busy background; the
+//     thin-stroke guard must leave >= 99 % of the stroke pixels untouched;
 //   - gradient: maximum change on a smooth gradient (nothing to anti-alias there);
-//   - AaStats after the run: aliased-edge coverage, effective strength, reason; GPU time (timestamp median).
+//   - AaStats after the run: hard-edge density, effective strength, reason; GPU time (timestamp median).
 // These are measurements of this filter, not a comparison with in-game anti-aliasing.
 #include "aa_bench.h"
 
@@ -339,6 +341,7 @@ struct Harness {
 struct SceneResult {
     std::string name;
     double before = 0, after = 0, ratio = 0;
+    double energyRatio = 1.0; // high-pass energy after / before (texture scenes)
     int maxDiff = 0;
     double hudChangedPct = 0;
     int hudMaxDiff = 0;
@@ -356,7 +359,7 @@ AaSettings DefaultSettings(const AaBenchOptions& o) {
     s.edgeThreshold = 0.10f;
     s.edgeThresholdMin = 0.03f;
     s.protectText = o.protectText;
-    s.protectHud = true;
+    s.protectHud = o.protectText;
     s.debugView = o.debugView == 1   ? AaDebugView::EdgeMask
                 : o.debugView == 2   ? AaDebugView::BlendWeight
                 : o.debugView == 3   ? AaDebugView::Split
@@ -455,13 +458,17 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
             break;
         case Kind::Texture:
         case Kind::TextureInfo:
-            // Judged on luma contrast (standard deviation), not on Laplacian energy: a corner-resolving filter changes
-            // corner pixels by design, and the Laplacian is dominated by exactly those. The 2-px checker is printed but
-            // not judged (every pixel of it is a staircase corner).
+            // Two measures. Luma standard deviation is the fair contrast measure; the 4-neighbour Laplacian is the
+            // high-frequency energy that a blur removes. The 2-px checker is printed but not judged (every pixel of it
+            // is a staircase corner), and both must survive on the 4-px checker that stands in for fine texture.
             r.before = LumaStdDev(s.img);
             r.after = LumaStdDev(out);
             r.ratio = r.before > 0.0 ? r.after / r.before : 1.0;
-            r.ok = s.kind == Kind::TextureInfo || r.ratio >= 0.75;
+            {
+                const double e0 = HighPassEnergy(s.img), e1 = HighPassEnergy(out);
+                r.energyRatio = e0 > 0.0 ? e1 / e0 : 1.0;
+            }
+            r.ok = s.kind == Kind::TextureInfo || (r.ratio >= 0.95 && r.energyRatio >= 0.90);
             break;
         case Kind::Lines: {
             // One-pixel line pixels are every 8th column/row; measure their mean luma.
@@ -479,16 +486,16 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
             const HudResult hr = HudDifference(s.img, out, s.hud);
             r.hudChangedPct = hr.total ? 100.0 * static_cast<double>(hr.changed) / static_cast<double>(hr.total) : 0.0;
             r.hudMaxDiff = hr.maxDiff;
-            // Strokes are allowed to lose a little contrast (a one-texel feature is blended at half weight), but the
-            // mean luma of the stroke pixels must stay close and only a small share of them may change at all. The
-            // maximum is a sanity bound that catches a stroke being smeared into the background, not a 1-pixel limit:
-            // a corner pixel is exactly the staircase the filter is meant to resolve.
+            // The thin-stroke guard protects one-texel strokes and their immediate surroundings. On this scene (small
+            // text over a busy 2 px checker) the stroke pixels must stay effectively unchanged: mean luma >= 99 %,
+            // at most 1 % of them may change at all, and no stroke pixel may move by more than 64/255. This is the
+            // objective form of the HUD/text requirement; the earlier FXAA-style builds failed it.
             const double before = MeanLuma(s.img, s.hud);
             const double after = MeanLuma(out, s.hud);
             r.before = before;
             r.after = after;
             r.ratio = before > 0.0 ? after / before : 1.0;
-            r.ok = r.hudChangedPct <= 25.0 && r.ratio >= 0.95 && r.hudMaxDiff <= 140;
+            r.ok = r.hudChangedPct <= 1.0 && r.ratio >= 0.99 && r.hudMaxDiff <= 64;
             break;
         }
         case Kind::Gradient:
@@ -499,6 +506,7 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
         if (o.saveImages && !o.outDir.empty()) {
             std::error_code ec;
             fs::create_directories(o.outDir, ec);
+            WritePng((o.outDir / (s.name + "_in.png")).wstring(), s.img, err);
             WritePng((o.outDir / (s.name + "_aa.png")).wstring(), out, err);
         }
         results.push_back(std::move(r));
@@ -524,16 +532,17 @@ int RunAaBench(const AaBenchOptions& o, const AdapterInfo& adapter) {
         }
     }
 
-    printf("%-14s %10s %10s %8s %8s %10s %8s %s\n", "scene", "before", "after", "ratio", "maxdiff", "hud_chg%",
-           "coverage", "check");
+    printf("%-14s %10s %10s %8s %7s %8s %10s %8s %s\n", "scene", "before", "after", "ratio", "hpass",
+           "maxdiff", "hud_chg%", "coverage", "check");
     for (const SceneResult& r : results) {
-        printf("%-14s %10.3f %10.3f %8.3f %8d %10.2f %7.1f%% %s\n", r.name.c_str(), r.before, r.after, r.ratio,
-               r.maxDiff, r.hudChangedPct, static_cast<double>(r.coverage) * 100.0, r.ok ? "pass" : "FAIL");
+        printf("%-14s %10.3f %10.3f %8.3f %7.3f %8d %10.2f %7.1f%% %s\n", r.name.c_str(), r.before, r.after, r.ratio,
+               r.energyRatio, r.maxDiff, r.hudChangedPct, static_cast<double>(r.coverage) * 100.0,
+               r.ok ? "pass" : "FAIL");
     }
     printf("\nChecks: aliased edges (20-70 deg) reduce the largest step in a scanline by >= 20 %%; exact edges (0, 90 deg)\n"
-           "change by < 2 %%; texture energy stays within +-15 %%; one-pixel lines keep >= 90 %% of their luma; text/HUD\n"
-           "strokes keep >= 97 %% of their mean luma, change in <= 5 %% of their pixels and never move by > 64/255;\n"
-           "gradient max change <= 4/255.\n");
+           "change by < 2 %%; 4-px texture keeps >= 95 %% of its luma contrast and >= 90 %% of its high-pass energy;\n"
+           "one-pixel lines keep >= 90 %% of their luma; text/HUD strokes keep >= 99 %% of their mean luma, change in\n"
+           "<= 1 %% of their pixels and never move by > 64/255; gradient max change <= 4/255.\n");
     if (!timing.empty()) {
         printf("\nGPU time (spatial pass + statistics dispatch, timestamp median, otherwise idle GPU):\n");
         for (const TimingRow& t : timing)

@@ -3,9 +3,11 @@
 // Design and evidence: documentation/research/anti_aliasing.md.
 //
 // What it is: the universal capture path receives a finished, resolved picture with no depth, motion vectors or MSAA
-// samples, so the only available anti-aliasing is a spatial post-process filter. Spatial estimates edge coverage from
-// luminance transitions and blends toward a directional average. It is off by default and it is an approximation: it
-// cannot recover detail the game never rendered, and it softens content the game already anti-aliased.
+// samples, so the only available anti-aliasing is a spatial post-process filter. The first tier is a pattern-based
+// morphological filter: it detects luminance steps, walks each edge run and applies a sub-pixel coverage weight only at
+// the ends of the run. The middle of a straight edge, text stem and UI rule is never touched. It is off by default and
+// it is an approximation: it cannot recover detail the game never rendered, and it softens content the game already
+// anti-aliased.
 //
 // Where it runs: at the position given by the user's load order. The default order places it after upscaling, so it
 // runs at output resolution once per displayed frame. Before upscaling it runs at game resolution once per real frame.
@@ -46,8 +48,8 @@ struct AaSettings {
     float strength = 1.0f;          // master 0..1 blend
     float edgeThreshold = 0.10f;    // relative luma contrast, 0.02..0.5
     float edgeThresholdMin = 0.03f; // absolute floor for dark scenes, 0..0.2
-    bool protectText = true;        // thin-stroke / text protection (half weight on stroke-shaped features)
-    bool protectHud = true;         // static pixels (T2 and later; the spatial filter uses the stroke test)
+    bool protectText = true;        // thin-stroke / text protection (one-texel strokes and a one-texel dilation)
+    bool protectHud = true;         // HUD protection: shares the thin-stroke guard in T1; static-overlay masking needs history
     AaDebugView debugView = AaDebugView::None; // EdgeMask / BlendWeight / Split are diagnostic
     bool operator==(const AaSettings&) const = default;
 };
@@ -70,9 +72,9 @@ public:
 
     // Once per frame that reaches this stage. Reads `src` (the finished image of the previous stage, `srcSize`) and
     // writes `dst` (same size, different texture). `contentInDst` is where the game image lies inside dst (letterbox
-    // excluded). `outputPixelScale` is the scale from captured pixels to output pixels, so the filter keeps its width
-    // in output pixels when it runs before upscaling. Returns false on failure (logged once); the engine then keeps
-    // the unfiltered image for that frame.
+    // excluded). `outputPixelScale` is the scale from captured pixels to output pixels; it is reserved for later tiers
+    // (the spatial tier works at the resolution it receives). Returns false on failure (logged once); the engine then
+    // keeps the unfiltered image for that frame.
     virtual bool Apply(ID3D11ShaderResourceView* src, Size srcSize, ID3D11RenderTargetView* dst, Size dstSize,
                        const RectI& contentInDst, float outputPixelScale = 1.0f) = 0;
 

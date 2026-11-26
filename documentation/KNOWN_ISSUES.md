@@ -238,46 +238,53 @@ Still open:
 - The flat-paint protection removes relief from smooth textures (wood coverage about 0.55); HUD protection also
   removes relief from about 4-5 game pixels of surface around static overlays.
 
-## Anti-aliasing, spatial tier T1 (unreleased, 2026-11-25)
+## Anti-aliasing, spatial tier T1 (unreleased, 2026-11-26)
 
 - Experimental. Only the spatial tier is built: choosing Directional or Temporal runs the spatial filter and the status
   reason says so. There is no temporal history, no motion input, no depth and no MSAA sample reconstruction.
+- The spatial tier is a three-pass pattern-based morphological filter (MLAA family): edge mask, run-length coverage
+  weights, neighbourhood blend. Straight runs are not touched; only the ends of a staircase receive a weighted blend.
+  It is original HLSL written from the published descriptions; no third-party shader code or lookup texture is bundled.
 - Real-game material exists: 120-frame recordings of Helldivers 2 (game AA off, TAA, DLAA, two MoonSR AA runs) and
   Black Mesa (game AA off, two MoonSR AA runs), measured in BENCHMARKS.md. Two games, no ground truth, and the runs are
   not the same camera pose, so there is no objective quality score and no head-to-head against the game's TAA.
-- The spatial tier is now a simple FXAA-style filter (the owner asked for it directly after the morphological build
-  still left visible steps). On the Black Mesa no-AA frame it changes 17.7 % of pixels by a mean of 2.95/255 and removes
-  23.5 % of the high-pass energy; on HD2 15.7 % / 2.94 / 21.2 %. It is visibly stronger than the morphological build and
-  softer: a 4 px texture keeps 78 % of its contrast and a 2 px checker is flattened.
-- FXAA-class filtering cannot match native DLAA, which accumulates 8-16 jittered samples per pixel over time with the
-  game's motion vectors. A temporal tier using MoonSR's own motion estimation is the only path to that character of
-  result; it is not built.
-- Balanced is the default; Quality uses the same sample distance with a full blend towards the two-side average and is
-- Balanced is the default; Quality uses the same sample distance with a full blend towards the two-side average and is
-  the setting to try when Balanced still looks too subtle. Performance leaves more aliasing.
-- The edge threshold (10 %) and dark-scene floor (3 %) are internal constants now, and the "reduce when already smooth"
-  option was removed: the coverage number is a density, not a measure of how well the edges are resolved, so it is shown
-  on Home but never changes the strength.
-- Text/HUD protection is geometric, not a HUD mask: a one-texel ridge is skipped while the toggle is on and blended when
-  it is off, and straight stems and UI rules never blend because the edge does not step there. Synthetic text keeps
-  96.0 % of its stroke mean with 13 % of stroke pixels changing (worst pixel 119/255 at a glyph corner). Small in-scene
-  labels (keyboard keys, signs) do get softer - that is the FXAA trade-off.
-- A 4 px checker keeps 78 % of its luma contrast and a 2 px checker is flattened. Real fine textures (sand, grass,
-  cloth) keep their structure in the 1:1 crops.
-- The "already anti-aliased" detector counts hard steps on a 128x128 sample grid with a long-edge coherence test. It
-  reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the one-pixel text and 2 px checker scenes, and 1.0 % on a real
-  already-anti-aliased screenshot. That is a hard-edge *density*, not a measure of how well the edges are resolved, so
-  a frame with a single aliased silhouette reads lower than a text-heavy frame with smooth text. It is displayed on
-  Home only and never changes the strength.
+- On the recorded no-AA frames the filter changes 1.5 % of Helldivers 2 pixels (mean 0.21/255, high-pass energy 0.989)
+  and 2.9 % of Black Mesa pixels (mean 0.53, energy 0.960). The earlier FXAA-style build changed 15.7-17.7 % by a mean of
+  about 2.9 and removed 21-24 % of the energy. The new filter touches fewer pixels but moves each one further where it
+  acts; this is not a like-for-like quality comparison and the owner has not yet judged it in a real game.
+- Text/HUD protection is geometric, not a HUD mask: a sign-based one-texel-stroke mask, dilated by one texel, drops the
+  coverage weights on glyphs, thin lines and HUD strokes. Both page toggles drive the same guard in this tier. On the
+  synthetic text-over-checker stress scene no stroke pixel changes. Thicker-than-one-texel HUD strokes, translucent
+  overlays and animated HUD elements can still be softened; a real static-overlay mask needs frame history (T2).
+- One-texel game features (railings, wires, fine highlights) are protected rather than anti-aliased. That is the price
+  of leaving text intact without a history mask.
+- A 4 px checker keeps 100 % of its luma contrast and high-pass energy; a 2 px checker is effectively preserved
+  (0.998 / 1.001) because the stroke mask and the run length leave it alone. It is printed by the bench but not judged.
+- Shallow staircases get a small weight: `0.5 / sqrt(runLength)` is stronger than the exact triangle area `1/(2L)` but
+  is still 0.125 at a 16-texel run. If the owner sees roof lines and curbs still stepping, the next tool is the SMAA-style
+  area lookup (Directional tier), not more blend weight.
+- The edge threshold (10 %) and dark-scene floor (3 %) are internal constants. The "reduce when already smooth" option
+  was removed: the coverage number is a density, not a measure of how well the edges are resolved, so it is shown on Home
+  but never changes the strength.
+- The "already anti-aliased" detector counts long, slanted, hard steps on a 128x128 sample grid with a 2/4-texel
+  coherence test. It reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the text and checker scenes, and 1.1-1.5 % on
+  the real no-AA recordings. That is a hard-edge density; a frame with one aliased silhouette reads lower than a
+  text-heavy frame with smooth text. It is displayed on Home only.
 - Everything runs on gamma-encoded SDR, like the rest of the pipeline. Dark scenes rely on the absolute edge floor
   (0.03). No HDR or linear-light path.
 - Load order: when Anti-aliasing and Smart parallax both run, the engine always applies anti-aliasing first so relief
   shading is not blurred. A custom order with Relief before Anti-aliasing is not honoured.
-- GPU per stage is supported for the AA stage. Only the RTX 5060, RTX A400 and the Radeon 610M iGPU were measured; the
-  iGPU is far over budget (3.49 ms at 1080p, 5.76 ms at 1440p).
+- GPU per stage is supported for the AA stage. Isolated pass on the reference hardware: RTX 5060 0.153 ms at 1080p and
+  0.277 ms at 1440p; RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU 3.943 / 6.489 ms. The iGPU is far over the RTX 5060
+  budget and is used for correctness only. The fixed three passes dominate on low-end GPUs, so the Performance preset
+  does not make the filter cheap there.
+- Presets differ only in the run-search length (8 / 12 / 16 texels). On a 45-degree edge and on the tested HD2 frame
+  their output is identical; the difference appears on shallow staircases whose run exceeds 12 texels.
 - The debug views (edge mask, blend weight, split) are developer tools with no control on the page: they are selected
-  with `moonsr_cli --aa-view`, and the split view is also reachable as A/B compare on Home. The setting is not
-  persisted, so a debug view can never survive a restart.
+  with `moonsr_cli --aa-view`, and the split view is also reachable as A/B compare on Home. The setting is not persisted,
+  so a debug view can never survive a restart.
 - The AA page and its glyph were rendered and checked in all four themes (Windows 11 Light, Windows 11 Dark, Retro,
-  Retro Amber) through the `--test-page` / `--test-theme` harness and a window capture. The controls were not clicked
-  through live, and the diagnostics views were not looked at in a running pipeline.
+  Retro Amber) through the `--test-page` / `--test-theme` harness and a window capture after the rebuild. The controls
+  were not clicked through live with the new filter, and the debug views were not looked at in a running pipeline.
+- The live engine was exercised on a 1280x720 -> 1080p test pattern: 485 frames, AA active at 0.12 ms, no drops,
+  clean stop. Real-game validation is still the owner's A/B.

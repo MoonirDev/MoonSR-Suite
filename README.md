@@ -39,9 +39,9 @@ It is an experimental personal project. Quality and speed claims come only from 
   highlights and shadows. Parallax also shifts surface detail by up to 3 output pixels. Motion depth reuses compatible
   frame-generation motion and uses Parallax when that motion is unavailable. See the
   [Smart parallax design](documentation/research/screen_space_relief.md).
-- **Anti-aliasing (experimental):** a spatial filter that detects hard, slanted edges in the captured picture and
-  blends them, with protection for text, HUD strokes and fine textures. Only the spatial tier exists; the other modes
-  fall back to it. It is off by default, sits after upscaling in Load order, and can run on its own GPU. See the
+- **Anti-aliasing (experimental):** a spatial filter that finds the ends of hard edge runs and reconstructs their
+  coverage, leaving straight edges, text, HUD strokes and fine texture alone. Only the spatial tier exists; the other
+  modes fall back to it. It is off by default, sits after upscaling in Load order, and can run on its own GPU. See the
   [anti-aliasing design note](documentation/research/anti_aliasing.md).
 - **Themes:** Windows 11 Light, Windows 11 Dark, Retro and Retro Amber, plus your own `.moontheme` files
   ([documentation/THEMES.md](documentation/THEMES.md)). Optional transparency, glow and animations.

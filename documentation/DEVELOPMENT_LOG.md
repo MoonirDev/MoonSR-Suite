@@ -4,6 +4,41 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing rebuild: pattern-based spatial tier
+
+- Rebuilt the spatial tier after the owner's "not visible" reports and the clean-rebuild reset. The FXAA-style pass is
+  replaced by a three-pass morphological filter written from the MLAA/SMAA descriptions: `aa_edge_ps` (luma edges +
+  local-contrast adaptation + one-texel stroke mask), `aa_weights_ps` (run-length search along each edge, coverage weight
+  `0.5 / sqrt(L)` only at the run ends, stroke mask dilation), `aa_blend_ps` (blend towards the strongest edge), and
+  `aa_stats_cs` (hard-edge density). No third-party shader code, area texture or search texture is bundled.
+- Text/HUD protection is part of the filter, not a post-hoc mask: a sign-based one-texel-stroke flag is computed in the
+  edge pass, dilated by one texel in the weights pass, and drops all coverage there. On the synthetic text-over-checker
+  stress scene 0 % of stroke pixels change (mean 1.000, max 0) with protection on; with protection off 58.8 % change,
+  which is the diagnostic the bench reports.
+- Measured on the RTX 5060 (driver 621.14): synthetic slanted edges keep 0.437-0.584 of their strongest scanline step,
+  exact 0/90 edges keep 1.000, one-pixel lines and 4 px texture are unchanged (stddev and high-pass 1.000), gradient 0.
+  Isolated pass: 0.154 ms at 1080p, 0.278 ms at 1440p (budget 0.3 / 0.6). RTX A400 1.144 / 1.989 ms; Radeon 610M iGPU
+  3.943 / 6.489 ms (correctness only; all checks pass with the same metrics).
+- Real recordings (isolated pass on the no-AA inputs): HD2 1.52 % of pixels changed, mean 0.21/255, high-pass energy
+  0.989; Black Mesa 2.89 %, mean 0.53, energy 0.960. The previous FXAA build changed 15.7-17.7 % by a mean of about 2.9
+  and removed 21-24 % of the energy. The new filter is targeted, not a blur; it is not a like-for-like quality score and
+  the owner still has to judge it in game.
+- Bench: `--aa` now checks 4 px luma contrast and high-pass energy, tightens the HUD stroke bound to <= 1 % changed /
+  >= 99 % mean / <= 64 max, prints the high-pass column, and `--aa-no-protect` disables both protection toggles for
+  diagnosis. `--aa-image` reports changed %, mean |d|, high-pass ratio and GPU time per real PNG.
+- Verified: full `build\aa-rebuild` build /W4 clean; `--aa` at Performance, Balanced and Quality and at strength 0.5/1.0;
+  `moonsr_bench --selftest` (0 failures) and `moonsr_fgbench --selftest` (0 failures); live `moonsr_cli --aa spatial`
+  on the 1280x720 test pattern at 1080p output (485 frames, 0.12 ms, no drops, clean stop); the AA page rendered in
+  Windows 11 Light/Dark, Retro and Retro Amber through `--test-page aa --test-theme ...`.
+- The UI, settings section, `PipelineOrder` migration and `StageAdapters` entry were already in place and are unchanged.
+  Directional and Temporal remain unbuilt and report the spatial fallback; Temporal stays deferred until a per-pixel
+  motion refinement and a static-HUD mask exist (the frame generator's field is 8 px cells).
+- Next: owner's same-scene A/B with the game's AA off, the game's own TAA/DLAA on, and MoonSR AA on (Atlyss,
+  Helldivers 2). If shallow roof lines and curbs still step, the next tier is the SMAA-style area lookup, not more blend
+  weight. No version bump or release was made.
+
+---
+
 ## 2026-11-26 - Anti-aliasing: simple FXAA spatial tier
 
 - Owner request after the morphological build: "replace the spatial method with a simple FXAA implementation for now".

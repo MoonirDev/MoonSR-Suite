@@ -1,25 +1,27 @@
-// Anti-aliasing statistics: aliased-edge coverage on a coarse sample grid. Owner: shader-engineer.
-// One thread per sample; each group reduces to two atomics. The CPU reads the counters a few frames later through a
-// staging buffer (no stall), which drives the "already anti-aliased" reduction and the Home-page status.
+// Anti-aliasing statistics: hard-edge density on a coarse sample grid. Owner: shader-engineer.
 //
-// The test is a stricter subset of the gates in aa_spatial_ps.hlsl: the same threshold and axis-alignment fade, but
-// only hard two-sided steps whose edge continues two and four texels along its own direction. Thin ridges (railings,
-// specular highlights, glyph stems) are deliberately not counted: the filter blends them, but counting them would make
-// text-heavy and high-frequency content read as "heavily aliased" and defeat the "already anti-aliased" reduction.
-// Coverage therefore means "share of sampled pixels that are long, slanted, hard steps", not a quality measure.
+// One thread per sample; each group reduces to two atomics. The CPU reads the counters a few frames later through a
+// staging ring (no stall). The figure is a density of long, slanted, hard one-pixel steps, not a quality score: text,
+// dense texture and already anti-aliased content should not read as aliased, and the number never changes the filter
+// strength. See documentation/research/anti_aliasing.md section 2.7 and KNOWN_ISSUES.md.
+//
+// The test is deliberately stricter than the filter gates: the step must be two-sided, the two sides must continue 2 and
+// 4 texels along the edge (a glyph or a small detail ends inside that distance, a checker flips colour), and the centre
+// must sit at least a quarter of the contrast away from the two-side average (a step already spread over two pixels is
+// resolved). That last term is the closest cheap proxy for "already anti-aliased"; it is reported, not acted on.
 cbuffer AaStatsConstants : register(b0)
 {
-    float2 stTexSize;          // full source texture size in texels
+    float2 stTexSize;          // full texture size in texels
     float2 stTexelSize;        // 1 / stTexSize
     float2 stContentOrigin;    // top-left of the game image inside the texture, texels
     float2 stContentSize;      // size of the game image, texels
-    float  stEdgeThreshold;    // relative luma contrast that counts as an edge
-    float  stEdgeThresholdMin; // absolute floor for dark scenes
+    float  stEdgeThreshold;    // relative luma contrast
+    float  stEdgeThresholdMin; // absolute floor
     uint2  stGrid;             // samples per axis
 };
 
-Texture2D<float4> srcTex : register(t0);
-SamplerState linearClamp : register(s0);
+Texture2D<float4> stSrcTex : register(t0);
+SamplerState stLinearClamp : register(s0);
 
 // [0] = samples classified as an aliased edge, [1] = samples taken.
 RWStructuredBuffer<uint> counter : register(u0);
@@ -36,15 +38,14 @@ float3 StLoad(int2 p)
 {
     const int2 lo = int2(stContentOrigin);
     const int2 hi = int2(stContentOrigin + stContentSize) - 1;
-    return srcTex.Load(int3(clamp(p, lo, hi), 0)).rgb;
+    return stSrcTex.Load(int3(clamp(p, lo, hi), 0)).rgb;
 }
 
-// Bilinear sample at a texel-space position, clamped to the game image (same mapping as AaSample in aa_common.hlsli).
 float3 StSample(float2 pTexels)
 {
     const float2 lo = stContentOrigin + 0.5;
     const float2 hi = stContentOrigin + stContentSize - 0.5;
-    return srcTex.SampleLevel(linearClamp, clamp(pTexels, lo, hi) * stTexelSize, 0).rgb;
+    return stSrcTex.SampleLevel(stLinearClamp, clamp(pTexels, lo, hi) * stTexelSize, 0).rgb;
 }
 
 [numthreads(8, 8, 1)]
@@ -94,19 +95,12 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
                 const bool between = lM >= min(lPos, lNeg) - 0.05 * range &&
                                      lM <= max(lPos, lNeg) + 0.05 * range;
                 const bool alongOk = abs(lT1 - lM) <= 0.5 * range && abs(lT2 - lM) <= 0.5 * range;
-                // Long-edge coherence: the same side must continue two and four texels along the edge. A text stroke
-                // or a small detail ends within that distance; a dense checker flips colour. This is what separates a
-                // real silhouette from short high-frequency detail, and it is why the detector does not read a
-                // text-heavy frame as "heavily aliased".
                 const float lT3 = StLuma(StSample(pos + tangent * 2.0));
                 const float lT4 = StLuma(StSample(pos - tangent * 2.0));
                 const float lT5 = StLuma(StSample(pos + tangent * 4.0));
                 const float lT6 = StLuma(StSample(pos - tangent * 4.0));
                 const bool coherent = abs(lT3 - lM) <= 0.25 * range && abs(lT4 - lM) <= 0.25 * range &&
                                       abs(lT5 - lM) <= 0.25 * range && abs(lT6 - lM) <= 0.25 * range;
-                // How far the centre sits from the two-side average: 0.5 at a hard one-pixel step, near 0 on an edge
-                // that is already spread over several pixels (TAA, MSAA or a smooth gradient). Only hard steps count,
-                // which is what makes this an "already anti-aliased" detector rather than an edge counter.
                 const float sideContrast = abs(lPos - lNeg);
                 const float dev = abs(lM - (lPos + lNeg) * 0.5) / max(sideContrast, 1e-4);
                 edge = twoSided && between && alongOk && coherent && dev >= 0.25;

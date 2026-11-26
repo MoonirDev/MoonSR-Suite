@@ -199,23 +199,27 @@ Load-order migration: `NormalizeOrder` keeps an existing order as it is, inserts
 Relief when it is missing, and appends any other missing default stage. Unknown, duplicate or empty orders fall back to
 the default, so a settings file written by 1.1.x (three stages) still loads and gains the new stage.
 
-Anti-aliasing is a single-frame spatial pass: a simple FXAA-style filter, written clean-room from the published
-description (no third-party shader code). Per pixel it reads the 3x3 luma neighbourhood and:
+Anti-aliasing is a three-pass pattern-based morphological filter (MLAA family), written clean-room from the published
+descriptions (no third-party shader code). It works at the resolution it receives; the default position is output
+resolution.
 
-1. rejects flat areas and smooth gradients by a relative edge threshold (10 % of the local maximum) with an absolute
-   floor (3 %) for dark scenes;
-2. decides which axis the edge steps on from the larger of the N/S and E/W luma variation, and averages the two sides
-   along that axis (N/S or E/W). Sampling along the gradient normal, as the first builds did, lands on the diagonal
-   neighbour at 45 degrees - the same side of a staircase - so the sides look equal and nothing is blended;
-3. leaves a straight, axis-aligned run alone: if the luma variation along the edge is below 10 % of the local range, the
-   edge is already resolved (this is what keeps text stems and UI rules crisp);
-4. skips a one-texel ridge (railing, bezel highlight, glyph stem - both sides the same background) while "Protect text
-   and thin lines" is on.
+1. **Edge mask** (`aa_edge_ps.hlsl`, RGBA8): a relative luma threshold (10 % of the local maximum) with an absolute
+   floor (3 %) for dark scenes, then local-contrast adaptation (the step must be at least half the strongest delta in
+   its 3x3 neighbourhood). R = vertical edge to the west, G = horizontal edge to the north, B = one-texel stroke flag.
+2. **Coverage weights** (`aa_weights_ps.hlsl`, RGBA8: north, south, west, east): for each edge, walk the run along it
+   up to 8 / 12 / 16 texels (Performance / Balanced / Quality) or until a crossing edge turns the staircase. Interior
+   pixels get nothing; an end pixel gets `0.5 / sqrt(runLength)`. The exact triangle area is `1/(2L)`; the sqrt falloff
+   is a measured perceptual tuning for shallow staircases. A one-texel stroke mask, dilated by one texel, plus two
+   far-side stroke tests drop the weights on text, thin lines and HUD strokes while protection is on.
+3. **Blend** (`aa_blend_ps.hlsl`): pick the strongest weight and blend towards that neighbour. It is not a 3x3 average,
+   so the texture on both sides of an edge is never mixed in. Letterbox pixels are copied bit for bit.
 
-The centre is blended towards the two-side average by `strength * weight`, where the weight is 0.70 / 0.85 / 1.00 for
-Performance / Balanced / Quality. Alpha is written as 1.0; letterbox areas outside the game image are copied bit for bit.
-The pass is skipped entirely when disabled, so the off cost is zero. Known cost of this shape: a 4 px checker keeps 78 %
-of its contrast and a 2 px checker is flattened - the standard FXAA trade-off, recorded in KNOWN_ISSUES.md.
+Measured on the RTX 5060: slanted edges lose 42-56 % of their strongest scanline step, exactly vertical and horizontal
+edges keep their step (ratio 1.000), one-pixel lines and the synthetic text/HUD stress scene are unchanged, and a 4 px
+checker keeps 100 % of its luma contrast and high-pass energy. The isolated pass costs 0.154 ms at 1080p and 0.278 ms
+at 1440p (budget 0.3 / 0.6 ms); a real HD2 frame measures 0.19 ms. The pass is skipped entirely when disabled, so the
+off cost is zero and no resources are allocated. Full measurements and known limits: `BENCHMARKS.md` and
+`KNOWN_ISSUES.md`.
 
 Settings live in the `[AntiAliasing]` section (mode, quality, strength, text/HUD protection) and are applied live through
 `Engine::SetAaSettings`; the AA page is "Anti-aliasing". The threshold and floor are internal constants with no UI. The
@@ -273,12 +277,12 @@ triangle `common/fullscreen_vs.hlsl`. The viewport selects the destination recta
 `t0` source texture, `s0` linear clamp, `s1` point clamp. Samples must stay inside the source region.
 Details and the shader table: `shaders/README.md`.
 
-Anti-aliasing shaders do not use `ScaleConstants`. `shaders/aa/aa_spatial_ps.hlsl` reads
+Anti-aliasing shaders do not use `ScaleConstants`. `aa_edge_ps.hlsl`, `aa_weights_ps.hlsl` and `aa_blend_ps.hlsl` read
 `cbuffer AaConstants (b0)` — 64 bytes, mirrored by `AaConstants` in `src/aa/aa_pass.cpp` — with the full texture size
-and texel size, the game-image rectangle, effective strength, the two edge thresholds, output scale, quality preset,
-text-protection flag and debug view. `shaders/aa/aa_stats_cs.hlsl` reads `AaStatsConstants` (48 bytes) with the same
-rectangle and thresholds plus the sample grid. Both are compiled by `fxc` at build time and embedded like every other
-shader.
+and texel size, the game-image rectangle, strength, the two edge thresholds, output scale (reserved), quality preset,
+text/HUD protection flags and debug view. `aa_stats_cs.hlsl` reads `AaStatsConstants` (48 bytes) with the same
+rectangle and thresholds plus the sample grid. All four are compiled by `fxc` at build time and embedded like every
+other shader.
 
 ## 7. Addon framework (*planned*, Phase 6 — needs lead approval before it is frozen)
 

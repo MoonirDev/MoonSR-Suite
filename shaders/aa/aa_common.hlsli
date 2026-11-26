@@ -2,28 +2,34 @@
 // The C++ mirror of AaConstants is `AaConstants` in src/aa/aa_pass.cpp. Do not change one without the other.
 //
 // Anti-aliasing (documentation/research/anti_aliasing.md): the captured picture has no depth, motion vectors or MSAA
-// samples, so coverage is estimated from luminance transitions and blended toward a directional average. All work is
-// done on the gamma-encoded values the capture delivers (the rest of the shader set does the same).
+// samples, so coverage is estimated from luminance transitions. The first tier is a pattern-based morphological filter
+// (MLAA family, Reshetov 2009, written from the published description): an edge mask, a run-length search along each
+// edge that measures how far the staircase step continues, and a sub-pixel coverage weight applied only at the ends of
+// a run. The middle of a straight run is never touched, which is what keeps text stems and UI rules crisp.
+//
+// All work is done on the gamma-encoded values the capture delivers (the rest of the shader set does the same).
 #ifndef MOONSR_AA_COMMON_HLSLI
 #define MOONSR_AA_COMMON_HLSLI
 
 cbuffer AaConstants : register(b0)
 {
-    float2 aaTexSize;          // full source texture size in texels
+    float2 aaTexSize;          // full texture size in texels
     float2 aaTexelSize;        // 1 / aaTexSize
     float2 aaContentOrigin;    // top-left of the game image inside the texture, texels
     float2 aaContentSize;      // size of the game image, texels
-    float  aaStrength;         // effective strength 0..1 (already reduced by the already-AA detector)
+    float  aaStrength;         // 0..1 master blend
     float  aaEdgeThreshold;    // relative luma contrast that counts as an edge
     float  aaEdgeThresholdMin; // absolute floor for dark scenes
     float  aaOutputScale;      // captured pixels -> output pixels (reserved for later tiers)
     uint   aaQuality;          // AaQuality: 0 Performance, 1 Balanced, 2 Quality
     uint   aaProtectText;      // 1: thin-stroke / text protection on
     uint   aaDebug;            // AaDebugView: 0 None, 1 EdgeMask, 2 BlendWeight, 3 Split
-    float  aaPad;
+    uint   aaProtectHud;       // 1: HUD protection on (shares the thin-ridge guard in T1)
 };
 
 Texture2D<float4> srcTex : register(t0);
+Texture2D<float4> edgeTex : register(t1);
+Texture2D<float4> weightTex : register(t2);
 SamplerState linearClamp : register(s0);
 
 struct AaVsOut
@@ -67,13 +73,14 @@ float3 AaSample(float2 pTexels)
     return srcTex.SampleLevel(linearClamp, clamp(pTexels, lo, hi) * aaTexelSize, 0).rgb;
 }
 
-// Quality presets: the maximum blend weight at a clean staircase step. The sample distance is fixed at one texel across
-// the edge, so the preset only decides how far the pixel is moved towards the two-side average.
-float AaBlendWeight()
+// How far the run-length search may walk along an edge. Longer searches resolve shallower staircases (near-horizontal
+// and near-vertical edges) and cost one edge-texel load per step. The pixel shader is bandwidth-bound; these counts
+// keep the pass well inside the 0.3 ms / 1080p target on the reference GPU (measured, BENCHMARKS.md).
+int AaSearchSteps()
 {
-    if (aaQuality == 0) return 0.70; // Performance
-    if (aaQuality == 2) return 1.00; // Quality
-    return 0.85;                     // Balanced
+    if (aaQuality == 0) return 8;  // Performance
+    if (aaQuality == 2) return 16; // Quality
+    return 12;                     // Balanced
 }
 
 #endif

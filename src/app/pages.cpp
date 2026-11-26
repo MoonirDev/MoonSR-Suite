@@ -446,12 +446,12 @@ void BuildPages(ui::View& view, AppUi& u) {
         ui::Card& look = p->AddCard();
         p->AddRow(look, kIconIntensity, L"Strength", L"How much of the filtered image is blended in",
                   {{u.aaStrength, 300.0f}});
-        p->AddRow(look, kIconQuality, L"Quality", L"Performance is cheapest; Quality smooths diagonals further",
+        p->AddRow(look, kIconQuality, L"Quality", L"Performance searches 8 texels along an edge, Balanced 12, Quality 16",
                   {{u.aaQuality, 200.0f}});
         ui::Card& protect = p->AddCard();
         p->AddRow(protect, kIconShield, L"Protect text and thin lines", L"Keeps one-pixel strokes and fine text sharp",
                   {{u.aaProtectText, kToggleW}});
-        p->AddRow(protect, kIconShield, L"Protect static HUD", L"Stored for later tiers; the spatial filter protects HUD strokes with the text test",
+        p->AddRow(protect, kIconShield, L"Protect static HUD", L"Uses the thin-stroke guard in this tier; static-overlay masking needs history",
                   {{u.aaProtectHud, kToggleW}});
     }
 
