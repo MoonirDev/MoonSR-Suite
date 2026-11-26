@@ -17,6 +17,8 @@ struct AaBenchOptions {
     // Settings override; -1 / empty keeps the defaults (Balanced, strength 1.0).
     int quality = -1;   // 0 Performance, 1 Balanced, 2 Quality
     float strength = -1.0f;
+    int debugView = 0;  // AaDebugView: 0 None, 1 EdgeMask, 2 BlendWeight, 3 Split
+    bool protectText = true;
 };
 
 // Runs the synthetic scenes (hard edges at several angles, thin lines, text/HUD over texture, high-frequency texture,

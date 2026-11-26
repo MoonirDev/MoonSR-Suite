@@ -2531,36 +2531,42 @@ and measures the read-back output:
 
 | Scene | Before | After | Ratio | Max change | Check |
 |---|---:|---:|---:|---:|---|
-| edge 20 deg | 110.717 | 77.794 | 0.703 | 36 | pass |
-| edge 30 deg | 121.803 | 75.165 | 0.617 | 36 | pass |
-| edge 45 deg | 143.615 | 89.786 | 0.625 | 36 | pass |
-| edge 60 deg | 181.408 | 111.720 | 0.616 | 36 | pass |
-| edge 70 deg | 151.454 | 102.588 | 0.677 | 36 | pass |
+| edge 20 deg | 110.717 | 63.303 | 0.572 | 51 | pass |
+| edge 30 deg | 121.803 | 54.806 | 0.450 | 51 | pass |
+| edge 45 deg | 143.615 | 67.163 | 0.468 | 51 | pass |
+| edge 60 deg | 181.408 | 81.760 | 0.451 | 51 | pass |
+| edge 70 deg | 151.454 | 81.454 | 0.538 | 51 | pass |
 | exact 0 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
 | exact 90 deg | 92.000 | 92.000 | 1.000 | 0 | pass |
-| thin lines | 225.000 | 224.915 | 1.000 | 37 (off-line pixels) | pass |
-| text / HUD | - | - | - | 0 inside the stroke mask | pass |
-| 2 px texture | 287.410 | 256.095 | 0.891 | 41 | pass |
+| thin lines (mean stroke luma) | 225.000 | 224.875 | 0.999 | 54 (off-line pixels) | pass |
+| text / HUD (mean stroke luma) | 245.000 | 244.902 | 1.000 | 51, 0.88 % of pixels changed | pass |
+| 2 px texture | 287.410 | 264.089 | 0.919 | 43 | pass |
 | gradient | - | - | - | 0 | pass |
 
 Interpretation:
 
-- Slanted edges lose 30-38 % of their strongest step. That is a real reduction of the staircase, not a shift of the
-  edge: the maximum change of 36/255 on a 218-to-34 step equals half the step, i.e. the average of the two sides.
+- Slanted edges lose 43-55 % of their strongest step. That is a real reduction of the staircase, not a shift of the
+  edge: the maximum change of 51/255 on a 218-to-34 step is the two-side average, i.e. the pixel moves to the middle.
 - Exactly vertical and horizontal edges are bit-identical (max change 0). The filter deliberately refuses edges that
   the pixel grid already resolves; this is the difference between anti-aliasing and blur.
-- One-pixel lines keep 100 % of their mean luma and text strokes are bit-identical inside the mask, so the stroke
-  guards work on this fixture.
-- The 2 px checker keeps 89 % of its high-pass energy. That is inside the +-15 % limit but it is the weakest result:
-  some of the densest texture detail is still softened.
+- One-pixel lines keep 99.9 % of their mean luma and text strokes keep 100.0 % of theirs, with 0.88 % of the stroke
+  pixels changing at all. The 51/255 maximum is a corner pixel of a glyph, which is exactly the staircase the filter is
+  meant to resolve. The check therefore requires the stroke *mean* to stay within 3 %, at most 5 % of stroke pixels to
+  change and no stroke pixel to move by more than 64/255.
+- The 2 px checker keeps 91.9 % of its high-pass energy.
 - The gradient is unchanged, so there is no low-frequency ripple.
+
+A thin one-texel ridge (railing, specular highlight, bezel highlight) is blended too, at half weight while "Protect text
+and thin lines" is on. Without that case the filter only touched wide steps and stayed invisible on real content; with it
+the same feature is smoothed like any other edge. At this scale a glyph stem and a railing are the same shape, so the
+protection is a weight, not a veto.
 
 GPU time (isolated pass + statistics dispatch, median of eight timestamp pairs on an otherwise idle GPU):
 
 | Resolution | RTX 5060 | RTX A400 | Radeon 610M iGPU | Budget (RTX 5060) |
 |---|---:|---:|---:|---:|
-| 1920x1080 | 0.072 ms | 0.536 ms | 2.131 ms | 0.3 ms |
-| 2560x1440 | 0.119 ms | 0.816 ms | 3.235 ms | 0.6 ms |
+| 1920x1080 | 0.118 ms | 1.506 ms | 3.396 ms | 0.3 ms |
+| 2560x1440 | 0.204 ms | 2.317 ms | 5.665 ms | 0.6 ms |
 
 This is the isolated pass. It excludes capture, present, the rest of the pipeline and contention with the game. The
 RTX 5060 meets the budget with a wide margin; the iGPU does not, so the stage should stay off or at the Performance
@@ -2606,10 +2612,11 @@ build in `build\aa` with `/W4`, no warnings from the AA code.
 
 ## Anti-aliasing on real game frames (Helldivers 2, 2026-11-26)
 
-Owner recording, four runs of 120 frames each in the same ship interior: game anti-aliasing off, game TAA, game DLAA
-(where the game's menu calls it that), and game AA off with MoonSR anti-aliasing on. The recordings are
-`%LOCALAPPDATA%\MoonSR\recordings\AAtests\HD2_1080p_{NoAA,TAA,DLAA,MoonSR_AA}` with `in_*` (captured input) and
-`out_*_real` (presented output) PNG pairs and an `index.csv` that pairs them.
+Owner recordings, five runs of 120 frames each in the same ship interior: game anti-aliasing off, game TAA, game DLAA
+(where the game's menu calls it that), and two runs with game AA off and MoonSR anti-aliasing on (the second was
+captured after the owner reported no visible effect). The recordings are
+`%LOCALAPPDATA%\MoonSR\recordings\AAtests\HD2_1080p_{NoAA,TAA,DLAA,MoonSR_AA,MoonSR_AA_2}` with `in_*` (captured
+input) and `out_*_real` (presented output) PNG pairs and an `index.csv` that pairs them.
 
 The filter numbers below are the isolated pass on the recorded **inputs**, so they do not include upscaling or
 sharpening:
@@ -2622,47 +2629,56 @@ Settings: spatial, Balanced, strength 1.0, edge threshold 0.10, floor 0.03, text
 
 | Recorded input | Coverage | Pixels changed | Mean \|d\| | High-pass energy | Ratio | GPU |
 |---|---:|---:|---:|---|---:|---:|
-| Game AA off | 1.4-1.7 % | 10.95 % | 0.70 | 52.68 -> 48.85 | 0.927 | 0.056-0.061 ms |
-| Game TAA | 1.5-1.6 % | 9.47 % | 0.43 | 27.30 -> 24.60 | 0.901 | 0.054-0.057 ms |
-| Game DLAA | 2.0-2.1 % | 10.30 % | 0.53 | 35.46 -> 32.37 | 0.913 | 0.055-0.058 ms |
-| Game AA off, MoonSR AA run | 1.7 % | 10.92 % | 0.72 | 54.68 -> 50.66 | 0.927 | 0.055 ms |
+| Game AA off (`HD2_1080p_NoAA`) | 1.5 % | 17.31 % | 1.03 | 52.68 -> 48.20 | 0.915 | 0.074 ms |
+| Game TAA | 1.6 % | 11.72 % | 0.61 | 27.30 -> 24.75 | 0.906 | 0.064 ms |
+| Game DLAA | 2.1 % | 14.43 % | 0.77 | 35.46 -> 32.16 | 0.907 | 0.070 ms |
+| Game AA off (`HD2_1080p_MoonSR_AA_2`) | 1.9 % | 17.02 % | 0.99 | 50.99 -> 46.56 | 0.913 | 0.075 ms |
 
-Eight consecutive frames of the no-AA run vary only in the second decimal (changed 10.94-10.97 %, ratio 0.927), so the
-filter is temporally stable on a near-static scene.
+Six consecutive frames of the second no-AA run vary only in the second decimal (changed 16.91-17.02 %, ratio 0.913), so
+the filter is temporally stable on a near-static scene.
 
-Quality presets on the same no-AA frame:
+Quality presets on the second no-AA frame:
 
 | Preset | Pixels changed | Mean \|d\| | Max change | Energy ratio | Synthetic slanted-edge ratio |
 |---|---:|---:|---:|---:|---:|
-| Performance | 10.06 % | 0.51 | 42 | 0.938 | 0.73-0.80 |
-| Balanced (default) | 10.95 % | 0.70 | 62 | 0.927 | 0.62-0.70 |
-| Quality | 11.20 % | 0.91 | 84 | 0.929 | 0.46-0.58 |
+| Performance | 16.73 % | 0.80 | 59 | 0.914 | 0.60-0.68 |
+| Balanced (default) | 17.02 % | 0.99 | 75 | 0.913 | 0.45-0.57 |
+| Quality | 17.65 % | 1.25 | 96 | 0.912 | 0.34-0.50 |
 
-All three presets pass every synthetic check (`--aa --aa-quality <preset>`): exact 0/90 degree edges unchanged, text
-stroke pixels unchanged, gradient unchanged.
+All three presets pass every synthetic check (`--aa --aa-quality <preset>`): exact 0/90 degree edges unchanged, texture
+energy within +-15 %, text stroke mean within 0.1 %, gradient unchanged.
 
 Pipeline check (the `out_*` frames against their paired `in_*` frames, which include the 1:1 MoonSR Spatial scaler at
 sharpness 0.25 and the MoonSR frame counter):
 
 - AA-off recording: 0.07 % of pixels changed, mean 0.08. The stage was off and the 1:1 scaler plus sharpening is a
   near no-op.
-- MoonSR AA recording: 10.98 % changed, mean 0.80, i.e. the same magnitude as the isolated filter above. The app log
-  shows the stage being created for this run and the toggles before it.
+- MoonSR AA recording: 10.98 % changed, mean 0.80, i.e. the same magnitude as the isolated filter of that revision. The
+  app log shows the stage being created for this run and the toggles before it.
 
-What the 1:1 crops show (viewed at 2-3x, saved under `build\aareal\` during this run, not committed):
+Revision after the first real-game check (2026-11-26): on the first build the filter only blended wide steps and left
+thin one-texel ridges alone, so on real footage it changed 10.95 % of pixels by a mean of 0.70/255 - measurable, but the
+owner did not see it in game. Two changes followed: the edge normal is now normalised to unit length (it used to shrink
+to 0.71 texels at 45 degrees, pulling both side samples into the centre pixel), and a thin ridge is blended at half
+weight instead of being rejected. The same frame now changes 17.02 % of pixels by 0.99/255 and loses 8.7 % of its
+high-pass energy, and the console bezels and railings in the 1:1 crops visibly lose their staircase.
 
-- Slanted silhouettes (helmet rim, console bezels, ceiling struts, the diagonal light strip) are visibly cleaner.
-  The staircase is split between two pixels instead of one, with no halo, ringing or double edge.
-- Fine detail survives: the striped light diffuser, floor grating, screen dithering and the specular scratches are not
-  blurred, and the game's own anti-aliased HUD text looked unchanged to the eye.
-- Quality softens thin bright features a little more than Balanced (a 1-2 px specular rim on the helmet gets dimmer
-  and wider) and slightly softens glyph edges. Balanced is the safer default; Quality is a visible step up on
-  diagonals.
-- The TAA and DLAA frames barely change under the filter (mean |d| 0.43-0.53 versus 0.70 on the aliased frame), so
-  running MoonSR AA on top of a temporal anti-aliased game adds little.
+What the 1:1 crops show (viewed at 2-3x, saved under `build\aareal\` and `build\aareal2\` during this run, not
+committed):
 
-Honest limits of this comparison: the four recordings are the same room but not the same camera pose, so the energy
-columns are not a like-for-like scoring of MoonSR AA against TAA or DLAA. What they do show is the scale: the game's
-TAA/DLAA captures sit at 27-35 high-pass energy against 53 for no AA, while MoonSR AA moves a no-AA frame by 7 %
-(52.68 -> 48.85). MoonSR AA is a light spatial filter, not a replacement for temporal anti-aliasing. There is no
-reference image and no ground truth, so no PSNR/SSIM claim is made.
+- Slanted silhouettes (helmet rim, console bezels, ceiling struts, the diagonal light strip) are visibly cleaner. Thin
+  bright highlights widen by about half a pixel, with no halo, ringing or double edge.
+- The striped light diffuser, floor grating and screen dithering are preserved; the specular scratches lose a little
+  micro-contrast, which is the expected cost of blending thin ridges.
+- The game's own HUD text stays legible: at 2x, "SES Hammer of Dawn" and the squad line look unchanged; the synthetic
+  text fixture keeps 100.0 % of its stroke luma. Small white labels inside the 3D scene (keyboard keys) do get softer.
+- Quality softens thin bright features more than Balanced (a 1-2 px specular rim gets dimmer and wider). Balanced is the
+  safer default; Quality is a visible step up on diagonals.
+- TAA and DLAA frames change less (mean |d| 0.61-0.77 versus 0.99 on the aliased frame), so running MoonSR AA on top of
+  a temporal anti-aliased game adds little.
+
+Honest limits of this comparison: the recordings are the same room but not the same camera pose, so the energy columns
+are not a like-for-like scoring of MoonSR AA against TAA or DLAA. What they do show is the scale: the game's TAA/DLAA
+captures sit at 27-35 high-pass energy against 51-53 for no AA, while MoonSR AA moves a no-AA frame by 8.7 %
+(50.99 -> 46.56). MoonSR AA is a spatial filter, not a replacement for temporal anti-aliasing. There is no reference
+image and no ground truth, so no PSNR/SSIM claim is made.

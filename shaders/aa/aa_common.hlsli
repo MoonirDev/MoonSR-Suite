@@ -67,13 +67,13 @@ float3 AaSample(float2 pTexels)
     return srcTex.SampleLevel(linearClamp, clamp(pTexels, lo, hi) * aaTexelSize, 0).rgb;
 }
 
-// Quality presets: distance of the two side samples from the centre (source px), and the blend weight at a full
-// staircase step. Quality samples slightly further out, which smooths diagonals more.
+// Quality presets: distance of the two side samples from the centre (source px) and the blend weight at a full
+// staircase step. Quality samples slightly further out and blends harder, which smooths diagonals more.
 void AaQualityParams(out float span, out float blend)
 {
-    if (aaQuality == 0)      { span = 0.85; blend = 0.40; } // Performance
-    else if (aaQuality == 2) { span = 1.20; blend = 0.62; } // Quality
-    else                     { span = 1.00; blend = 0.50; } // Balanced
+    if (aaQuality == 0)      { span = 0.95; blend = 0.45; } // Performance
+    else if (aaQuality == 2) { span = 1.25; blend = 0.70; } // Quality
+    else                     { span = 1.15; blend = 0.55; } // Balanced
 }
 
 #endif

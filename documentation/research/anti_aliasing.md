@@ -572,35 +572,37 @@ Measurements replace the estimates in 4.4 and 4.5 (full tables and commands: `do
 
 | Check (1280x720 synthetic, RTX 5060) | Result | Proposed threshold (4.4) |
 |---|---:|---|
-| Slanted edge, strongest scanline step after / before (20-70 deg) | 0.62-0.70 | <= 0.88 |
+| Slanted edge, strongest scanline step after / before (20-70 deg) | 0.45-0.57 | <= 0.88 |
 | Exactly vertical / horizontal edge, max change | 0 | <= 4/255 |
-| 2 px checker, high-pass energy after / before | 0.891 | 0.85-1.15 |
+| 2 px checker, high-pass energy after / before | 0.919 | 0.85-1.15 |
 | One-pixel lines, mean luma after / before | 1.000 | >= 0.90 |
-| Text strokes, changed pixels / max change | 0 / 0 | <= 2 %, <= 8/255 |
+| Text strokes, mean luma after / before, changed pixels | 1.000, 0.88 % | >= 0.97, <= 5 % |
 | Smooth gradient, max change | 0 | <= 4/255 |
 
 | Cost, isolated pass | 1080p | 1440p |
 |---|---:|---:|
-| RTX 5060 | 0.072 ms | 0.119 ms |
-| RTX A400 | 0.536 ms | 0.816 ms |
-| Radeon 610M iGPU | 2.131 ms | 3.235 ms |
+| RTX 5060 | 0.118 ms | 0.204 ms |
+| RTX A400 | 1.506 ms | 2.317 ms |
+| Radeon 610M iGPU | 3.396 ms | 5.665 ms |
 
 The 4.5 estimates (0.10-0.18 ms at 1080p for one pass) were pessimistic by about 2x on the RTX 5060 and too optimistic
 for the A400 and the iGPU, which the estimates did not cover.
 
-What remains unverified: every quality claim against a real game, any comparison with FXAA / SMAA / CMAA2 / TAA / DLAA,
-and the "already anti-aliased" thresholds. The detector counts hard steps on a 128x128 grid with a long-edge coherence
-test, so text and dense textures no longer read as aliased (0.0 %); what it measures is hard-edge density (0.0-0.1 % on
-a single synthetic edge, 1.0 % on a text-heavy screenshot), which is not the same as "the edges are already resolved".
-Auto-reduce is therefore off by default and its 0.02 % / 0.1 % thresholds are synthetic-only constants. The stroke
-guards were tuned on synthetic text; real glyphs and HUDs may still be softened.
+What remains unverified: an objective quality score against the game's own anti-aliasing, any comparison with FXAA /
+SMAA / CMAA2 / TAA / DLAA, and the "already anti-aliased" thresholds. The detector counts long, slanted, hard steps on a
+128x128 grid, so text and dense textures do not read as aliased; what it measures is hard-edge density (0.0-0.1 % on a
+single synthetic edge, 1.0 % on a text-heavy screenshot), which is not the same as "the edges are already resolved".
+Auto-reduce is therefore off by default and its 0.02 % / 0.1 % thresholds are synthetic-only constants.
 
 ### Real-game check (Helldivers 2, 2026-11-26)
 
-The owner recorded four 120-frame sets (game AA off, TAA, DLAA, MoonSR AA on) in the same ship interior. On the no-AA
-1080p frame the isolated filter changes 10.95 % of pixels by a mean of 0.70/255 and lowers high-pass energy from 52.68
-to 48.85 (0.927); the game's own TAA and DLAA inputs sit much lower (27.3 and 35.5) and change less under the filter
-(mean 0.43 and 0.53). 1:1 crops show cleaner slanted silhouettes without halos and no visible loss of fine detail or
-HUD text, but the effect is mild: this tier is not a substitute for the game's temporal anti-aliasing. Details:
-BENCHMARKS.md "Anti-aliasing on real game frames". Balanced stays the default; Quality (span 1.2, weight 0.62) removes
-more staircase at the cost of thin bright features.
+The owner recorded five 120-frame sets (game AA off, TAA, DLAA, and two with MoonSR AA on) in the same ship interior. The
+first build changed 10.95 % of pixels on a no-AA frame by a mean of 0.70/255 and the owner reported that it had no
+visible effect. Two corrections followed: the edge normal is normalised to unit length (the L1 normalisation shortened
+the side samples to 0.71 texels at 45 degrees, pulling both into the centre pixel), and a thin one-texel ridge is
+blended at half weight instead of being rejected. The same kind of frame now changes 17.02 % of pixels by 0.99/255 and
+loses 8.7 % of its high-pass energy; thin bright highlights widen by about half a pixel, glyph strokes keep their mean
+luma, and the staircase on railings and bezels is visibly gone at 2-3x. The game's own TAA/DLAA frames change less
+(mean 0.61-0.77). It is still a spatial filter, not a temporal anti-aliasing replacement. Details: BENCHMARKS.md
+"Anti-aliasing on real game frames". Balanced (span 1.15, weight 0.55) is the default; Quality (1.25, 0.70) removes more
+staircase at the cost of thin bright features.

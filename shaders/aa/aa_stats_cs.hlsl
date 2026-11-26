@@ -2,10 +2,11 @@
 // One thread per sample; each group reduces to two atomics. The CPU reads the counters a few frames later through a
 // staging buffer (no stall), which drives the "already anti-aliased" reduction and the Home-page status.
 //
-// The test mirrors the gates of aa_spatial_ps.hlsl exactly (same threshold, same axis-alignment fade, same two-sided
-// and along-edge tests, same 1 texel sampling distance), so coverage means "share of sampled pixels the filter would
-// change" rather than just "has contrast". A checker texture, a one-pixel grid, a smooth gradient and text strokes read
-// low; an aliased silhouette reads high. This is a detector, not a quality measure.
+// The test is a stricter subset of the gates in aa_spatial_ps.hlsl: the same threshold and axis-alignment fade, but
+// only hard two-sided steps whose edge continues two and four texels along its own direction. Thin ridges (railings,
+// specular highlights, glyph stems) are deliberately not counted: the filter blends them, but counting them would make
+// text-heavy and high-frequency content read as "heavily aliased" and defeat the "already anti-aliased" reduction.
+// Coverage therefore means "share of sampled pixels that are long, slanted, hard steps", not a quality measure.
 cbuffer AaStatsConstants : register(b0)
 {
     float2 stTexSize;          // full source texture size in texels

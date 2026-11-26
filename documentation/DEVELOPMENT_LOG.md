@@ -4,6 +4,31 @@ Newest entry first. Each entry: what was done, who did it, what was verified and
 
 ---
 
+## 2026-11-26 - Anti-aliasing: make the spatial tier visible
+
+- The owner reported that AA still had no visual effect and supplied `HD2_1080p_MoonSR_AA_2`. The stage was running
+  (output vs input 11.7 % of pixels changed), so the problem was the filter, not the wiring. Two causes: the edge normal
+  was normalised by |gx|+|gy|, which shortened the side samples to 0.71 texels at 45 degrees and pulled both into the
+  centre pixel; and the two-sidedness gate rejected every thin one-texel ridge, which is most of the visible aliasing in
+  a real scene (railings, bezel and specular highlights).
+- Fixed: unit-length edge normal; a thin ridge is now blended at half weight while "Protect text and thin lines" is on
+  (at this scale a glyph stem and a railing have the same shape, so the protection is a weight, not a veto); the
+  along-edge veto became a continuation test (2, 4, 6, 8 texels); presets retuned to 0.95/0.45, 1.15/0.55, 1.25/0.70.
+- Bench: the HUD check now requires the stroke mean to keep 97 %, at most 5 % of stroke pixels to change and no pixel to
+  move by more than 64/255 - a corner pixel is the staircase the filter is meant to resolve. Added `--aa-view` and
+  `--aa-no-protect` to the bench image mode for diagnosis.
+- Synthetic (Balanced): slanted edges 0.45-0.57 of their strongest step (was 0.62-0.70), exact 0/90 unchanged, 2 px
+  checker 0.919, text mean 1.000 with 0.88 % changed, gradient 0. Cost 0.118 / 0.204 ms at 1080p / 1440p (was 0.072 /
+  0.119); A400 1.51 / 2.32 ms, Radeon iGPU 3.40 / 5.67 ms.
+- Real frame from the new recording: 17.02 % of pixels changed, mean 0.99/255, high-pass energy 50.99 -> 46.56 (0.913),
+  0.075 ms. TAA 11.72 % / 0.61 / 0.906, DLAA 14.43 % / 0.77 / 0.907. Crops show the bezel and railing staircase gone and
+  thin highlights about half a pixel wider; HUD text looks unchanged at 2x, small in-scene labels get softer.
+- In-engine check: `moonsr_cli --window ... --aa spatial` on the local test window, 398 frames, active at 0.03 ms, no
+  drops, clean stop. Full build clean under `/W4`.
+- Next: the owner's in-game A/B with the new build, Balanced first, then Quality.
+
+---
+
 ## 2026-11-26 - Anti-aliasing page: drop the diagnostic-view row
 
 - Owner request: the diagnostic view belongs under Home. Removed the "Diagnostic view" card and combo from the

@@ -242,21 +242,23 @@ Still open:
 
 - Experimental. Only the spatial tier is built: choosing Directional or Temporal runs the spatial filter and the status
   reason says so. There is no temporal history, no motion input, no depth and no MSAA sample reconstruction.
-- Real-game material now exists: four 120-frame Helldivers 2 recordings (game AA off, TAA, DLAA, MoonSR AA on) measured
-  in BENCHMARKS.md. It is one game, one room, no ground truth, and the four runs are not the same camera pose, so there
-  is still no objective quality score and no head-to-head against the game's TAA. What the numbers show is scale: the
-  filter changes about 11 % of pixels in a 1080p frame by a mean of 0.7/255 and lowers high-pass energy by 7 % on a
-  no-AA frame - a light spatial filter, not a temporal anti-aliasing replacement.
-- Balanced is the default because Quality visibly softens thin bright features (a 1-2 px specular rim gets dimmer and
-  wider) and slightly softens glyph edges on the HD2 frames. Performance leaves more aliasing. All three presets pass
-  the synthetic checks, but only Balanced and Quality were looked at on real frames.
-- Single-pixel glyph edges in the game's own anti-aliased HUD still change (up to 62/255 at the worst pixel; mean 0.78
-  over the text region). It is not visible at 1:1 in the crops checked, but high-contrast thin text can lose a little
-  contrast.
-- Text/HUD protection is a geometric stroke guard (two-sidedness plus along-edge agreement), not a HUD mask. Thin
-  coloured text on a background of similar luma, glyph stems two or more pixels wide, and UI elements at 45 degrees can
-  still be softened. Turning the protection off removes the stroke guards but keeps the two-sidedness test.
-- Dense high-frequency textures lose about 11 % of their high-pass energy (2 px checker). That is inside the bench
+- Real-game material exists: five 120-frame Helldivers 2 recordings (game AA off, TAA, DLAA, two with MoonSR AA on)
+  measured in BENCHMARKS.md. It is one game, one room, no ground truth, and the runs are not the same camera pose, so
+  there is no objective quality score and no head-to-head against the game's TAA. What the numbers show is scale: the
+  filter changes 17 % of pixels in a 1080p frame by a mean of 1.0/255 and lowers high-pass energy by 8.7 % on a no-AA
+  frame - a spatial filter, not a temporal anti-aliasing replacement.
+- The first real-game build changed only 11 % of pixels by a mean of 0.7/255 and the owner could not see it. The current
+  build blends thin one-texel ridges at half weight (instead of rejecting them) and normalises the edge normal properly;
+  that is what makes it visible. The trade-off is real: thin bright features widen by about half a pixel.
+- Balanced is the default because Quality visibly softens thin bright features more (a 1-2 px specular rim gets dimmer
+  and wider). Performance leaves more aliasing. All three presets pass the synthetic checks but only Balanced and Quality
+  were looked at on real frames.
+- Text/HUD protection is a geometric weight, not a HUD mask: a thin ridge shaped like a glyph stem is blended at half
+  strength while the toggle is on and at full strength when it is off. Glyph stems two or more pixels wide, coloured
+  text on a similar-luma background and UI elements at 45 degrees can still soften. Synthetic text keeps 100.0 % of its
+  stroke mean, with 0.88 % of stroke pixels changing (worst pixel 51/255 at a glyph corner); the game's HUD looked
+  unchanged at 2x, but small white labels inside the 3D scene do get softer.
+- Dense high-frequency textures lose about 8 % of their high-pass energy (2 px checker, 0.919). That is inside the bench
   limit but it is visible softening of the finest detail.
 - The "already anti-aliased" detector counts hard steps on a 128x128 sample grid with a long-edge coherence test. It
   reads 0.0-0.1 % on synthetic slanted edges, 0.0 % on the one-pixel text and 2 px checker scenes, and 1.0 % on a real

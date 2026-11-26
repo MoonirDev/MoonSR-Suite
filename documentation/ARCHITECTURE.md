@@ -202,25 +202,31 @@ the default, so a settings file written by 1.1.x (three stages) still loads and 
 T1 is a single-frame spatial pass, clean-room from the published detect / orient / average / blend method (no
 third-party shader code). Per pixel it reads the 3x3 luma neighbourhood and:
 
-1. rejects flat areas by a relative edge threshold with an absolute floor for dark scenes;
-2. rejects edges within about 5 degrees of vertical or horizontal, which the pixel grid already resolves exactly (this
-   also protects vertical and horizontal text stems);
-3. requires the two samples one texel across the edge to differ strongly and the centre to lie between them, and both
-   along-edge neighbours to stay on the centre's side, which rejects one-pixel strokes, corners and dense checker
-   textures.
+1. rejects flat areas and smooth gradients by a relative edge threshold with an absolute floor for dark scenes;
+2. rejects edges within about 4 degrees of vertical or horizontal, which the pixel grid already resolves exactly (this
+   is also what keeps straight text stems and UI rules crisp);
+3. requires the edge to continue along its own direction (taps at 2, 4, 6 and 8 texels must stay on the centre's
+   side), which rejects isolated dots, stroke tips and noise.
+
+Two shapes pass those gates: a real step (two different sides, centre between them) and a thin one-texel ridge (a
+railing, a specular or bezel highlight, a glyph stem - both sides are the same background). The ridge is blended too,
+because it is aliased like any other edge, at half weight while "Protect text and thin lines" is on. At this scale a
+glyph stem and a railing have the same shape, so the protection is a weight and not a veto; turning it off restores
+full weight.
 
 It then blends the centre towards the average of the two sides by a sub-pixel weight scaled by the strength and the
-quality preset (Performance / Balanced / Quality change the sample distance and the maximum weight). Alpha is written
-as 1.0; letterbox areas outside the game image are copied bit for bit. The pass is skipped entirely when disabled, so
-the off cost is zero.
+quality preset. The sample distance is along the unit edge normal at 0.95 / 1.15 / 1.25 texels and the maximum weight is
+0.45 / 0.55 / 0.70 for Performance / Balanced / Quality. Alpha is written as 1.0; letterbox areas outside the game image
+are copied bit for bit. The pass is skipped entirely when disabled, so the off cost is zero.
 
 Settings live in the `[AntiAliasing]` section (mode, quality, strength, edge threshold, floor, text/HUD protection,
 auto-reduce) and are applied live through `Engine::SetAaSettings`; the AA page is "Anti-aliasing". The diagnostic views
 (edge mask, blend weight, split) are developer tools reached with `moonsr_cli --aa-view`; A/B compare on Home covers the
 split.
 
-Statistics: a compute pass samples a 128x128 grid of the game image, counts pixels that pass the same gates (plus a
-long-edge coherence test), and reads the counters back a few frames later through a staging ring (no stall).
+Statistics: a compute pass samples a 128x128 grid of the game image and counts pixels that are long, slanted, hard steps
+- a stricter subset of the filter gates, so text and dense textures do not read as aliased - and reads the counters back a
+few frames later through a staging ring (no stall).
 `edgeCoverage` is a hard-edge density, not a quality measure; it drives the optional "already anti-aliased" reduction
 (off by default) and the Home status text; `gpuMs` is the median of eight timestamp pairs. See KNOWN_ISSUES.md.
 
