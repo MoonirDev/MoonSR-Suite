@@ -1,4 +1,4 @@
-# Owner: benchmark-specialist. Offline upscaling benchmark harness (quality metrics + GPU timing).
+﻿# Owner: benchmark-specialist. Offline upscaling benchmark harness (quality metrics + GPU timing).
 add_executable(moonsr_bench
     main.cpp
     common.h
@@ -21,5 +21,8 @@ add_executable(moonsr_bench
     relief_bench.h
     aa_bench.cpp
     aa_bench.h
+    aa_suite.cpp
+    aa_suite.h
 )
 target_link_libraries(moonsr_bench PRIVATE moonsr_upscale moonsr_relief moonsr_aa moonsr_framegen moonsr_gpu moonsr_core windowscodecs ole32 gdi32 user32 advapi32)
+

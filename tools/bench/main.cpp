@@ -1,6 +1,7 @@
 // moonsr_bench: offline upscaling benchmark harness. Runs the real shaders through the real ScalePass on a chosen GPU.
 // See documentation/BENCHMARKS.md for methodology and results.
 #include "aa_bench.h"
+#include "aa_suite.h"
 #include "gen.h"
 #include "gpu_runner.h"
 #include "imageops.h"
@@ -39,6 +40,11 @@ struct Options {
     float reliefDetail = -1.0f;
     std::vector<std::string> reliefImages;
     bool aa = false, aaNoTime = false;
+    bool aaSuite = false, aaSweep = false;
+    uint32_t aaW = 1280, aaH = 720;
+    int aaSupersample = 4;
+    std::vector<int> aaQualities;
+    std::vector<float> aaStrengths, aaThresholds, aaFloors;
     int aaQuality = -1;        // history overrides for --aa-image; -1 keeps the defaults
     float aaStrength = -1.0f;
     int aaView = 0;
@@ -112,6 +118,9 @@ Modes (combine freely):
                          contrast, HUD protection, gradient safety, self-checks and GPU time
                          (--aa-image <file> (repeatable; real screenshot)  --aa-no-time  --aa-quality
                          performance|balanced|quality  --aa-strength 0..1  --save-images writes to <out>/aa)
+  --aa-suite             Thorough AA benchmark: supersampled ground truth, gate checks, scene table and an HTML
+                         visual-review pack (--aa-image adds real captures; --out-dir <dir>)
+  --aa-sweep             As --aa-suite, and rank a grid of quality/strength/threshold/floor candidates
 
 Selection:
   --adapter <substr>     adapter name substring (repeatable); default: first hardware adapter
@@ -173,6 +182,14 @@ bool Parse(int argc, char** argv, Options& o, std::string& err) {
         else if (a == "--aa-no-protect") o.aaProtect = false;
         else if (a == "--aa-view") { if (!(v = need(i))) return false; o.aaView = std::strcmp(v, "edges") == 0 ? 1 : std::strcmp(v, "weights") == 0 ? 2 : std::strcmp(v, "split") == 0 ? 3 : 0; }
         else if (a == "--aa-image") { if (!(v = need(i))) return false; o.aaImages.push_back(v); o.aa = true; }
+        else if (a == "--aa-suite") o.aaSuite = true;
+        else if (a == "--aa-sweep") { o.aaSuite = true; o.aaSweep = true; }
+        else if (a == "--aa-size") { if (!(v = need(i))) return false; moonsr::Size s; if (!ParseSize(v, s)) return false; o.aaW = s.width; o.aaH = s.height; }
+        else if (a == "--aa-supersample") { if (!(v = need(i))) return false; o.aaSupersample = std::clamp(atoi(v), 2, 8); }
+        else if (a == "--aa-qualities") { if (!(v = need(i))) return false; for (auto& s2 : Split(v, ',')) o.aaQualities.push_back(atoi(s2.c_str())); }
+        else if (a == "--aa-strengths") { if (!(v = need(i))) return false; for (auto& s2 : Split(v, ',')) o.aaStrengths.push_back(static_cast<float>(atof(s2.c_str()))); }
+        else if (a == "--aa-thresholds") { if (!(v = need(i))) return false; for (auto& s2 : Split(v, ',')) o.aaThresholds.push_back(static_cast<float>(atof(s2.c_str()))); }
+        else if (a == "--aa-floors") { if (!(v = need(i))) return false; for (auto& s2 : Split(v, ',')) o.aaFloors.push_back(static_cast<float>(atof(s2.c_str()))); }
         else if (a == "--relief-image") { if (!(v = need(i))) return false; o.reliefImages.push_back(v); o.relief = true; }
         else if (a == "--relief-detail") { if (!(v = need(i))) return false; o.reliefDetail = static_cast<float>(atof(v)); }
         else if (a == "--relief-strengths") { if (!(v = need(i))) return false; for (auto& t : Split(v, ',')) o.reliefStrengths.push_back(static_cast<float>(atof(t.c_str()))); }
@@ -603,7 +620,7 @@ int main(int argc, char** argv) {
         PrintHelp();
         return 2;
     }
-    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.reliefMotionDepth && !o.aa && !o.listAdapters && o.captureSet.empty())) {
+    if (o.help || (!o.gen && !o.selftest && !o.quality && !o.time && !o.temporal && !o.relief && !o.reliefMotionDepth && !o.aa && !o.aaSuite && !o.listAdapters && o.captureSet.empty())) {
         PrintHelp();
         return o.help ? 0 : 2;
     }
@@ -635,7 +652,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<AdapterInfo> adapters;
-    if (o.selftest || o.quality || o.time || o.temporal || o.relief || o.reliefMotionDepth || o.aa) {
+    if (o.selftest || o.quality || o.time || o.temporal || o.relief || o.reliefMotionDepth || o.aa || o.aaSuite) {
         adapters = PickAdapters(o, err);
         if (adapters.empty()) {
             if (o.selftest && !o.quality && !o.time) printf("warning: %s; GPU self-checks skipped\n", err.c_str());
@@ -679,7 +696,7 @@ int main(int argc, char** argv) {
     }
     if (o.reliefMotionDepth)
         for (const auto& a : adapters) rc |= RunReliefMotionBench(a);
-    if (o.aa && !adapters.empty()) {
+    if (o.aa && !o.aaSuite && !adapters.empty()) {
         AaBenchOptions aa;
         aa.timing = !o.aaNoTime;
         aa.saveImages = o.saveImages;
@@ -690,6 +707,22 @@ int main(int argc, char** argv) {
         aa.protectText = o.aaProtect;
         for (const auto& im : o.aaImages) aa.images.emplace_back(im);
         for (auto& a : adapters) rc |= aa.images.empty() ? RunAaBench(aa, a) : RunAaImage(aa, a);
+    }
+    if (o.aaSuite && !adapters.empty()) {
+        AaSuiteOptions suite;
+        suite.outDir = o.outDir.filename() == "aa_suite" ? o.outDir : o.outDir / "aa_suite";
+        suite.width = o.aaW;
+        suite.height = o.aaH;
+        suite.supersample = o.aaSupersample;
+        suite.sweep = o.aaSweep;
+        suite.timing = true;
+        suite.saveImages = true;
+        if (!o.aaQualities.empty()) suite.qualities = o.aaQualities;
+        if (!o.aaStrengths.empty()) suite.strengths = o.aaStrengths;
+        if (!o.aaThresholds.empty()) suite.thresholds = o.aaThresholds;
+        if (!o.aaFloors.empty()) suite.floors = o.aaFloors;
+        for (const auto& im : o.aaImages) suite.images.emplace_back(im);
+        for (auto& a : adapters) rc |= RunAaSuite(suite, a);
     }
     CoUninitialize();
     return rc;
